@@ -156,6 +156,7 @@ fn global_capabilities_preserve_legacy_ids_and_advertise_canonical_ids() {
     assert!(canonical.iter().any(|value| value == "workspace.export"));
     assert!(canonical.iter().any(|value| value == "workspace.scene"));
     assert!(canonical.iter().any(|value| value == "gta.discover"));
+    assert!(canonical.iter().any(|value| value == "gta.catalog"));
     assert!(canonical.iter().any(|value| value == "fivem.discover"));
     assert_eq!(body["responseEnvelope"]["schema"], "ragelab.cli.response");
     assert!(body["structuredOutput"]
@@ -198,6 +199,11 @@ fn global_capabilities_preserve_legacy_ids_and_advertise_canonical_ids() {
         .unwrap()
         .iter()
         .any(|value| value == "gta.discover"));
+    assert!(body["structuredOutput"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "gta.catalog"));
     assert!(body["structuredOutput"]
         .as_array()
         .unwrap()
@@ -1372,4 +1378,127 @@ fn fivem_discover_is_structured_and_links_citizenfx_ivpath_to_legacy_gta() {
         .is_some_and(|path| path["exists"] == true));
 
     fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn gta_catalog_builds_complete_loose_tree_index_with_structured_status() {
+    let root = temp_root("gta-catalog-loose");
+    let output_path = root.join("out").join("paths.txt");
+    fs::create_dir_all(root.join("stream")).unwrap();
+    fs::write(root.join("stream").join("z_asset.ytd"), []).unwrap();
+    fs::write(root.join("stream").join("a_asset.ydr"), []).unwrap();
+    fs::write(root.join("stream").join("readme.txt"), b"ignored").unwrap();
+
+    let output = binary()
+        .args([
+            "gta",
+            "catalog",
+            root.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("ragelab gta catalog should run");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let body = stdout_json(&output);
+    assert_eq!(body["command"], "gta.catalog");
+    assert_eq!(body["data"]["schema"], "ragelab.gta.catalog");
+    assert_eq!(body["data"]["schemaVersion"], 1);
+    assert_eq!(body["data"]["sourceKind"], "filesystemTree");
+    assert_eq!(body["data"]["coverage"], "filesystemTreeComplete");
+    assert_eq!(body["data"]["complete"], true);
+    assert_eq!(body["data"]["pathEntries"], 2);
+    assert_eq!(body["data"]["uniqueCatalogEntries"], 2);
+    assert_eq!(body["data"]["archiveBoundary"]["rpfArchivesFound"], 0);
+    assert_eq!(
+        fs::read_to_string(&output_path).unwrap(),
+        "stream/a_asset.ydr\nstream/z_asset.ytd\n"
+    );
+
+    let second = binary()
+        .args([
+            "gta",
+            "catalog",
+            root.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("second ragelab gta catalog should run");
+    assert_eq!(second.status.code(), Some(1));
+    let second_body = stdout_json(&second);
+    assert_eq!(second_body["command"], "gta.catalog");
+    assert_eq!(second_body["error"]["code"], "operation_failed");
+
+    let overwrite = binary()
+        .args([
+            "gta",
+            "catalog",
+            root.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+            "--overwrite",
+            "--json",
+        ])
+        .output()
+        .expect("ragelab gta catalog overwrite should run");
+    assert!(overwrite.status.success());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn gta_catalog_reports_raw_rpf_boundary_for_valid_legacy_installation() {
+    let root = temp_root("gta-catalog-legacy");
+    let output_path = root.join("catalog.txt");
+    fs::create_dir_all(root.join("update")).unwrap();
+    for relative in [
+        "GTA5.exe",
+        "PlayGTAV.exe",
+        "common.rpf",
+        "x64a.rpf",
+        "update/update.rpf",
+    ] {
+        fs::write(root.join(relative), []).unwrap();
+    }
+    fs::create_dir_all(root.join("mods")).unwrap();
+    fs::write(root.join("mods").join("loose_prop.ydr"), []).unwrap();
+
+    let output = binary()
+        .args([
+            "gta",
+            "catalog",
+            root.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("ragelab gta catalog should run");
+
+    assert!(output.status.success());
+    let body = stdout_json(&output);
+    assert_eq!(body["data"]["sourceKind"], "gtaLegacyInstallation");
+    assert_eq!(body["data"]["coverage"], "partialRpfBoundary");
+    assert_eq!(body["data"]["complete"], false);
+    assert_eq!(body["data"]["archiveBoundary"]["rpfArchivesFound"], 3);
+    assert_eq!(
+        body["data"]["archiveBoundary"]["enumerationSupported"],
+        false
+    );
+    assert!(body["data"]["archiveBoundary"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("does not enumerate raw/encrypted RPF"));
+    assert_eq!(body["data"]["pathEntries"], 1);
+    assert_eq!(
+        fs::read_to_string(&output_path).unwrap(),
+        "mods/loose_prop.ydr\n"
+    );
+
+    fs::remove_dir_all(root).unwrap();
 }

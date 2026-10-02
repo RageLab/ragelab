@@ -7,11 +7,11 @@ use std::{
 
 use ragelab_assets::{AssetKind, WorkspaceIndex};
 use ragelab_engine::{
-    apply_operation_document, assemble_ymap_scene, discover_fivem_legacy, discover_gta_v_legacy,
-    isolated_asset_spatial_context, parse_operation_document, plan_operation_document,
-    ymap_spatial_context, EngineError, OperationError, SceneAssemblyOptions, SceneAssetSelector,
-    SceneCollisionState, SceneManifest, SceneResolutionReasonCode, SceneResolutionState,
-    SpatialContext, SpatialProvenance,
+    apply_operation_document, assemble_ymap_scene, build_vanilla_catalog, discover_fivem_legacy,
+    discover_gta_v_legacy, isolated_asset_spatial_context, parse_operation_document,
+    plan_operation_document, render_vanilla_catalog_paths, ymap_spatial_context, EngineError,
+    OperationError, SceneAssemblyOptions, SceneAssetSelector, SceneCollisionState, SceneManifest,
+    SceneResolutionReasonCode, SceneResolutionState, SpatialContext, SpatialProvenance,
 };
 use ragelab_resource::{Rsc7Probe, Rsc7Resource};
 use ragelab_ybn::{CollisionShape, YbnCollision};
@@ -41,6 +41,7 @@ pub fn is_structured_command(command: &str) -> bool {
             | "preflight"
             | "export"
             | "gta.discover"
+            | "gta.catalog"
             | "fivem.discover"
     )
 }
@@ -1410,6 +1411,111 @@ pub fn fivem_discover(json_output: bool) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+pub fn gta_catalog(
+    root: &Path,
+    output: &Path,
+    overwrite: bool,
+    json_output: bool,
+) -> Result<(), Box<dyn Error>> {
+    let build = build_vanilla_catalog(root)?;
+    let body = render_vanilla_catalog_paths(&build.paths);
+
+    if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+
+    if overwrite {
+        fs::write(output, body.as_bytes())?;
+    } else {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(output)?;
+        file.write_all(body.as_bytes())?;
+        file.flush()?;
+    }
+
+    if json_output {
+        let mut data = serde_json::to_value(&build.report)?;
+        if let Some(object) = data.as_object_mut() {
+            object.insert("output".into(), Value::String(output.display().to_string()));
+            object.insert(
+                "outputBytes".into(),
+                Value::from(u64::try_from(body.len()).unwrap_or(u64::MAX)),
+            );
+        }
+        print_success("gta.catalog", data)?;
+    } else {
+        println!("root: {}", build.report.root.display());
+        println!("source-kind: {}", build.report.source_kind.as_str());
+        println!("coverage: {}", build.report.coverage.as_str());
+        println!(
+            "complete: {}",
+            if build.report.complete { "yes" } else { "no" }
+        );
+        println!("scanned-files: {}", build.report.scanned_files);
+        println!(
+            "supported-loose-files: {}",
+            build.report.supported_loose_files
+        );
+        println!("path-entries: {}", build.report.path_entries);
+        println!(
+            "unique-catalog-entries: {}",
+            build.report.unique_catalog_entries
+        );
+        println!(
+            "rpf-archives: {}",
+            build.report.archive_boundary.rpf_archives_found
+        );
+        println!("output: {}", output.display());
+    }
+
+    Ok(())
+}
+
+pub fn parse_gta_catalog_args(
+    args: impl Iterator<Item = String>,
+    usage: &str,
+) -> Result<(PathBuf, PathBuf, bool, bool), io::Error> {
+    let mut args = args;
+    let root = args
+        .next()
+        .filter(|value| !value.starts_with('-'))
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+
+    let mut output = None;
+    let mut overwrite = false;
+    let mut json_output = false;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--output" if output.is_none() => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+                if value.starts_with('-') {
+                    return Err(io::Error::new(io::ErrorKind::InvalidInput, usage));
+                }
+                output = Some(PathBuf::from(value));
+            }
+            "--overwrite" if !overwrite => overwrite = true,
+            "--json" if !json_output => json_output = true,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{usage}; unknown option: {arg}"),
+                ))
+            }
+        }
+    }
+
+    let output = output.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+
+    Ok((root, output, overwrite, json_output))
+}
+
 pub fn parse_path_json_args(
     args: impl Iterator<Item = String>,
     usage: &str,
@@ -1502,6 +1608,7 @@ pub fn normalize_command_args(args: Vec<String>) -> Vec<String> {
         ("workspace", "export") => Some("export"),
         ("workspace", "scene") => Some("scene"),
         ("gta", "discover") => Some("gta.discover"),
+        ("gta", "catalog") => Some("gta.catalog"),
         ("gta", "vanilla-index") => Some("vanilla-index"),
         ("fivem", "discover") => Some("fivem.discover"),
         _ => None,

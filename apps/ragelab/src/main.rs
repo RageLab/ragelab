@@ -8,11 +8,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ragelab_assets::{AssetKind, WorkspaceIndex};
+use ragelab_assets::WorkspaceIndex;
 use ragelab_engine::{
-    export_map_resource, export_maps_resource, parse_durtyfree_object_list,
-    parse_vanilla_file_catalog, preflight_maps_combined, summarize_mlo_audit, CatalogRefs,
-    DurtyFreeCatalog, SharedExportOptions, VanillaFileCatalog,
+    build_vanilla_catalog, export_map_resource, export_maps_resource, parse_durtyfree_object_list,
+    parse_vanilla_file_catalog, preflight_maps_combined, render_vanilla_catalog_paths,
+    summarize_mlo_audit, CatalogRefs, DurtyFreeCatalog, SharedExportOptions, VanillaFileCatalog,
 };
 use ragelab_hash::{jenkins, joaat};
 use ragelab_meta::MetaDocument;
@@ -422,6 +422,12 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn Error>> {
             let json = parse_json_flag(args, USAGE)?;
             agent::fivem_discover(json)?;
         }
+        "gta.catalog" => {
+            const USAGE: &str =
+                "usage: ragelab gta catalog <directory> --output <paths.txt> [--overwrite] [--json]";
+            let (root, output, overwrite, json) = agent::parse_gta_catalog_args(args, USAGE)?;
+            agent::gta_catalog(&root, &output, overwrite, json)?;
+        }
         "vanilla-index" => {
             const USAGE: &str =
                 "usage: ragelab vanilla-index <extracted-gta-directory> <output.txt>";
@@ -532,6 +538,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "workspace.export",
         "workspace.scene",
         "gta.discover",
+        "gta.catalog",
         "gta.vanilla-index",
         "fivem.discover",
     ];
@@ -628,6 +635,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "workspace.export",
         "workspace.scene",
         "gta.discover",
+        "gta.catalog",
         "gta.vanilla-index",
         "fivem.discover",
     ];
@@ -642,7 +650,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
                 "version": env!("CARGO_PKG_VERSION"),
                 "commands": DISCOVERY_COMMANDS,
                 "canonicalCommands": CANONICAL_COMMANDS,
-                "structuredOutput": ["version", "capabilities", "inspect", "validate", "spatial", "preview", "plan", "apply", "workspace.preflight", "workspace.export", "workspace.scene", "gta.discover", "fivem.discover"],
+                "structuredOutput": ["version", "capabilities", "inspect", "validate", "spatial", "preview", "plan", "apply", "workspace.preflight", "workspace.export", "workspace.scene", "gta.discover", "gta.catalog", "fivem.discover"],
                 "legacyAliases": LEGACY_ALIASES,
                 "responseEnvelope": {
                     "schema": agent::RESPONSE_SCHEMA,
@@ -702,6 +710,7 @@ ragelab workspace export <directory> <file.ymap> [more.ymap ...] --output <direc
 ragelab workspace scene <directory> <file.ymap> [--max-nodes <n>] [--json]\n  \
 ragelab gta discover [--json]\n  \
 ragelab fivem discover [--json]\n  \
+ragelab gta catalog <directory> --output <paths.txt> [--overwrite] [--json]\n  \
 ragelab gta vanilla-index <extracted-gta-directory> <output.txt>\n\n\
 Utility commands:\n  \
 ragelab hash <asset-name>\n  \
@@ -2645,35 +2654,25 @@ fn scan(root: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 fn vanilla_index(root: &Path, output: &Path) -> Result<(), Box<dyn Error>> {
-    if !root.is_dir() {
-        return Err(invalid_input(format!("not a directory: {}", root.display())).into());
-    }
-    let mut paths = Vec::<String>::new();
-    walk(root, &mut |path| {
-        let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
-            return;
-        };
-        if AssetKind::from_extension(extension).is_none() {
-            return;
-        }
-        let relative = path
-            .strip_prefix(root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        paths.push(relative);
-    })?;
-    paths.sort();
-    paths.dedup();
+    let build = build_vanilla_catalog(root)?;
+    let body = render_vanilla_catalog_paths(&build.paths);
+
     if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
-    let body = paths.join("\n") + if paths.is_empty() { "" } else { "\n" };
-    let catalog = parse_vanilla_file_catalog(&body);
     fs::write(output, &body)?;
-    println!("root: {}", root.display());
-    println!("vanilla-file-paths: {}", paths.len());
-    println!("vanilla-file-entries: {}", catalog.len());
+
+    println!("root: {}", build.report.root.display());
+    println!("vanilla-file-paths: {}", build.report.path_entries);
+    println!(
+        "vanilla-file-entries: {}",
+        build.report.unique_catalog_entries
+    );
+    println!("coverage: {}", build.report.coverage.as_str());
+    println!(
+        "rpf-archives: {}",
+        build.report.archive_boundary.rpf_archives_found
+    );
     println!("output: {}", output.display());
     Ok(())
 }

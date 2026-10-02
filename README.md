@@ -63,6 +63,7 @@ ragelab workspace export ./stream map.ymap --output ./build/my-resource --json
 ragelab workspace scene ./stream map.ymap --json
 ragelab gta discover --json
 ragelab fivem discover --json
+ragelab gta catalog /path/to/assets --output ./build/gta-paths.txt --json
 ```
 
 Global discovery:
@@ -75,7 +76,7 @@ ragelab capabilities --json
 
 Legacy flat command names remain available as compatibility aliases during the 0.x series. New integrations should use the canonical namespace form.
 
-Structured commands return versioned JSON and deterministic process exit codes. The contract is documented in [docs/CLI_CONTRACT.md](docs/CLI_CONTRACT.md), native game discovery in [docs/DISCOVERY.md](docs/DISCOVERY.md), headless preview behavior in [docs/PREVIEW.md](docs/PREVIEW.md), workspace export behavior in [docs/EXPORT.md](docs/EXPORT.md), and current format/adapter coverage in [docs/CAPABILITIES.md](docs/CAPABILITIES.md).
+Structured commands return versioned JSON and deterministic process exit codes. The contract is documented in [docs/CLI_CONTRACT.md](docs/CLI_CONTRACT.md), native game discovery in [docs/DISCOVERY.md](docs/DISCOVERY.md), GTA catalog coverage in [docs/CATALOG.md](docs/CATALOG.md), headless preview behavior in [docs/PREVIEW.md](docs/PREVIEW.md), workspace export behavior in [docs/EXPORT.md](docs/EXPORT.md), and current format/adapter coverage in [docs/CAPABILITIES.md](docs/CAPABILITIES.md).
 
 ## Repository layout
 

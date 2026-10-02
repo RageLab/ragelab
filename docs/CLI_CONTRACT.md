@@ -33,7 +33,7 @@ Errors use the same schema:
 
 Consumers must key compatibility decisions on `schema` and `schemaVersion`, not on human-readable output.
 
-The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `spatial <file> --json`, `preview <file> --json`, `plan <operation.json> --json`, `apply <operation.json> --json`, `workspace preflight ... --json`, `workspace export ... --json`, `workspace scene ... --json`, `gta discover --json`, and `fivem discover --json` use the common response envelope.
+The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `spatial <file> --json`, `preview <file> --json`, `plan <operation.json> --json`, `apply <operation.json> --json`, `workspace preflight ... --json`, `workspace export ... --json`, `workspace scene ... --json`, `gta discover --json`, `gta catalog ... --json`, and `fivem discover --json` use the common response envelope.
 
 ## Agent-first surface
 
@@ -108,6 +108,14 @@ ragelab fivem discover --json
 ```
 
 It returns the versioned `ragelab.fivem.discovery` payload, including installation/storage evidence and the GTA relationship derived from `FiveM.app/CitizenFX.ini` `IVPath`. The relationship is accepted as Legacy only when the referenced GTA path passes the same Legacy validator used by `gta discover`. See [DISCOVERY.md](DISCOVERY.md).
+
+Native filesystem catalog construction is available through:
+
+```bash
+ragelab gta catalog <directory> --output <paths.txt> --json
+```
+
+The `ragelab.gta.catalog` report distinguishes complete loose-filesystem enumeration from the explicit `partialRpfBoundary` state. Raw/encrypted RPF contents are not silently treated as enumerated. See [CATALOG.md](CATALOG.md).
 
 Global `capabilities --json` exposes:
 

@@ -463,7 +463,7 @@ fn candidate_key(root: &Path) -> String {
     }
 }
 
-fn clean_display_path(path: PathBuf) -> PathBuf {
+pub(crate) fn clean_display_path(path: PathBuf) -> PathBuf {
     #[cfg(windows)]
     {
         let text = path.to_string_lossy();

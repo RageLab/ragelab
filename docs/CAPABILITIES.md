@@ -30,7 +30,7 @@ Writer eligibility remains fail-closed. A listed operation is not permission to 
 | Workspace | scan, providers, dependency closure, combined preflight, MLO audit, scene assembly | single and combined FiveM resource export | `workspace preflight --json`, `workspace export --json`, `workspace scene --json` | Available for current preflight/export scope |
 | GTA installation | native Windows Legacy discovery and explicit-path validation | none | `gta discover --json` | Available for Legacy discovery |
 | FiveM environment | default/explicit installation discovery, storage evidence, `CitizenFX.ini` metadata, validated GTA Legacy relationship | none | `fivem discover --json` | Available for current Legacy environment scope |
-| GTA catalog | extracted-file/listing catalog indexing; raw RPF enumeration not yet implemented | catalog output | `gta vanilla-index` | Partial |
+| GTA catalog | engine-owned loose-filesystem enumeration with Legacy-install provenance and explicit RPF boundary reporting | deterministic path catalog output | `gta catalog --json`; `gta vanilla-index` compatibility | Available for loose filesystem trees; partial on raw RPF installations |
 
 ## Canonical agent workflow
 
@@ -46,11 +46,11 @@ inspect
 
 Not every writer has been moved to the declarative operation document yet. Legacy CLI commands remain available during the 0.x series while structured equivalents are added.
 
-## High-priority parity gaps
+## Known Legacy catalog boundary
 
-The following capabilities already exist in RageLab or existed in the former HTTP adapter and are candidates for the next agent-facing work:
+Native catalog construction now works for directly visible filesystem assets and reports GTA Legacy installation provenance when available. A raw GTA installation remains `partialRpfBoundary` because RageLab does not yet enumerate/decrypt the contents of the RPF archive set.
 
-1. Native vanilla catalog construction directly from discovered GTA data; raw/encrypted RPF enumeration is the current boundary.
+This limitation is explicit in the structured catalog report and is not hidden behind discovery or dependency classification.
 
 Managed browser uploads, HTTP process state, and web-only transport behavior are not CLI parity targets.
 
