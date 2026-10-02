@@ -146,6 +146,7 @@ impl CandidateSeed {
     }
 }
 
+#[cfg(any(windows, test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SteamManifest {
     app_id: u32,
@@ -340,6 +341,7 @@ fn clean_display_path(path: PathBuf) -> PathBuf {
     path
 }
 
+#[cfg(any(windows, test))]
 fn parse_vdf_field(input: &str, key: &str) -> Option<String> {
     input.lines().find_map(|line| {
         let mut quoted = line.split('"').skip(1);
@@ -354,6 +356,7 @@ fn parse_vdf_field(input: &str, key: &str) -> Option<String> {
     })
 }
 
+#[cfg(any(windows, test))]
 fn parse_steam_manifest(input: &str) -> Option<SteamManifest> {
     let app_id = parse_vdf_field(input, "appid")?.parse::<u32>().ok()?;
     let install_dir = parse_vdf_field(input, "installdir")?;
@@ -369,6 +372,7 @@ fn parse_steam_manifest(input: &str) -> Option<SteamManifest> {
     })
 }
 
+#[cfg(any(windows, test))]
 fn steam_library_paths(input: &str) -> Vec<PathBuf> {
     let mut libraries = Vec::new();
     for line in input.lines() {
