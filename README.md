@@ -42,6 +42,7 @@ The primary automation flow is:
 ```bash
 ragelab inspect asset.ydr --json
 ragelab capabilities asset.ydr --json
+ragelab spatial asset.ydr --json
 ragelab plan operation.json --json
 ragelab apply operation.json --json
 ragelab validate output.ydr --json
@@ -56,6 +57,7 @@ ragelab ydr info asset.ydr
 ragelab ymap info map.ymap
 ragelab ytd info textures.ytd
 ragelab workspace deps ./stream map.ymap
+ragelab workspace scene ./stream map.ymap --json
 ```
 
 Global discovery:
@@ -68,7 +70,7 @@ ragelab capabilities --json
 
 Legacy flat command names remain available as compatibility aliases during the 0.x series. New integrations should use the canonical namespace form.
 
-Structured commands return versioned JSON and deterministic process exit codes. The contract is documented in [docs/CLI_CONTRACT.md](docs/CLI_CONTRACT.md).
+Structured commands return versioned JSON and deterministic process exit codes. The contract is documented in [docs/CLI_CONTRACT.md](docs/CLI_CONTRACT.md). Current format and adapter coverage is tracked in [docs/CAPABILITIES.md](docs/CAPABILITIES.md).
 
 ## Repository layout
 

@@ -33,7 +33,7 @@ Errors use the same schema:
 
 Consumers must key compatibility decisions on `schema` and `schemaVersion`, not on human-readable output.
 
-The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `plan <operation.json> --json`, and `apply <operation.json> --json` use the common response envelope.
+The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `spatial <file> --json`, `plan <operation.json> --json`, `apply <operation.json> --json`, and `workspace scene ... --json` use the common response envelope.
 
 ## Agent-first surface
 
@@ -78,6 +78,7 @@ ragelab ydr info prop.ydr
 ragelab ydr translate source.ydr 1 0 0 output.ydr
 ragelab ytd extract-dds textures.ytd 0 texture.dds
 ragelab workspace deps ./stream map.ymap
+ragelab workspace scene ./stream map.ymap --json
 ```
 
 Legacy flat command names from the initial RageLab extraction remain compatibility aliases during the 0.x series. New integrations should use the canonical namespace form.
@@ -110,9 +111,14 @@ Each operation reports:
 - `id`;
 - `writesAsset`;
 - `structuredOutput`;
-- `requiresWorkspace`.
+- `requiresWorkspace`;
+- `availability`;
+- `reason`;
+- `requiresParameters`.
 
-A capability entry reports availability in the current binary. It does not override format-specific write eligibility. Write operations still fail closed when the asset layout is unsupported.
+`availability` is one of `available`, `parameterized`, `contextRequired`, or `unavailable`. The value is derived from the current asset when RageLab has enough evidence to decide. Parameterized and workspace operations defer final eligibility until the required selection or context is supplied.
+
+Capability discovery never overrides format-specific write eligibility. Write operations still fail closed when the selected layout, binding, polygon, replacement, or provenance is unsupported.
 
 ## Plan and apply
 
@@ -147,6 +153,27 @@ ragelab validate textures.ytd --json
 ```
 
 A successful response contains `valid: true` and the checks that ran. Validation failures return a non-zero exit status and a structured error when `--json` is requested.
+
+## Spatial context
+
+`spatial` reports only placement that is supported by format evidence.
+
+```bash
+ragelab spatial map.ymap --json
+ragelab spatial prop.ydr --json
+```
+
+YMAP may produce world-space bounds or centers. Isolated YDR, YDD, and YBN assets remain `localOnly`; YTD is `nonSpatial`. RageLab does not promote local bounds or filename relationships into world coordinates.
+
+## Workspace scene
+
+`workspace scene` assembles normalized YMAP instance/reference metadata from a workspace index.
+
+```bash
+ragelab workspace scene ./stream map.ymap --max-nodes 10000 --json
+```
+
+The scene contract reports resolved and unresolved nodes, referenced assets, proven entity transforms, local-only collision relationships, warnings, and explicit truncation limits. It does not embed model geometry.
 
 ## Exit codes
 

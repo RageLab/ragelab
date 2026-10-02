@@ -149,6 +149,8 @@ fn global_capabilities_preserve_legacy_ids_and_advertise_canonical_ids() {
     assert!(commands.iter().any(|value| value == "ydr-info"));
     assert!(commands.iter().any(|value| value == "ydr.info"));
     assert!(canonical.iter().any(|value| value == "ydr.info"));
+    assert!(canonical.iter().any(|value| value == "spatial"));
+    assert!(canonical.iter().any(|value| value == "workspace.scene"));
     assert_eq!(body["responseEnvelope"]["schema"], "ragelab.cli.response");
     assert!(body["structuredOutput"]
         .as_array()
@@ -160,6 +162,16 @@ fn global_capabilities_preserve_legacy_ids_and_advertise_canonical_ids() {
         .unwrap()
         .iter()
         .any(|value| value == "apply"));
+    assert!(body["structuredOutput"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "spatial"));
+    assert!(body["structuredOutput"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "workspace.scene"));
 }
 
 #[test]
@@ -237,10 +249,16 @@ fn ybn_capabilities_and_declarative_polygon_edit_are_agent_accessible() {
     assert!(capabilities_output.status.success());
     let capabilities = stdout_json(&capabilities_output);
     let operations = capabilities["data"]["operations"].as_array().unwrap();
-    assert!(operations
+    let polygon_edit = operations
         .iter()
-        .any(|operation| operation["id"] == "ybn.edit-polygon"));
-    assert!(operations.iter().any(|operation| operation["id"] == "plan"));
+        .find(|operation| operation["id"] == "ybn.edit-polygon")
+        .unwrap();
+    assert_eq!(polygon_edit["availability"], "parameterized");
+    let plan_capability = operations
+        .iter()
+        .find(|operation| operation["id"] == "plan")
+        .unwrap();
+    assert_eq!(plan_capability["availability"], "available");
     assert!(operations
         .iter()
         .any(|operation| operation["id"] == "apply"));
@@ -290,4 +308,130 @@ fn ybn_capabilities_and_declarative_polygon_edit_are_agent_accessible() {
     assert_eq!(stdout_json(&validate_output)["data"]["valid"], true);
 
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn spatial_json_preserves_fail_closed_world_semantics() {
+    let ymap_output = binary()
+        .args([
+            "spatial",
+            fixture("simple.ymap").to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("ragelab spatial should run");
+    assert!(ymap_output.status.success());
+    let ymap = stdout_json(&ymap_output);
+    assert_eq!(ymap["command"], "spatial");
+    assert_eq!(ymap["data"]["type"], "YMAP");
+    assert_eq!(ymap["data"]["context"]["classification"], "worldSpatial");
+
+    let ydr_output = binary()
+        .args([
+            "spatial",
+            fixture("ydr/simple.ydr").to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("ragelab spatial should run");
+    assert!(ydr_output.status.success());
+    let ydr = stdout_json(&ydr_output);
+    assert_eq!(ydr["data"]["type"], "YDR");
+    assert_eq!(ydr["data"]["context"]["classification"], "localOnly");
+    assert_eq!(
+        ydr["data"]["context"]["reason"]["code"],
+        "localCoordinatesOnly"
+    );
+    assert!(ydr["data"]["context"]["worldTransform"].is_null());
+}
+
+#[test]
+fn workspace_scene_json_exposes_resolved_assets_and_local_collision() {
+    let output = binary()
+        .args([
+            "workspace",
+            "scene",
+            fixture("stream").to_str().unwrap(),
+            "simple.ymap",
+            "--max-nodes",
+            "100",
+            "--json",
+        ])
+        .output()
+        .expect("ragelab workspace scene should run");
+
+    assert!(output.status.success());
+    let body = stdout_json(&output);
+    assert_eq!(body["command"], "scene");
+    assert_eq!(body["data"]["summary"]["totalEntities"], 1);
+    assert_eq!(body["data"]["summary"]["resolvedNodes"], 1);
+    assert_eq!(body["data"]["nodes"][0]["assetKind"], "YDR");
+    assert_eq!(body["data"]["nodes"][0]["collision"]["state"], "localOnly");
+    assert_eq!(body["data"]["limits"]["truncated"], false);
+}
+
+#[test]
+fn namespaced_structured_errors_use_canonical_command_id() {
+    let output = binary()
+        .args([
+            "workspace",
+            "scene",
+            fixture("stream").to_str().unwrap(),
+            "simple.ymap",
+            "--max-nodes",
+            "0",
+            "--json",
+        ])
+        .output()
+        .expect("ragelab workspace scene should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stderr.is_empty());
+    let body = stdout_json(&output);
+    assert_eq!(body["command"], "scene");
+    assert_eq!(body["error"]["code"], "invalid_input");
+}
+
+#[test]
+fn ydr_capabilities_use_writer_evidence_for_translation() {
+    let output = binary()
+        .args([
+            "capabilities",
+            fixture("ydr/simple.ydr").to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("ragelab capabilities should run");
+
+    assert!(output.status.success());
+    let body = stdout_json(&output);
+    let operations = body["data"]["operations"].as_array().unwrap();
+    let translate = operations
+        .iter()
+        .find(|operation| operation["id"] == "ydr.translate")
+        .unwrap();
+    assert_eq!(translate["availability"], "available");
+    assert_eq!(translate["requiresParameters"][0], "delta");
+}
+
+#[test]
+fn ymap_capabilities_mark_workspace_scene_as_context_required() {
+    let output = binary()
+        .args([
+            "capabilities",
+            fixture("simple.ymap").to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("ragelab capabilities should run");
+
+    assert!(output.status.success());
+    let body = stdout_json(&output);
+    let operations = body["data"]["operations"].as_array().unwrap();
+    let scene = operations
+        .iter()
+        .find(|operation| operation["id"] == "workspace.scene")
+        .unwrap();
+    assert_eq!(scene["availability"], "contextRequired");
+    assert_eq!(scene["requiresWorkspace"], true);
 }

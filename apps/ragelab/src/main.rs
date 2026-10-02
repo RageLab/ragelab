@@ -28,9 +28,13 @@ use serde_json::json;
 
 fn main() {
     let args = env::args().skip(1).collect::<Vec<_>>();
-    let command = args.first().cloned().unwrap_or_else(|| "help".to_string());
-    let structured_error =
-        args.iter().any(|arg| arg == "--json") && agent::is_structured_command(&command);
+    let normalized_for_error = agent::normalize_command_args(args.clone());
+    let command = normalized_for_error
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "help".to_string());
+    let structured_error = normalized_for_error.iter().any(|arg| arg == "--json")
+        && agent::is_structured_command(&command);
 
     if let Err(error) = run(args) {
         let (exit_code, _) = agent::classify_exit(error.as_ref());
@@ -74,6 +78,17 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn Error>> {
             let (path, json) =
                 agent::parse_path_json_args(args, "usage: ragelab validate <file> [--json]")?;
             agent::validate(&path, json)?;
+        }
+        "spatial" => {
+            let (path, json) =
+                agent::parse_path_json_args(args, "usage: ragelab spatial <file> [--json]")?;
+            agent::spatial(&path, json)?;
+        }
+        "scene" => {
+            const USAGE: &str =
+                "usage: ragelab workspace scene <directory> <file.ymap> [--max-nodes <n>] [--json]";
+            let (workspace, ymap, options, json) = agent::parse_scene_args(args, USAGE)?;
+            agent::scene(&workspace, &ymap, options, json)?;
         }
         "plan" => {
             let (path, json) =
@@ -462,6 +477,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "capabilities",
         "inspect",
         "validate",
+        "spatial",
         "plan",
         "apply",
         "hash",
@@ -491,6 +507,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "workspace.preflight",
         "workspace.mlo-audit",
         "workspace.extract",
+        "workspace.scene",
         "gta.vanilla-index",
     ];
     const LEGACY_ALIASES: &[&str] = &[
@@ -526,6 +543,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "capabilities",
         "inspect",
         "validate",
+        "spatial",
         "plan",
         "apply",
         "hash",
@@ -581,6 +599,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "workspace.preflight",
         "workspace.mlo-audit",
         "workspace.extract",
+        "workspace.scene",
         "gta.vanilla-index",
     ];
 
@@ -594,7 +613,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
                 "version": env!("CARGO_PKG_VERSION"),
                 "commands": DISCOVERY_COMMANDS,
                 "canonicalCommands": CANONICAL_COMMANDS,
-                "structuredOutput": ["version", "capabilities", "inspect", "validate", "plan", "apply"],
+                "structuredOutput": ["version", "capabilities", "inspect", "validate", "spatial", "plan", "apply", "workspace.scene"],
                 "legacyAliases": LEGACY_ALIASES,
                 "responseEnvelope": {
                     "schema": agent::RESPONSE_SCHEMA,
@@ -619,6 +638,7 @@ Agent-first commands:\n  \
 ragelab inspect <file> [--json]\n  \
 ragelab capabilities [file] [--json]\n  \
 ragelab validate <file> [--json]\n  \
+ragelab spatial <file> [--json]\n  \
 ragelab plan <operation.json> [--json]\n  \
 ragelab apply <operation.json> [--json]\n  \
 ragelab version [--json]\n\n\
@@ -648,6 +668,7 @@ ragelab workspace providers <directory> <file.ymap>\n  \
 ragelab workspace preflight <directory> <file.ymap> [more.ymap ...] [catalog options]\n  \
 ragelab workspace mlo-audit <directory> <file.ymap> [catalog options]\n  \
 ragelab workspace extract <directory> <file.ymap> <output> [--allow-unresolved] [--overwrite]\n  \
+ragelab workspace scene <directory> <file.ymap> [--max-nodes <n>] [--json]\n  \
 ragelab gta vanilla-index <extracted-gta-directory> <output.txt>\n\n\
 Utility commands:\n  \
 ragelab hash <asset-name>\n  \

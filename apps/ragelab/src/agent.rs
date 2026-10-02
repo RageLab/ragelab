@@ -5,13 +5,17 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ragelab_assets::{AssetKind, WorkspaceIndex};
 use ragelab_engine::{
-    apply_operation_document, parse_operation_document, plan_operation_document, OperationError,
+    apply_operation_document, assemble_ymap_scene, isolated_asset_spatial_context,
+    parse_operation_document, plan_operation_document, ymap_spatial_context, OperationError,
+    SceneAssemblyOptions, SceneAssetSelector, SceneCollisionState, SceneManifest,
+    SceneResolutionReasonCode, SceneResolutionState, SpatialContext, SpatialProvenance,
 };
 use ragelab_resource::{Rsc7Probe, Rsc7Resource};
 use ragelab_ybn::YbnCollision;
 use ragelab_ydd::YddDictionary;
-use ragelab_ydr::YdrDocument;
+use ragelab_ydr::{YdrDocument, YdrEditSession};
 use ragelab_ymap::Ymap;
 use ragelab_ymf::Ymf;
 use ragelab_ytd::Ytd;
@@ -24,7 +28,14 @@ pub const RESPONSE_SCHEMA_VERSION: u64 = 1;
 pub fn is_structured_command(command: &str) -> bool {
     matches!(
         command,
-        "version" | "capabilities" | "inspect" | "validate" | "plan" | "apply"
+        "version"
+            | "capabilities"
+            | "inspect"
+            | "validate"
+            | "plan"
+            | "apply"
+            | "spatial"
+            | "scene"
     )
 }
 
@@ -265,7 +276,8 @@ pub fn capabilities(path: &Path, json_output: bool) -> Result<(), Box<dyn Error>
     }
 
     let asset_type = asset_type(path);
-    let operations = operations_for(asset_type);
+    let bytes = fs::read(path)?;
+    let operations = operations_for(asset_type, &bytes)?;
 
     if json_output {
         print_success(
@@ -299,6 +311,358 @@ pub fn capabilities(path: &Path, json_output: bool) -> Result<(), Box<dyn Error>
     }
 
     Ok(())
+}
+
+pub fn spatial(path: &Path, json_output: bool) -> Result<(), Box<dyn Error>> {
+    let bytes = fs::read(path)?;
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    let kind = AssetKind::from_extension(extension).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("spatial context is unavailable for {}", path.display()),
+        )
+    })?;
+
+    let context = match kind {
+        AssetKind::Ymap => {
+            let ymap = Ymap::from_bytes(&bytes).map_err(validation_error)?;
+            ymap_spatial_context(&ymap, Some(path.to_path_buf()))
+        }
+        AssetKind::Ydr => {
+            YdrDocument::from_bytes(&bytes).map_err(validation_error)?;
+            isolated_asset_spatial_context(kind)
+        }
+        AssetKind::Ydd => {
+            YddDictionary::from_bytes(&bytes).map_err(validation_error)?;
+            isolated_asset_spatial_context(kind)
+        }
+        AssetKind::Ytd => {
+            Ytd::from_bytes(&bytes).map_err(validation_error)?;
+            isolated_asset_spatial_context(kind)
+        }
+        AssetKind::Ybn => {
+            YbnCollision::from_bytes(&bytes).map_err(validation_error)?;
+            isolated_asset_spatial_context(kind)
+        }
+        AssetKind::Ytyp => {
+            Ytyp::from_bytes(&bytes).map_err(validation_error)?;
+            isolated_asset_spatial_context(kind)
+        }
+        AssetKind::Yft | AssetKind::Ycd => isolated_asset_spatial_context(kind),
+    };
+
+    if json_output {
+        print_success(
+            "spatial",
+            json!({
+                "path": path.display().to_string(),
+                "type": kind.to_string(),
+                "context": spatial_context_json(&context),
+            }),
+        )?;
+    } else {
+        println!("file: {}", path.display());
+        println!("type: {kind}");
+        println!("classification: {}", context.classification.as_str());
+        println!("provenance: {}", context.provenance.as_str());
+        if let Some(center) = context.world_center {
+            println!("world-center: {:?}", center);
+        }
+        if let Some(reason) = &context.reason {
+            println!("reason: {}: {}", reason.code.as_str(), reason.message);
+        }
+    }
+
+    Ok(())
+}
+
+pub fn scene(
+    workspace: &Path,
+    ymap_arg: &Path,
+    options: SceneAssemblyOptions,
+    json_output: bool,
+) -> Result<(), Box<dyn Error>> {
+    if !workspace.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("not a directory: {}", workspace.display()),
+        )
+        .into());
+    }
+
+    let workspace = workspace.to_path_buf();
+    let ymap_path = if ymap_arg.is_absolute() {
+        ymap_arg.to_path_buf()
+    } else {
+        workspace.join(ymap_arg)
+    };
+    let ymap = Ymap::from_bytes(&fs::read(&ymap_path)?).map_err(validation_error)?;
+    let index = WorkspaceIndex::scan(&workspace)?;
+    let manifest = assemble_ymap_scene(&index, &ymap_path, &ymap, options);
+
+    if json_output {
+        print_success("scene", scene_manifest_json(&manifest))?;
+    } else {
+        println!("workspace: {}", workspace.display());
+        println!("ymap: {}", ymap_path.display());
+        println!("entities: {}", manifest.summary.total_entities);
+        println!("nodes: {}", manifest.summary.emitted_nodes);
+        println!("resolved: {}", manifest.summary.resolved_nodes);
+        println!("unresolved: {}", manifest.summary.unresolved_nodes);
+        println!("assets: {}", manifest.summary.asset_references);
+        println!(
+            "truncated: {}",
+            if manifest.limits.truncated {
+                "yes"
+            } else {
+                "no"
+            }
+        );
+        println!("warnings: {}", manifest.warnings.len());
+    }
+
+    Ok(())
+}
+
+pub fn parse_scene_args(
+    args: impl Iterator<Item = String>,
+    usage: &str,
+) -> Result<(PathBuf, PathBuf, SceneAssemblyOptions, bool), io::Error> {
+    let mut args = args;
+    let workspace = args
+        .next()
+        .filter(|value| !value.starts_with('-'))
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+    let ymap = args
+        .next()
+        .filter(|value| !value.starts_with('-'))
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+
+    let mut json_output = false;
+    let mut max_nodes = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--json" if !json_output => json_output = true,
+            "--max-nodes" if max_nodes.is_none() => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+                let parsed = value.parse::<usize>().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--max-nodes must be a positive integer",
+                    )
+                })?;
+                if parsed == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--max-nodes must be greater than zero",
+                    ));
+                }
+                max_nodes = Some(parsed);
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{usage}; unknown option: {arg}"),
+                ))
+            }
+        }
+    }
+
+    Ok((
+        workspace,
+        ymap,
+        max_nodes.map(SceneAssemblyOptions::new).unwrap_or_default(),
+        json_output,
+    ))
+}
+
+fn spatial_context_json(context: &SpatialContext) -> Value {
+    let transform = context.world_transform.map(|transform| {
+        json!({
+            "translation": transform.translation,
+            "rotation": transform.rotation,
+            "scale": transform.scale,
+        })
+    });
+    let bounds = context.world_bounds.map(|bounds| {
+        json!({
+            "min": bounds.min,
+            "max": bounds.max,
+        })
+    });
+    let reason = context.reason.as_ref().map(|reason| {
+        json!({
+            "code": reason.code.as_str(),
+            "message": reason.message,
+        })
+    });
+
+    json!({
+        "classification": context.classification.as_str(),
+        "worldTransform": transform,
+        "worldCenter": context.world_center,
+        "worldBounds": bounds,
+        "provenance": spatial_provenance_json(&context.provenance),
+        "contextAsset": context
+            .context_asset
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        "reason": reason,
+    })
+}
+
+fn spatial_provenance_json(provenance: &SpatialProvenance) -> Value {
+    match provenance {
+        SpatialProvenance::AssetSemantics { kind } => json!({
+            "kind": provenance.as_str(),
+            "assetKind": kind.to_string(),
+        }),
+        SpatialProvenance::YmapEntityTransform {
+            entity_index,
+            archetype_hash,
+        } => json!({
+            "kind": provenance.as_str(),
+            "entityIndex": entity_index,
+            "archetypeHash": format!("0x{archetype_hash:08X}"),
+        }),
+        _ => json!({ "kind": provenance.as_str() }),
+    }
+}
+
+fn scene_manifest_json(manifest: &SceneManifest) -> Value {
+    let nodes = manifest
+        .nodes
+        .iter()
+        .map(|node| {
+            let transform = node.transform.map(|transform| {
+                json!({
+                    "translation": transform.translation,
+                    "rotation": transform.rotation,
+                    "scale": transform.scale,
+                })
+            });
+            let reason = node.reason.as_ref().map(|reason| {
+                json!({
+                    "code": scene_reason_code(reason.code),
+                    "message": reason.message,
+                })
+            });
+            let collision = node.collision.as_ref().map(|collision| {
+                json!({
+                    "hash": format!("0x{:08X}", collision.hash),
+                    "assetRef": collision.asset_ref,
+                    "state": scene_collision_state(collision.state),
+                    "reason": collision.reason,
+                })
+            });
+
+            json!({
+                "index": node.index,
+                "sourceYmap": node.source_ymap.display().to_string(),
+                "entityIndex": node.entity_index,
+                "archetypeHash": format!("0x{:08X}", node.archetype_hash),
+                "providerPath": node
+                    .provider_path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                "assetRef": node.asset_ref,
+                "assetKind": node.asset_kind.map(|kind| kind.to_string()),
+                "transform": transform,
+                "resolution": scene_resolution_state(node.resolution),
+                "reason": reason,
+                "collision": collision,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let assets = manifest
+        .assets
+        .iter()
+        .map(|asset| {
+            let selector = asset.selector.as_ref().map(|selector| match selector {
+                SceneAssetSelector::YddDrawable {
+                    index,
+                    name_hash,
+                    name,
+                } => json!({
+                    "type": "yddDrawable",
+                    "index": index,
+                    "nameHash": format!("0x{name_hash:08X}"),
+                    "name": name,
+                }),
+            });
+
+            json!({
+                "id": asset.id,
+                "kind": asset.kind.to_string(),
+                "hash": format!("0x{:08X}", asset.hash),
+                "path": asset.path.display().to_string(),
+                "selector": selector,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "schemaVersion": manifest.schema_version,
+        "root": {
+            "path": manifest.root.path.display().to_string(),
+            "nameHash": manifest
+                .root
+                .name_hash
+                .map(|hash| format!("0x{hash:08X}")),
+        },
+        "nodes": nodes,
+        "assets": assets,
+        "summary": {
+            "totalEntities": manifest.summary.total_entities,
+            "emittedNodes": manifest.summary.emitted_nodes,
+            "resolvedNodes": manifest.summary.resolved_nodes,
+            "unresolvedNodes": manifest.summary.unresolved_nodes,
+            "assetReferences": manifest.summary.asset_references,
+        },
+        "warnings": manifest.warnings,
+        "limits": {
+            "maxNodes": manifest.limits.max_nodes,
+            "truncated": manifest.limits.truncated,
+            "omittedEntities": manifest.limits.omitted_entities,
+        },
+    })
+}
+
+fn scene_resolution_state(state: SceneResolutionState) -> &'static str {
+    match state {
+        SceneResolutionState::Resolved => "resolved",
+        SceneResolutionState::Unresolved => "unresolved",
+    }
+}
+
+fn scene_collision_state(state: SceneCollisionState) -> &'static str {
+    match state {
+        SceneCollisionState::LocalOnly => "localOnly",
+        SceneCollisionState::Unresolved => "unresolved",
+    }
+}
+
+fn scene_reason_code(code: SceneResolutionReasonCode) -> &'static str {
+    match code {
+        SceneResolutionReasonCode::ProviderMissing => "providerMissing",
+        SceneResolutionReasonCode::ProviderAmbiguous => "providerAmbiguous",
+        SceneResolutionReasonCode::AssetNameMissing => "assetNameMissing",
+        SceneResolutionReasonCode::DrawableDictionaryMissing => "drawableDictionaryMissing",
+        SceneResolutionReasonCode::AssetMissing => "assetMissing",
+        SceneResolutionReasonCode::AssetAmbiguous => "assetAmbiguous",
+        SceneResolutionReasonCode::DictionaryUnreadable => "dictionaryUnreadable",
+        SceneResolutionReasonCode::DictionaryEntryMissing => "dictionaryEntryMissing",
+        SceneResolutionReasonCode::UnsupportedAssetRelation => "unsupportedAssetRelation",
+        SceneResolutionReasonCode::InvalidWorldTransform => "invalidWorldTransform",
+    }
 }
 
 pub fn parse_path_json_args(
@@ -390,6 +754,7 @@ pub fn normalize_command_args(args: Vec<String>) -> Vec<String> {
         ("workspace", "preflight") => Some("preflight"),
         ("workspace", "mlo-audit") => Some("mlo-audit"),
         ("workspace", "extract") => Some("extract"),
+        ("workspace", "scene") => Some("scene"),
         ("gta", "vanilla-index") => Some("vanilla-index"),
         _ => None,
     };
@@ -530,7 +895,7 @@ fn inspect_format(path: &Path, bytes: &[u8], asset_type: &str) -> Result<Value, 
     }
 }
 
-fn operations_for(asset_type: &str) -> Vec<Value> {
+fn operations_for(asset_type: &str, bytes: &[u8]) -> Result<Vec<Value>, Box<dyn Error>> {
     let mut operations = vec![
         operation("inspect", false, true, false),
         operation("validate", false, true, false),
@@ -539,56 +904,315 @@ fn operations_for(asset_type: &str) -> Vec<Value> {
 
     match asset_type {
         "YDR" => {
-            operations.extend([
-                operation("plan", false, true, false),
-                operation("apply", true, true, false),
-                operation("ydr.info", false, false, false),
-                operation("ydr.translate", true, false, false),
-                operation("ydr.rebind-texture", true, false, false),
-                operation("ydr.rebind-shader", true, false, false),
-            ]);
+            YdrDocument::from_bytes(bytes).map_err(validation_error)?;
+            operations.push(operation("ydr.info", false, false, false));
+            operations.push(operation("spatial", false, true, false));
+
+            match YdrEditSession::from_bytes(bytes) {
+                Ok(session) => {
+                    let translation = session.rigid_translation_capability();
+                    let translation_reason = translation.reason.as_deref();
+                    operations.push(operation_with_availability(
+                        "plan",
+                        false,
+                        true,
+                        false,
+                        if translation.writable {
+                            "available"
+                        } else {
+                            "unavailable"
+                        },
+                        translation_reason,
+                        &[],
+                    ));
+                    operations.push(operation_with_availability(
+                        "apply",
+                        true,
+                        true,
+                        false,
+                        if translation.writable {
+                            "available"
+                        } else {
+                            "unavailable"
+                        },
+                        translation_reason,
+                        &[],
+                    ));
+                    operations.push(operation_with_availability(
+                        "ydr.translate",
+                        true,
+                        false,
+                        false,
+                        if translation.writable {
+                            "available"
+                        } else {
+                            "unavailable"
+                        },
+                        translation_reason,
+                        &["delta"],
+                    ));
+
+                    let texture_available = !session.texture_bindings().is_empty();
+                    operations.push(operation_with_availability(
+                        "ydr.rebind-texture",
+                        true,
+                        false,
+                        false,
+                        if texture_available {
+                            "parameterized"
+                        } else {
+                            "unavailable"
+                        },
+                        if texture_available {
+                            Some("eligibility depends on the selected source and target bindings")
+                        } else {
+                            Some("no editable texture bindings were found")
+                        },
+                        &[
+                            "sourceShader",
+                            "sourceParameter",
+                            "targetShader",
+                            "targetParameter",
+                        ],
+                    ));
+
+                    let shader_available =
+                        !session.shader_bindings().is_empty() && session.shader_count() > 0;
+                    operations.push(operation_with_availability(
+                        "ydr.rebind-shader",
+                        true,
+                        false,
+                        false,
+                        if shader_available {
+                            "parameterized"
+                        } else {
+                            "unavailable"
+                        },
+                        if shader_available {
+                            Some("eligibility depends on the selected geometry and target shader")
+                        } else {
+                            Some("no editable shader bindings were found")
+                        },
+                        &["modelIndex", "geometryIndex", "targetShaderIndex"],
+                    ));
+                }
+                Err(error) => {
+                    let reason = format!("edit session unavailable: {error}");
+                    for id in [
+                        "plan",
+                        "apply",
+                        "ydr.translate",
+                        "ydr.rebind-texture",
+                        "ydr.rebind-shader",
+                    ] {
+                        operations.push(operation_with_availability(
+                            id,
+                            id != "plan",
+                            matches!(id, "plan" | "apply"),
+                            false,
+                            "unavailable",
+                            Some(&reason),
+                            &[],
+                        ));
+                    }
+                }
+            }
         }
         "YDD" => {
+            YddDictionary::from_bytes(bytes).map_err(validation_error)?;
             operations.extend([
                 operation("ydd.info", false, false, false),
-                operation("ydd.translate", true, false, false),
-                operation("ydd.rebind-texture", true, false, false),
-                operation("ydd.rebind-shader", true, false, false),
+                operation("spatial", false, true, false),
+                operation_with_availability(
+                    "ydd.translate",
+                    true,
+                    false,
+                    false,
+                    "parameterized",
+                    Some("eligibility is evaluated for the selected drawable"),
+                    &["drawableIndex", "delta"],
+                ),
+                operation_with_availability(
+                    "ydd.rebind-texture",
+                    true,
+                    false,
+                    false,
+                    "parameterized",
+                    Some("eligibility is evaluated for the selected drawable and bindings"),
+                    &[
+                        "drawableIndex",
+                        "sourceShader",
+                        "sourceParameter",
+                        "targetShader",
+                        "targetParameter",
+                    ],
+                ),
+                operation_with_availability(
+                    "ydd.rebind-shader",
+                    true,
+                    false,
+                    false,
+                    "parameterized",
+                    Some("eligibility is evaluated for the selected drawable and geometry"),
+                    &[
+                        "drawableIndex",
+                        "modelIndex",
+                        "geometryIndex",
+                        "targetShaderIndex",
+                    ],
+                ),
             ]);
         }
         "YTD" => {
+            let ytd = Ytd::from_bytes(bytes).map_err(validation_error)?;
+            let has_textures = !ytd.textures.is_empty();
             operations.extend([
                 operation("ytd.info", false, false, false),
-                operation("ytd.extract-dds", true, false, false),
-                operation("ytd.replace-dds", true, false, false),
-                operation("ytd.repack-dds", true, false, false),
-                operation("ytd.repack-rgba", true, false, false),
-                operation("ytd.rebuild-compact", true, false, false),
+                operation("spatial", false, true, false),
+                operation_with_availability(
+                    "ytd.extract-dds",
+                    true,
+                    false,
+                    false,
+                    if has_textures {
+                        "parameterized"
+                    } else {
+                        "unavailable"
+                    },
+                    if has_textures {
+                        Some("requires a valid textureIndex")
+                    } else {
+                        Some("texture dictionary contains no textures")
+                    },
+                    &["textureIndex", "output"],
+                ),
+                operation_with_availability(
+                    "ytd.replace-dds",
+                    true,
+                    false,
+                    false,
+                    if has_textures {
+                        "parameterized"
+                    } else {
+                        "unavailable"
+                    },
+                    Some("eligibility depends on the selected texture and replacement DDS"),
+                    &["textureIndex", "replacement", "output"],
+                ),
+                operation_with_availability(
+                    "ytd.repack-dds",
+                    true,
+                    false,
+                    false,
+                    if has_textures {
+                        "parameterized"
+                    } else {
+                        "unavailable"
+                    },
+                    Some("eligibility depends on the selected texture and replacement DDS"),
+                    &["textureIndex", "replacement", "output"],
+                ),
+                operation_with_availability(
+                    "ytd.repack-rgba",
+                    true,
+                    false,
+                    false,
+                    if has_textures {
+                        "parameterized"
+                    } else {
+                        "unavailable"
+                    },
+                    Some(
+                        "eligibility depends on the selected texture, dimensions, and RGBA payload",
+                    ),
+                    &["textureIndex", "width", "height", "replacement", "output"],
+                ),
             ]);
+
+            match Ytd::rebuild_legacy_compact(bytes) {
+                Ok(_) => operations.push(operation("ytd.rebuild-compact", true, false, false)),
+                Err(error) => operations.push(operation_with_availability(
+                    "ytd.rebuild-compact",
+                    true,
+                    false,
+                    false,
+                    "unavailable",
+                    Some(&error.to_string()),
+                    &["output"],
+                )),
+            }
         }
         "YBN" => {
+            let collision = YbnCollision::from_bytes(bytes).map_err(validation_error)?;
+            let editable = collision.shape_primitive_count() > 0;
+            let reason = if editable {
+                Some("eligibility depends on the selected polygon and requested fields")
+            } else {
+                Some("no editable sphere, capsule, box, or cylinder polygons were found")
+            };
             operations.extend([
-                operation("plan", false, true, false),
-                operation("apply", true, true, false),
+                operation_with_availability(
+                    "plan",
+                    false,
+                    true,
+                    false,
+                    if editable { "available" } else { "unavailable" },
+                    reason,
+                    &[],
+                ),
+                operation_with_availability(
+                    "apply",
+                    true,
+                    true,
+                    false,
+                    if editable { "available" } else { "unavailable" },
+                    reason,
+                    &[],
+                ),
                 operation("ybn.info", false, false, false),
-                operation("ybn.edit-polygon", true, false, false),
+                operation("spatial", false, true, false),
+                operation_with_availability(
+                    "ybn.edit-polygon",
+                    true,
+                    false,
+                    false,
+                    if editable {
+                        "parameterized"
+                    } else {
+                        "unavailable"
+                    },
+                    reason,
+                    &["childIndex", "polygonIndex", "kind"],
+                ),
             ]);
         }
         "YMAP" => {
+            Ymap::from_bytes(bytes).map_err(validation_error)?;
             operations.extend([
                 operation("ymap.info", false, false, false),
-                operation("workspace.deps", false, false, true),
-                operation("workspace.providers", false, false, true),
-                operation("workspace.preflight", false, false, true),
-                operation("workspace.extract", true, false, true),
+                operation("spatial", false, true, false),
+                context_operation("workspace.scene", false, true),
+                context_operation("workspace.deps", false, false),
+                context_operation("workspace.providers", false, false),
+                context_operation("workspace.preflight", false, false),
+                context_operation("workspace.extract", true, false),
             ]);
         }
-        "YTYP" => operations.push(operation("ytyp.info", false, false, false)),
-        "YMF" => operations.push(operation("ymf.info", false, false, false)),
+        "YTYP" => {
+            Ytyp::from_bytes(bytes).map_err(validation_error)?;
+            operations.extend([
+                operation("ytyp.info", false, false, false),
+                operation("spatial", false, true, false),
+            ]);
+        }
+        "YMF" => {
+            Ymf::from_bytes(bytes).map_err(validation_error)?;
+            operations.push(operation("ymf.info", false, false, false));
+        }
         _ => {}
     }
 
-    operations
+    Ok(operations)
 }
 
 fn operation(
@@ -597,11 +1221,46 @@ fn operation(
     structured_output: bool,
     requires_workspace: bool,
 ) -> Value {
+    operation_with_availability(
+        id,
+        writes_asset,
+        structured_output,
+        requires_workspace,
+        "available",
+        None,
+        &[],
+    )
+}
+
+fn context_operation(id: &str, writes_asset: bool, structured_output: bool) -> Value {
+    operation_with_availability(
+        id,
+        writes_asset,
+        structured_output,
+        true,
+        "contextRequired",
+        Some("requires a workspace root"),
+        &["workspace"],
+    )
+}
+
+fn operation_with_availability(
+    id: &str,
+    writes_asset: bool,
+    structured_output: bool,
+    requires_workspace: bool,
+    availability: &str,
+    reason: Option<&str>,
+    requires_parameters: &[&str],
+) -> Value {
     json!({
         "id": id,
         "writesAsset": writes_asset,
         "structuredOutput": structured_output,
         "requiresWorkspace": requires_workspace,
+        "availability": availability,
+        "reason": reason,
+        "requiresParameters": requires_parameters,
     })
 }
 
