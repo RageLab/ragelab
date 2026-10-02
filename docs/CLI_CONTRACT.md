@@ -33,7 +33,7 @@ Errors use the same schema:
 
 Consumers must key compatibility decisions on `schema` and `schemaVersion`, not on human-readable output.
 
-The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `spatial <file> --json`, `plan <operation.json> --json`, `apply <operation.json> --json`, `workspace preflight ... --json`, `workspace export ... --json`, and `workspace scene ... --json` use the common response envelope.
+The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `spatial <file> --json`, `preview <file> --json`, `plan <operation.json> --json`, `apply <operation.json> --json`, `workspace preflight ... --json`, `workspace export ... --json`, and `workspace scene ... --json` use the common response envelope.
 
 ## Agent-first surface
 
@@ -164,6 +164,21 @@ ragelab spatial prop.ydr --json
 ```
 
 YMAP may produce world-space bounds or centers. Isolated YDR, YDD, and YBN assets remain `localOnly`; YTD is `nonSpatial`. RageLab does not promote local bounds or filename relationships into world coordinates.
+
+## Headless preview
+
+`preview` exposes bounded renderer-neutral model data for headless consumers.
+
+```bash
+ragelab preview prop.ydr --json
+ragelab preview props.ydd --drawable-index 0 --json
+```
+
+YDR preview is immediately available for supported Legacy drawables. YDD requires an explicit zero-based drawable selector. Geometry is never partially sliced: complete primitive geometry is emitted only when it fits the configured vertex/index budgets; otherwise only primitive metadata is returned.
+
+Preview coordinates remain local to the asset and include the source coordinate convention. The command does not infer world placement.
+
+See [PREVIEW.md](PREVIEW.md) for limits and schema semantics.
 
 ## Workspace preflight and export
 

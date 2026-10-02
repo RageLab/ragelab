@@ -84,6 +84,11 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn Error>> {
                 agent::parse_path_json_args(args, "usage: ragelab spatial <file> [--json]")?;
             agent::spatial(&path, json)?;
         }
+        "preview" => {
+            const USAGE: &str = "usage: ragelab preview <file> [--drawable-index <n>] [--max-primitives <n>] [--max-vertices <n>] [--max-indices <n>] [--max-shaders <n>] [--max-texture-references <n>] [--json]";
+            let (path, options, json) = agent::parse_preview_args(args, USAGE)?;
+            agent::preview(&path, options, json)?;
+        }
         "scene" => {
             const USAGE: &str =
                 "usage: ragelab workspace scene <directory> <file.ymap> [--max-nodes <n>] [--json]";
@@ -484,6 +489,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "inspect",
         "validate",
         "spatial",
+        "preview",
         "plan",
         "apply",
         "hash",
@@ -551,6 +557,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "inspect",
         "validate",
         "spatial",
+        "preview",
         "plan",
         "apply",
         "hash",
@@ -621,7 +628,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
                 "version": env!("CARGO_PKG_VERSION"),
                 "commands": DISCOVERY_COMMANDS,
                 "canonicalCommands": CANONICAL_COMMANDS,
-                "structuredOutput": ["version", "capabilities", "inspect", "validate", "spatial", "plan", "apply", "workspace.preflight", "workspace.export", "workspace.scene"],
+                "structuredOutput": ["version", "capabilities", "inspect", "validate", "spatial", "preview", "plan", "apply", "workspace.preflight", "workspace.export", "workspace.scene"],
                 "legacyAliases": LEGACY_ALIASES,
                 "responseEnvelope": {
                     "schema": agent::RESPONSE_SCHEMA,
@@ -647,6 +654,7 @@ ragelab inspect <file> [--json]\n  \
 ragelab capabilities [file] [--json]\n  \
 ragelab validate <file> [--json]\n  \
 ragelab spatial <file> [--json]\n  \
+ragelab preview <file> [--drawable-index <n>] [--max-primitives <n>] [--max-vertices <n>] [--max-indices <n>] [--max-shaders <n>] [--max-texture-references <n>] [--json]\n  \
 ragelab plan <operation.json> [--json]\n  \
 ragelab apply <operation.json> [--json]\n  \
 ragelab version [--json]\n\n\

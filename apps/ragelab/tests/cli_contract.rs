@@ -151,6 +151,7 @@ fn global_capabilities_preserve_legacy_ids_and_advertise_canonical_ids() {
     assert!(commands.iter().any(|value| value == "ydr.info"));
     assert!(canonical.iter().any(|value| value == "ydr.info"));
     assert!(canonical.iter().any(|value| value == "spatial"));
+    assert!(canonical.iter().any(|value| value == "preview"));
     assert!(canonical.iter().any(|value| value == "workspace.preflight"));
     assert!(canonical.iter().any(|value| value == "workspace.export"));
     assert!(canonical.iter().any(|value| value == "workspace.scene"));
@@ -170,6 +171,11 @@ fn global_capabilities_preserve_legacy_ids_and_advertise_canonical_ids() {
         .unwrap()
         .iter()
         .any(|value| value == "spatial"));
+    assert!(body["structuredOutput"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "preview"));
     assert!(body["structuredOutput"]
         .as_array()
         .unwrap()
@@ -984,4 +990,128 @@ fn combined_workspace_export_respects_unresolved_gate_and_override() {
     assert!(allowed_output.join(".ragelab-export.json").is_file());
 
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn ydr_preview_is_structured_renderer_neutral_and_bounded() {
+    let output = binary()
+        .args([
+            "preview",
+            fixture("ydr/editable.ydr").to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("ragelab preview should run");
+    assert!(output.status.success());
+    let body = stdout_json(&output);
+    assert_eq!(body["command"], "preview");
+    assert_eq!(body["data"]["type"], "YDR");
+    assert_eq!(body["data"]["spatial"]["classification"], "localOnly");
+    assert_eq!(
+        body["data"]["preview"]["coordinateConvention"],
+        "sourceXyzZUp"
+    );
+    assert_eq!(body["data"]["preview"]["counts"]["primitives"], 1);
+    assert_eq!(body["data"]["preview"]["counts"]["vertices"], 3);
+    assert_eq!(
+        body["data"]["preview"]["primitives"][0]["geometryIncluded"],
+        true
+    );
+    assert_eq!(
+        body["data"]["preview"]["primitives"][0]["geometry"]["indices"],
+        json!([0, 1, 2])
+    );
+    assert_eq!(
+        body["data"]["preview"]["shaders"][0]["textureReferences"][0]["textureName"],
+        "test_diffuse"
+    );
+
+    let bounded = binary()
+        .args([
+            "preview",
+            fixture("ydr/editable.ydr").to_str().unwrap(),
+            "--max-vertices",
+            "2",
+            "--max-indices",
+            "3",
+            "--json",
+        ])
+        .output()
+        .expect("bounded ragelab preview should run");
+    assert!(bounded.status.success());
+    let bounded = stdout_json(&bounded);
+    assert_eq!(
+        bounded["data"]["preview"]["primitives"][0]["geometryIncluded"],
+        false
+    );
+    assert!(bounded["data"]["preview"]["primitives"][0]["geometry"].is_null());
+    assert_eq!(bounded["data"]["preview"]["emitted"]["vertices"], 0);
+    assert_eq!(
+        bounded["data"]["preview"]["truncated"]["geometryOmittedPrimitives"],
+        1
+    );
+}
+
+#[test]
+fn ydd_preview_requires_explicit_zero_based_drawable_selector() {
+    let missing = binary()
+        .args([
+            "preview",
+            fixture("ydd/editable.ydd").to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("ragelab preview should run");
+    assert_eq!(missing.status.code(), Some(2));
+    assert!(missing.stderr.is_empty());
+    let missing = stdout_json(&missing);
+    assert_eq!(missing["command"], "preview");
+    assert_eq!(missing["error"]["code"], "invalid_input");
+
+    let selected = binary()
+        .args([
+            "preview",
+            fixture("ydd/editable.ydd").to_str().unwrap(),
+            "--drawable-index",
+            "0",
+            "--json",
+        ])
+        .output()
+        .expect("selected YDD preview should run");
+    assert!(selected.status.success());
+    let selected = stdout_json(&selected);
+    assert_eq!(selected["data"]["type"], "YDD");
+    assert_eq!(selected["data"]["preview"]["selector"]["drawableIndex"], 0);
+    assert_eq!(
+        selected["data"]["preview"]["selector"]["nameHash"],
+        "0x12345678"
+    );
+    assert_eq!(
+        selected["data"]["preview"]["shaders"][0]["textureReferences"][0]["textureName"],
+        "dict_diffuse"
+    );
+}
+
+#[test]
+fn preview_rejects_limits_above_hard_caps() {
+    let output = binary()
+        .args([
+            "preview",
+            fixture("ydr/editable.ydr").to_str().unwrap(),
+            "--max-vertices",
+            "100001",
+            "--json",
+        ])
+        .output()
+        .expect("ragelab preview should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stderr.is_empty());
+    let body = stdout_json(&output);
+    assert_eq!(body["command"], "preview");
+    assert_eq!(body["error"]["code"], "invalid_input");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("hard limit 100000"));
 }

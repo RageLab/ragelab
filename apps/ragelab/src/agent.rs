@@ -15,7 +15,7 @@ use ragelab_engine::{
 use ragelab_resource::{Rsc7Probe, Rsc7Resource};
 use ragelab_ybn::YbnCollision;
 use ragelab_ydd::{YddDictionary, YddEditSession};
-use ragelab_ydr::{YdrDocument, YdrEditSession};
+use ragelab_ydr::{YdrDocument, YdrEditSession, YdrModel};
 use ragelab_ymap::Ymap;
 use ragelab_ymf::Ymf;
 use ragelab_ytd::Ytd;
@@ -35,6 +35,7 @@ pub fn is_structured_command(command: &str) -> bool {
             | "plan"
             | "apply"
             | "spatial"
+            | "preview"
             | "scene"
             | "preflight"
             | "export"
@@ -319,6 +320,392 @@ pub fn capabilities(path: &Path, json_output: bool) -> Result<(), Box<dyn Error>
     }
 
     Ok(())
+}
+
+const DEFAULT_PREVIEW_MAX_PRIMITIVES: usize = 64;
+const DEFAULT_PREVIEW_MAX_VERTICES: usize = 10_000;
+const DEFAULT_PREVIEW_MAX_INDICES: usize = 30_000;
+const DEFAULT_PREVIEW_MAX_SHADERS: usize = 128;
+const DEFAULT_PREVIEW_MAX_TEXTURE_REFERENCES: usize = 512;
+
+const HARD_PREVIEW_MAX_PRIMITIVES: usize = 512;
+const HARD_PREVIEW_MAX_VERTICES: usize = 100_000;
+const HARD_PREVIEW_MAX_INDICES: usize = 300_000;
+const HARD_PREVIEW_MAX_SHADERS: usize = 1_024;
+const HARD_PREVIEW_MAX_TEXTURE_REFERENCES: usize = 4_096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreviewOptions {
+    pub drawable_index: Option<usize>,
+    pub max_primitives: usize,
+    pub max_vertices: usize,
+    pub max_indices: usize,
+    pub max_shaders: usize,
+    pub max_texture_references: usize,
+}
+
+impl Default for PreviewOptions {
+    fn default() -> Self {
+        Self {
+            drawable_index: None,
+            max_primitives: DEFAULT_PREVIEW_MAX_PRIMITIVES,
+            max_vertices: DEFAULT_PREVIEW_MAX_VERTICES,
+            max_indices: DEFAULT_PREVIEW_MAX_INDICES,
+            max_shaders: DEFAULT_PREVIEW_MAX_SHADERS,
+            max_texture_references: DEFAULT_PREVIEW_MAX_TEXTURE_REFERENCES,
+        }
+    }
+}
+
+pub fn parse_preview_args(
+    args: impl Iterator<Item = String>,
+    usage: &str,
+) -> Result<(PathBuf, PreviewOptions, bool), io::Error> {
+    let mut args = args;
+    let path = args
+        .next()
+        .filter(|value| !value.starts_with('-'))
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+    let mut options = PreviewOptions::default();
+    let mut json_output = false;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--json" if !json_output => json_output = true,
+            "--drawable-index" if options.drawable_index.is_none() => {
+                options.drawable_index = Some(parse_preview_index(args.next(), usage)?);
+            }
+            "--max-primitives" => {
+                options.max_primitives = parse_preview_limit(
+                    args.next(),
+                    "--max-primitives",
+                    HARD_PREVIEW_MAX_PRIMITIVES,
+                    usage,
+                )?;
+            }
+            "--max-vertices" => {
+                options.max_vertices = parse_preview_limit(
+                    args.next(),
+                    "--max-vertices",
+                    HARD_PREVIEW_MAX_VERTICES,
+                    usage,
+                )?;
+            }
+            "--max-indices" => {
+                options.max_indices = parse_preview_limit(
+                    args.next(),
+                    "--max-indices",
+                    HARD_PREVIEW_MAX_INDICES,
+                    usage,
+                )?;
+            }
+            "--max-shaders" => {
+                options.max_shaders = parse_preview_limit(
+                    args.next(),
+                    "--max-shaders",
+                    HARD_PREVIEW_MAX_SHADERS,
+                    usage,
+                )?;
+            }
+            "--max-texture-references" => {
+                options.max_texture_references = parse_preview_limit(
+                    args.next(),
+                    "--max-texture-references",
+                    HARD_PREVIEW_MAX_TEXTURE_REFERENCES,
+                    usage,
+                )?;
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{usage}; unknown option: {arg}"),
+                ))
+            }
+        }
+    }
+
+    Ok((path, options, json_output))
+}
+
+fn parse_preview_index(value: Option<String>, usage: &str) -> Result<usize, io::Error> {
+    let value = value.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+    value.parse::<usize>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--drawable-index must be a non-negative integer",
+        )
+    })
+}
+
+fn parse_preview_limit(
+    value: Option<String>,
+    label: &str,
+    hard_max: usize,
+    usage: &str,
+) -> Result<usize, io::Error> {
+    let value = value.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+    let parsed = value.parse::<usize>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{label} must be a positive integer"),
+        )
+    })?;
+    if parsed == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{label} must be greater than zero"),
+        ));
+    }
+    if hard_max != usize::MAX && parsed > hard_max {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{label} exceeds hard limit {hard_max}"),
+        ));
+    }
+    Ok(parsed)
+}
+
+pub fn preview(
+    path: &Path,
+    options: PreviewOptions,
+    json_output: bool,
+) -> Result<(), Box<dyn Error>> {
+    let bytes = fs::read(path)?;
+    let asset_type = asset_type(path);
+
+    let (model, selector) = match asset_type {
+        "YDR" => {
+            if options.drawable_index.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--drawable-index is only valid for YDD preview",
+                )
+                .into());
+            }
+            let document = YdrDocument::from_bytes(&bytes).map_err(validation_error)?;
+            (document.model, Value::Null)
+        }
+        "YDD" => {
+            let drawable_index = options.drawable_index.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "YDD preview requires --drawable-index <n>",
+                )
+            })?;
+            let dictionary = YddDictionary::from_bytes(&bytes).map_err(validation_error)?;
+            let entry = dictionary.entries().get(drawable_index).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "drawable index {drawable_index} exceeds dictionary size {}",
+                        dictionary.entries().len()
+                    ),
+                )
+            })?;
+            let document = dictionary
+                .document(drawable_index)
+                .map_err(validation_error)?;
+            (
+                document.model,
+                json!({
+                    "drawableIndex": entry.index,
+                    "nameHash": format!("0x{:08X}", entry.name_hash),
+                    "name": entry.name,
+                }),
+            )
+        }
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("headless model preview is unavailable for {asset_type}"),
+            )
+            .into())
+        }
+    };
+
+    let data = model_preview_json(&model, options, selector);
+
+    if json_output {
+        print_success(
+            "preview",
+            json!({
+                "path": path.display().to_string(),
+                "type": asset_type,
+                "spatial": {
+                    "classification": "localOnly",
+                    "coordinateConvention": model.coordinate_convention.as_str(),
+                },
+                "preview": data,
+            }),
+        )?;
+    } else {
+        println!("file: {}", path.display());
+        println!("type: {asset_type}");
+        if let Some(index) = options.drawable_index {
+            println!("drawable-index: {index}");
+        }
+        println!("lod: {}", model.lod.as_str());
+        println!("primitives: {}", model.primitives.len());
+        println!("vertices: {}", model.vertex_count());
+        println!("indices: {}", model.index_count());
+        println!("triangles: {}", model.triangle_count());
+        println!("spatial: localOnly");
+    }
+
+    Ok(())
+}
+
+fn model_preview_json(model: &YdrModel, options: PreviewOptions, selector: Value) -> Value {
+    let mut remaining_vertices = options.max_vertices;
+    let mut remaining_indices = options.max_indices;
+    let mut emitted_vertices = 0_usize;
+    let mut emitted_indices = 0_usize;
+    let mut geometry_omitted = 0_usize;
+
+    let primitives = model
+        .primitives
+        .iter()
+        .take(options.max_primitives)
+        .map(|primitive| {
+            let fits_geometry = primitive.positions.len() <= remaining_vertices
+                && primitive.indices.len() <= remaining_indices;
+
+            let geometry = if fits_geometry {
+                remaining_vertices -= primitive.positions.len();
+                remaining_indices -= primitive.indices.len();
+                emitted_vertices += primitive.positions.len();
+                emitted_indices += primitive.indices.len();
+                json!({
+                    "positions": primitive.positions,
+                    "normals": primitive.normals,
+                    "uv0": primitive.uv0,
+                    "indices": primitive.indices,
+                })
+            } else {
+                geometry_omitted += 1;
+                Value::Null
+            };
+
+            let winding = primitive.winding_summary().map(|summary| {
+                json!({
+                    "aligned": summary.aligned,
+                    "opposed": summary.opposed,
+                    "degenerate": summary.degenerate,
+                })
+            });
+
+            json!({
+                "modelIndex": primitive.model_index,
+                "geometryIndex": primitive.geometry_index,
+                "shaderIndex": primitive.shader_index,
+                "topology": primitive.topology.as_str(),
+                "counts": {
+                    "vertices": primitive.positions.len(),
+                    "indices": primitive.indices.len(),
+                    "triangles": primitive.triangle_count(),
+                },
+                "declaration": {
+                    "flags": format!("0x{:08X}", primitive.declaration.flags),
+                    "stride": primitive.declaration.stride,
+                    "componentCount": primitive.declaration.component_count,
+                    "types": format!("0x{:016X}", primitive.declaration.types),
+                },
+                "winding": winding,
+                "geometryIncluded": fits_geometry,
+                "geometryOmittedReason": if fits_geometry {
+                    Value::Null
+                } else {
+                    Value::String("preview limits".into())
+                },
+                "geometry": geometry,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut remaining_texture_references = options.max_texture_references;
+    let mut emitted_texture_references = 0_usize;
+    let shaders = model
+        .shaders
+        .iter()
+        .take(options.max_shaders)
+        .enumerate()
+        .map(|(index, shader)| {
+            let take = shader
+                .texture_references
+                .len()
+                .min(remaining_texture_references);
+            remaining_texture_references -= take;
+            emitted_texture_references += take;
+            let texture_references = shader
+                .texture_references
+                .iter()
+                .take(take)
+                .map(|reference| {
+                    json!({
+                        "parameterHash": format!("0x{:08X}", reference.parameter_hash),
+                        "textureName": reference.texture_name,
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            json!({
+                "index": index,
+                "nameHash": format!("0x{:08X}", shader.name_hash),
+                "fileHash": format!("0x{:08X}", shader.file_hash),
+                "textureReferenceCount": shader.texture_references.len(),
+                "textureReferences": texture_references,
+                "textureReferencesTruncated": take < shader.texture_references.len(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "selector": selector,
+        "name": model.name,
+        "lod": model.lod.as_str(),
+        "coordinateConvention": model.coordinate_convention.as_str(),
+        "bounds": {
+            "center": model.bounds.center,
+            "radius": model.bounds.radius,
+            "min": model.bounds.min,
+            "max": model.bounds.max,
+        },
+        "counts": {
+            "shaders": model.shaders.len(),
+            "primitives": model.primitives.len(),
+            "vertices": model.vertex_count(),
+            "indices": model.index_count(),
+            "triangles": model.triangle_count(),
+        },
+        "shaders": shaders,
+        "primitives": primitives,
+        "limits": {
+            "maxShaders": options.max_shaders,
+            "maxTextureReferences": options.max_texture_references,
+            "maxPrimitives": options.max_primitives,
+            "maxVertices": options.max_vertices,
+            "maxIndices": options.max_indices,
+        },
+        "emitted": {
+            "shaders": model.shaders.len().min(options.max_shaders),
+            "textureReferences": emitted_texture_references,
+            "primitives": model.primitives.len().min(options.max_primitives),
+            "vertices": emitted_vertices,
+            "indices": emitted_indices,
+        },
+        "truncated": {
+            "shaders": model.shaders.len() > options.max_shaders,
+            "textureReferences": model
+                .shaders
+                .iter()
+                .map(|shader| shader.texture_references.len())
+                .sum::<usize>()
+                > options.max_texture_references,
+            "primitives": model.primitives.len() > options.max_primitives,
+            "geometryOmittedPrimitives": geometry_omitted,
+        },
+    })
 }
 
 pub fn spatial(path: &Path, json_output: bool) -> Result<(), Box<dyn Error>> {
@@ -951,6 +1338,15 @@ fn operations_for(asset_type: &str, bytes: &[u8]) -> Result<Vec<Value>, Box<dyn 
             YdrDocument::from_bytes(bytes).map_err(validation_error)?;
             operations.push(operation("ydr.info", false, false, false));
             operations.push(operation("spatial", false, true, false));
+            operations.push(operation_with_availability(
+                "preview",
+                false,
+                true,
+                false,
+                "available",
+                Some("renderer-neutral Legacy YDR model preview is available"),
+                &[],
+            ));
 
             match YdrEditSession::from_bytes(bytes) {
                 Ok(session) => {
@@ -1091,6 +1487,23 @@ fn operations_for(asset_type: &str, bytes: &[u8]) -> Result<Vec<Value>, Box<dyn 
             operations.extend([
                 operation("ydd.info", false, false, false),
                 operation("spatial", false, true, false),
+                operation_with_availability(
+                    "preview",
+                    false,
+                    true,
+                    false,
+                    if dictionary.entries().is_empty() {
+                        "unavailable"
+                    } else {
+                        "parameterized"
+                    },
+                    if dictionary.entries().is_empty() {
+                        Some("drawable dictionary contains no entries")
+                    } else {
+                        Some("requires an explicit drawableIndex")
+                    },
+                    &["drawableIndex"],
+                ),
                 operation_with_availability(
                     "plan",
                     false,
