@@ -155,6 +155,56 @@ Requirements:
 
 YDR operations are simulated in document order during `plan`. A multi-operation document must serialize and semantically reopen successfully in memory before the plan is marked allowed. `apply` repeats the same sequence against a fresh edit session and preserves create-new output semantics.
 
+### `ydd.translate`
+
+Rigidly translates one selected drawable inside a Legacy YDD.
+
+```json
+{
+  "type": "ydd.translate",
+  "drawableIndex": 0,
+  "delta": [1.0, 0.0, 0.0]
+}
+```
+
+### `ydd.rebind-texture`
+
+Rebinds an existing texture parameter inside one selected YDD drawable to another compatible existing TextureBase.
+
+```json
+{
+  "type": "ydd.rebind-texture",
+  "drawableIndex": 0,
+  "sourceShader": 0,
+  "sourceParameter": 0,
+  "targetShader": 0,
+  "targetParameter": 1
+}
+```
+
+### `ydd.rebind-shader`
+
+Rebinds an existing geometry inside one selected YDD drawable to another shader already present in that drawable.
+
+```json
+{
+  "type": "ydd.rebind-shader",
+  "drawableIndex": 0,
+  "modelIndex": 0,
+  "geometryIndex": 0,
+  "targetShaderIndex": 1
+}
+```
+
+YDD requirements:
+
+- `drawableIndex` must reference an existing dictionary entry;
+- selected-drawable writer eligibility is evaluated by `YddEditSession`;
+- texture and shader rebind rules are identical to the corresponding YDR safety rules;
+- dictionary entry count, hash, name, and drawable identity metadata must survive semantic re-open;
+- operations are applied in document order to intermediate in-memory YDD bytes, so one document may safely target more than one drawable;
+- no output file is created during planning.
+
 ## Fail-closed behavior
 
 Unsupported operations do not fall back to guessed binary layouts.

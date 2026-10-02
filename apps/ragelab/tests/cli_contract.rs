@@ -538,3 +538,124 @@ fn ydr_rebinds_are_declarative_and_non_destructive() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn ydd_writers_are_declarative_and_non_destructive() {
+    let root = temp_root("ydd-plan-apply");
+    fs::create_dir_all(&root).unwrap();
+
+    let source = root.join("source.ydd");
+    let output = root.join("output.ydd");
+    let operation = root.join("operation.json");
+    fs::copy(fixture("ydd/editable.ydd"), &source).unwrap();
+    let source_before = fs::read(&source).unwrap();
+
+    let capabilities_output = binary()
+        .args(["capabilities", source.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab capabilities should run");
+    assert!(capabilities_output.status.success());
+    let capabilities = stdout_json(&capabilities_output);
+    let operations = capabilities["data"]["operations"].as_array().unwrap();
+    assert_eq!(
+        operations
+            .iter()
+            .find(|operation| operation["id"] == "plan")
+            .unwrap()["availability"],
+        "available"
+    );
+    assert_eq!(
+        operations
+            .iter()
+            .find(|operation| operation["id"] == "ydd.translate")
+            .unwrap()["availability"],
+        "parameterized"
+    );
+    assert_eq!(
+        operations
+            .iter()
+            .find(|operation| operation["id"] == "ydd.rebind-texture")
+            .unwrap()["availability"],
+        "parameterized"
+    );
+    assert_eq!(
+        operations
+            .iter()
+            .find(|operation| operation["id"] == "ydd.rebind-shader")
+            .unwrap()["availability"],
+        "parameterized"
+    );
+
+    let body = json!({
+        "schema": "ragelab.operation",
+        "schemaVersion": 1,
+        "source": "source.ydd",
+        "output": "output.ydd",
+        "operations": [
+            {
+                "type": "ydd.translate",
+                "drawableIndex": 0,
+                "delta": [1.0, 0.0, 0.0]
+            },
+            {
+                "type": "ydd.rebind-texture",
+                "drawableIndex": 0,
+                "sourceShader": 0,
+                "sourceParameter": 0,
+                "targetShader": 0,
+                "targetParameter": 1
+            },
+            {
+                "type": "ydd.rebind-shader",
+                "drawableIndex": 0,
+                "modelIndex": 0,
+                "geometryIndex": 0,
+                "targetShaderIndex": 1
+            }
+        ]
+    });
+    fs::write(&operation, body.to_string()).unwrap();
+
+    let plan_output = binary()
+        .args(["plan", operation.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab plan should run");
+    assert!(plan_output.status.success());
+    let plan = stdout_json(&plan_output);
+    assert_eq!(plan["data"]["allowed"], true);
+    assert_eq!(plan["data"]["assetType"], "YDD");
+    assert_eq!(plan["data"]["operations"][0]["details"]["drawableIndex"], 0);
+    assert_eq!(
+        plan["data"]["operations"][1]["details"]["targetTexture"],
+        "dict_normal"
+    );
+    assert_eq!(
+        plan["data"]["operations"][2]["details"]["targetShaderIndex"],
+        1
+    );
+    assert!(!output.exists());
+
+    let apply_output = binary()
+        .args(["apply", operation.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab apply should run");
+    assert!(apply_output.status.success());
+    let apply = stdout_json(&apply_output);
+    assert_eq!(apply["data"]["assetType"], "YDD");
+    assert_eq!(apply["data"]["details"]["translations"], 1);
+    assert_eq!(apply["data"]["details"]["textureRebinds"], 1);
+    assert_eq!(apply["data"]["details"]["shaderRebinds"], 1);
+    assert_eq!(apply["data"]["details"]["editedDrawableIndices"][0], 0);
+    assert_eq!(apply["data"]["validation"]["semanticReopen"], true);
+    assert_eq!(apply["data"]["validation"]["sourceUnchanged"], true);
+    assert_eq!(fs::read(&source).unwrap(), source_before);
+
+    let validate_output = binary()
+        .args(["validate", output.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab validate should run");
+    assert!(validate_output.status.success());
+    assert_eq!(stdout_json(&validate_output)["data"]["valid"], true);
+
+    fs::remove_dir_all(root).unwrap();
+}

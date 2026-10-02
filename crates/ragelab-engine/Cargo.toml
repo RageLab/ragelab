@@ -11,6 +11,7 @@ ragelab-hash = { path = "../ragelab-hash" }
 ragelab-ymap = { path = "../ragelab-ymap" }
 ragelab-ymf = { path = "../ragelab-ymf" }
 ragelab-ybn = { path = "../ragelab-ybn" }
+ragelab-ydd = { path = "../ragelab-ydd" }
 ragelab-ydr = { path = "../ragelab-ydr" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

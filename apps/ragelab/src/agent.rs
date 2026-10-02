@@ -14,7 +14,7 @@ use ragelab_engine::{
 };
 use ragelab_resource::{Rsc7Probe, Rsc7Resource};
 use ragelab_ybn::YbnCollision;
-use ragelab_ydd::YddDictionary;
+use ragelab_ydd::{YddDictionary, YddEditSession};
 use ragelab_ydr::{YdrDocument, YdrEditSession};
 use ragelab_ymap::Ymap;
 use ragelab_ymf::Ymf;
@@ -1028,17 +1028,74 @@ fn operations_for(asset_type: &str, bytes: &[u8]) -> Result<Vec<Value>, Box<dyn 
             }
         }
         "YDD" => {
-            YddDictionary::from_bytes(bytes).map_err(validation_error)?;
+            let dictionary = YddDictionary::from_bytes(bytes).map_err(validation_error)?;
+            let mut translation_available = false;
+            let mut texture_available = false;
+            let mut shader_available = false;
+
+            for entry in dictionary.entries() {
+                if let Ok(session) = YddEditSession::from_bytes(bytes, entry.index) {
+                    translation_available |= session.rigid_translation_capability().writable;
+                    texture_available |= !session.texture_bindings().is_empty();
+                    shader_available |=
+                        !session.shader_bindings().is_empty() && session.shader_count() > 0;
+                }
+            }
+
+            let declarative_available =
+                translation_available || texture_available || shader_available;
             operations.extend([
                 operation("ydd.info", false, false, false),
                 operation("spatial", false, true, false),
+                operation_with_availability(
+                    "plan",
+                    false,
+                    true,
+                    false,
+                    if declarative_available {
+                        "available"
+                    } else {
+                        "unavailable"
+                    },
+                    if declarative_available {
+                        Some("one or more declarative YDD writers are available")
+                    } else {
+                        Some("no writable drawable was found in this YDD")
+                    },
+                    &[],
+                ),
+                operation_with_availability(
+                    "apply",
+                    true,
+                    true,
+                    false,
+                    if declarative_available {
+                        "available"
+                    } else {
+                        "unavailable"
+                    },
+                    if declarative_available {
+                        Some("one or more declarative YDD writers are available")
+                    } else {
+                        Some("no writable drawable was found in this YDD")
+                    },
+                    &[],
+                ),
                 operation_with_availability(
                     "ydd.translate",
                     true,
                     false,
                     false,
-                    "parameterized",
-                    Some("eligibility is evaluated for the selected drawable"),
+                    if translation_available {
+                        "parameterized"
+                    } else {
+                        "unavailable"
+                    },
+                    if translation_available {
+                        Some("eligibility is evaluated for the selected drawable")
+                    } else {
+                        Some("no drawable currently passes the rigid translation gate")
+                    },
                     &["drawableIndex", "delta"],
                 ),
                 operation_with_availability(
@@ -1046,8 +1103,16 @@ fn operations_for(asset_type: &str, bytes: &[u8]) -> Result<Vec<Value>, Box<dyn 
                     true,
                     false,
                     false,
-                    "parameterized",
-                    Some("eligibility is evaluated for the selected drawable and bindings"),
+                    if texture_available {
+                        "parameterized"
+                    } else {
+                        "unavailable"
+                    },
+                    if texture_available {
+                        Some("eligibility is evaluated for the selected drawable and bindings")
+                    } else {
+                        Some("no drawable exposes editable texture bindings")
+                    },
                     &[
                         "drawableIndex",
                         "sourceShader",
@@ -1061,8 +1126,16 @@ fn operations_for(asset_type: &str, bytes: &[u8]) -> Result<Vec<Value>, Box<dyn 
                     true,
                     false,
                     false,
-                    "parameterized",
-                    Some("eligibility is evaluated for the selected drawable and geometry"),
+                    if shader_available {
+                        "parameterized"
+                    } else {
+                        "unavailable"
+                    },
+                    if shader_available {
+                        Some("eligibility is evaluated for the selected drawable and geometry")
+                    } else {
+                        Some("no drawable exposes editable shader bindings")
+                    },
                     &[
                         "drawableIndex",
                         "modelIndex",

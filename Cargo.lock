@@ -113,6 +113,7 @@ dependencies = [
  "ragelab-assets",
  "ragelab-hash",
  "ragelab-ybn",
+ "ragelab-ydd",
  "ragelab-ydr",
  "ragelab-ymap",
  "ragelab-ymf",

@@ -9,6 +9,7 @@ use std::{
 use ragelab_ybn::{
     repack_polygon_edits, CollisionShape, YbnCollision, YbnPolygonEdit, YbnPolygonKind,
 };
+use ragelab_ydd::{YddDictionary, YddEditSession};
 use ragelab_ydr::{ShaderBindingKey, TextureBindingKey, YdrDocument, YdrEditSession};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -200,17 +201,25 @@ pub fn plan_operation_document(
 
     let operations = if asset_type == "YDR" {
         plan_ydr_operations(&source_bytes, &document.operations, &mut reasons)?
+    } else if asset_type == "YDD" {
+        plan_ydd_operations(&source_bytes, &document.operations, &mut reasons)?
     } else {
         let mut operations = Vec::with_capacity(document.operations.len());
         for (index, operation) in document.operations.iter().enumerate() {
             let planned = match operation.operation_type.as_str() {
-                "ydr.translate" | "ydr.rebind-texture" | "ydr.rebind-shader" => PlannedOperation {
+                "ydr.translate" | "ydr.rebind-texture" | "ydr.rebind-shader" | "ydd.translate"
+                | "ydd.rebind-texture" | "ydd.rebind-shader" => PlannedOperation {
                     index,
                     operation_type: operation.operation_type.clone(),
                     allowed: false,
                     reason: Some(format!(
-                        "{} requires a YDR source, found {asset_type}",
-                        operation.operation_type
+                        "{} requires a {} source, found {asset_type}",
+                        operation.operation_type,
+                        if operation.operation_type.starts_with("ydd.") {
+                            "YDD"
+                        } else {
+                            "YDR"
+                        }
                     )),
                     details: Value::Null,
                 },
@@ -284,6 +293,7 @@ pub fn apply_operation_document(
 
     match plan.asset_type.as_str() {
         "YDR" => apply_ydr_operations(document, &plan),
+        "YDD" => apply_ydd_operations(document, &plan),
         "YBN" => apply_ybn_operations(document, &plan),
         other => Err(OperationError::Rejected(format!(
             "no declarative writer is available for asset type {other}"
@@ -477,6 +487,236 @@ fn reject_unknown_parameters(operation: &OperationSpec, allowed: &[&str]) -> Res
         }
     }
     Ok(())
+}
+
+fn plan_ydd_operations(
+    source_bytes: &[u8],
+    specs: &[OperationSpec],
+    reasons: &mut Vec<String>,
+) -> Result<Vec<PlannedOperation>, OperationError> {
+    let original = YddDictionary::from_bytes(source_bytes)
+        .map_err(|error| OperationError::InvalidSource(error.to_string()))?;
+    let original_entries = original.entries().to_vec();
+    let mut working_bytes = source_bytes.to_vec();
+    let mut planned = Vec::with_capacity(specs.len());
+
+    for (index, operation) in specs.iter().enumerate() {
+        match apply_ydd_operation_to_bytes(&working_bytes, operation) {
+            Ok((rewritten, details)) => {
+                working_bytes = rewritten;
+                planned.push(PlannedOperation {
+                    index,
+                    operation_type: operation.operation_type.clone(),
+                    allowed: true,
+                    reason: None,
+                    details,
+                });
+            }
+            Err(reason) => planned.push(PlannedOperation {
+                index,
+                operation_type: operation.operation_type.clone(),
+                allowed: false,
+                reason: Some(reason),
+                details: Value::Null,
+            }),
+        }
+    }
+
+    if planned.iter().all(|operation| operation.allowed) {
+        match YddDictionary::from_bytes(&working_bytes) {
+            Ok(reopened) if reopened.entries() == original_entries.as_slice() => {}
+            Ok(_) => reasons.push(
+                "YDD writer changed dictionary identity metadata during planned edits".into(),
+            ),
+            Err(error) => reasons.push(format!(
+                "YDD writer failed semantic re-open after planned edits: {error}"
+            )),
+        }
+    }
+
+    Ok(planned)
+}
+
+fn apply_ydd_operation_to_bytes(
+    bytes: &[u8],
+    operation: &OperationSpec,
+) -> Result<(Vec<u8>, Value), String> {
+    match operation.operation_type.as_str() {
+        "ydd.translate" => {
+            let (drawable_index, delta) = parse_ydd_translation(operation)?;
+            let mut session = YddEditSession::from_bytes(bytes, drawable_index)
+                .map_err(|error| error.to_string())?;
+            let entry = session.entry().clone();
+            session
+                .translate_rigid_model(delta)
+                .map_err(|error| error.to_string())?;
+            let rewritten = session.to_bytes().map_err(|error| error.to_string())?;
+            Ok((
+                rewritten,
+                json!({
+                    "drawableIndex": drawable_index,
+                    "drawableHash": format!("0x{:08X}", entry.name_hash),
+                    "drawableName": entry.name,
+                    "delta": delta,
+                }),
+            ))
+        }
+        "ydd.rebind-texture" => {
+            let (drawable_index, source, target) = parse_ydd_texture_rebind(operation)?;
+            let mut session = YddEditSession::from_bytes(bytes, drawable_index)
+                .map_err(|error| error.to_string())?;
+            let entry = session.entry().clone();
+            let target_binding = session
+                .texture_bindings()
+                .iter()
+                .find(|binding| binding.key == target)
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "target texture binding shader {} parameter {} was not found",
+                        target.shader_index, target.parameter_index
+                    )
+                })?;
+            session
+                .rebind_texture(source, target)
+                .map_err(|error| error.to_string())?;
+            let rewritten = session.to_bytes().map_err(|error| error.to_string())?;
+            Ok((
+                rewritten,
+                json!({
+                    "drawableIndex": drawable_index,
+                    "drawableHash": format!("0x{:08X}", entry.name_hash),
+                    "drawableName": entry.name,
+                    "source": {
+                        "shaderIndex": source.shader_index,
+                        "parameterIndex": source.parameter_index,
+                    },
+                    "target": {
+                        "shaderIndex": target.shader_index,
+                        "parameterIndex": target.parameter_index,
+                    },
+                    "targetParameterHash": format!("0x{:08X}", target_binding.parameter_hash),
+                    "targetTexture": target_binding.texture_name,
+                }),
+            ))
+        }
+        "ydd.rebind-shader" => {
+            let (drawable_index, binding, target_shader_index) =
+                parse_ydd_shader_rebind(operation)?;
+            let mut session = YddEditSession::from_bytes(bytes, drawable_index)
+                .map_err(|error| error.to_string())?;
+            let entry = session.entry().clone();
+            let current = session
+                .shader_bindings()
+                .iter()
+                .find(|candidate| candidate.key == binding)
+                .copied()
+                .ok_or_else(|| {
+                    format!(
+                        "shader binding model {} geometry {} was not found",
+                        binding.model_index, binding.geometry_index
+                    )
+                })?;
+            if current.shader_index == target_shader_index {
+                return Err("source geometry already uses target shader".into());
+            }
+            session
+                .rebind_shader(binding, target_shader_index)
+                .map_err(|error| error.to_string())?;
+            let rewritten = session.to_bytes().map_err(|error| error.to_string())?;
+            Ok((
+                rewritten,
+                json!({
+                    "drawableIndex": drawable_index,
+                    "drawableHash": format!("0x{:08X}", entry.name_hash),
+                    "drawableName": entry.name,
+                    "binding": {
+                        "modelIndex": binding.model_index,
+                        "geometryIndex": binding.geometry_index,
+                    },
+                    "sourceShaderIndex": current.shader_index,
+                    "targetShaderIndex": target_shader_index,
+                }),
+            ))
+        }
+        other => Err(format!("unsupported operation type: {other}")),
+    }
+}
+
+fn parse_ydd_translation(operation: &OperationSpec) -> Result<(usize, [f32; 3]), String> {
+    const ALLOWED: &[&str] = &["drawableIndex", "delta"];
+    reject_unknown_parameters(operation, ALLOWED)?;
+    let drawable_index = required_usize(&operation.parameters, "drawableIndex", "ydd.translate")?;
+    let delta = parse_delta_parameter(&operation.parameters, "ydd.translate")?;
+    Ok((drawable_index, delta))
+}
+
+fn parse_ydd_texture_rebind(
+    operation: &OperationSpec,
+) -> Result<(usize, TextureBindingKey, TextureBindingKey), String> {
+    const ALLOWED: &[&str] = &[
+        "drawableIndex",
+        "sourceShader",
+        "sourceParameter",
+        "targetShader",
+        "targetParameter",
+    ];
+    reject_unknown_parameters(operation, ALLOWED)?;
+
+    let drawable_index =
+        required_usize(&operation.parameters, "drawableIndex", "ydd.rebind-texture")?;
+    let source = TextureBindingKey {
+        shader_index: required_usize(&operation.parameters, "sourceShader", "ydd.rebind-texture")?,
+        parameter_index: required_usize(
+            &operation.parameters,
+            "sourceParameter",
+            "ydd.rebind-texture",
+        )?,
+    };
+    let target = TextureBindingKey {
+        shader_index: required_usize(&operation.parameters, "targetShader", "ydd.rebind-texture")?,
+        parameter_index: required_usize(
+            &operation.parameters,
+            "targetParameter",
+            "ydd.rebind-texture",
+        )?,
+    };
+    if source == target {
+        return Err("ydd.rebind-texture source and target bindings must differ".into());
+    }
+    Ok((drawable_index, source, target))
+}
+
+fn parse_ydd_shader_rebind(
+    operation: &OperationSpec,
+) -> Result<(usize, ShaderBindingKey, u16), String> {
+    const ALLOWED: &[&str] = &[
+        "drawableIndex",
+        "modelIndex",
+        "geometryIndex",
+        "targetShaderIndex",
+    ];
+    reject_unknown_parameters(operation, ALLOWED)?;
+
+    let drawable_index =
+        required_usize(&operation.parameters, "drawableIndex", "ydd.rebind-shader")?;
+    let binding = ShaderBindingKey {
+        model_index: required_usize(&operation.parameters, "modelIndex", "ydd.rebind-shader")?,
+        geometry_index: required_usize(
+            &operation.parameters,
+            "geometryIndex",
+            "ydd.rebind-shader",
+        )?,
+    };
+    let target = required_usize(
+        &operation.parameters,
+        "targetShaderIndex",
+        "ydd.rebind-shader",
+    )?;
+    let target_shader_index = u16::try_from(target)
+        .map_err(|_| "ydd.rebind-shader targetShaderIndex must fit in u16".to_string())?;
+
+    Ok((drawable_index, binding, target_shader_index))
 }
 
 fn plan_ybn_edit_polygon(
@@ -734,6 +974,111 @@ fn apply_ybn_operations(
     })
 }
 
+fn apply_ydd_operations(
+    document: &OperationDocument,
+    plan: &OperationPlan,
+) -> Result<OperationApplyResult, OperationError> {
+    let source_bytes = fs::read(&plan.source)?;
+    let original = YddDictionary::from_bytes(&source_bytes)
+        .map_err(|error| OperationError::InvalidSource(error.to_string()))?;
+    let original_entries = original.entries().to_vec();
+
+    let mut working_bytes = source_bytes.clone();
+    let mut translation_count = 0_usize;
+    let mut texture_rebind_count = 0_usize;
+    let mut shader_rebind_count = 0_usize;
+    let mut drawable_indices = Vec::<usize>::new();
+
+    for operation in &document.operations {
+        let (rewritten, details) = apply_ydd_operation_to_bytes(&working_bytes, operation)
+            .map_err(OperationError::Writer)?;
+        working_bytes = rewritten;
+
+        if let Some(index) = details.get("drawableIndex").and_then(Value::as_u64) {
+            let index = usize::try_from(index)
+                .map_err(|_| OperationError::Writer("drawable index overflow".into()))?;
+            if !drawable_indices.contains(&index) {
+                drawable_indices.push(index);
+            }
+        }
+
+        match operation.operation_type.as_str() {
+            "ydd.translate" => translation_count += 1,
+            "ydd.rebind-texture" => texture_rebind_count += 1,
+            "ydd.rebind-shader" => shader_rebind_count += 1,
+            other => {
+                return Err(OperationError::Rejected(format!(
+                    "unsupported operation type: {other}"
+                )))
+            }
+        }
+    }
+
+    let reopened = YddDictionary::from_bytes(&working_bytes)
+        .map_err(|error| OperationError::Writer(error.to_string()))?;
+    if reopened.entries() != original_entries.as_slice() {
+        return Err(OperationError::Writer(
+            "edited YDD changed dictionary identity metadata after semantic re-open".into(),
+        ));
+    }
+
+    if let Some(parent) = plan
+        .output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut file = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&plan.output)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(OperationError::Rejected(format!(
+                "output already exists; apply never overwrites existing files: {}",
+                plan.output.display()
+            )))
+        }
+        Err(error) => return Err(OperationError::Io(error)),
+    };
+    file.write_all(&working_bytes)?;
+    file.flush()?;
+
+    let source_unchanged = fs::read(&plan.source)? == source_bytes;
+    if !source_unchanged {
+        return Err(OperationError::Writer(
+            "source asset changed during non-destructive apply".into(),
+        ));
+    }
+
+    drawable_indices.sort_unstable();
+
+    Ok(OperationApplyResult {
+        schema: OPERATION_APPLY_SCHEMA,
+        schema_version: OPERATION_DOCUMENT_SCHEMA_VERSION,
+        source: plan.source.clone(),
+        output: plan.output.clone(),
+        asset_type: plan.asset_type.clone(),
+        operations_applied: document.operations.len(),
+        bytes_written: working_bytes.len(),
+        non_destructive: true,
+        validation: ApplyValidation {
+            semantic_reopen: true,
+            source_unchanged,
+        },
+        details: json!({
+            "drawables": reopened.entries().len(),
+            "editedDrawableIndices": drawable_indices,
+            "translations": translation_count,
+            "textureRebinds": texture_rebind_count,
+            "shaderRebinds": shader_rebind_count,
+        }),
+    })
+}
+
 fn apply_ydr_operations(
     document: &OperationDocument,
     plan: &OperationPlan,
@@ -872,31 +1217,40 @@ fn parse_translation_delta(operation: &OperationSpec) -> Result<[f32; 3], String
     if operation.parameters.len() != 1 || !operation.parameters.contains_key("delta") {
         return Err("ydr.translate accepts exactly one parameter: delta".into());
     }
+    parse_delta_parameter(&operation.parameters, "ydr.translate")
+}
 
-    let values = operation
-        .parameters
+fn parse_delta_parameter(
+    parameters: &Map<String, Value>,
+    operation_type: &str,
+) -> Result<[f32; 3], String> {
+    let values = parameters
         .get("delta")
         .and_then(Value::as_array)
         .ok_or_else(|| {
-            "ydr.translate delta must be an array of three finite numbers".to_string()
+            format!("{operation_type} delta must be an array of three finite numbers")
         })?;
     if values.len() != 3 {
-        return Err("ydr.translate delta must contain exactly three values".into());
+        return Err(format!(
+            "{operation_type} delta must contain exactly three values"
+        ));
     }
 
     let mut delta = [0.0_f32; 3];
     for (index, value) in values.iter().enumerate() {
         let value = value
             .as_f64()
-            .ok_or_else(|| "ydr.translate delta must contain only numbers".to_string())?;
+            .ok_or_else(|| format!("{operation_type} delta must contain only numbers"))?;
         if !value.is_finite() || value < f32::MIN as f64 || value > f32::MAX as f64 {
-            return Err("ydr.translate delta must contain only finite f32 values".into());
+            return Err(format!(
+                "{operation_type} delta must contain only finite f32 values"
+            ));
         }
         delta[index] = value as f32;
     }
 
     if delta == [0.0, 0.0, 0.0] {
-        return Err("ydr.translate delta must not be zero".into());
+        return Err(format!("{operation_type} delta must not be zero"));
     }
 
     Ok(delta)
@@ -1022,6 +1376,7 @@ mod tests {
     };
 
     use ragelab_ybn::{CollisionShape, YbnCollision};
+    use ragelab_ydd::{YddDictionary, YddEditSession};
     use ragelab_ydr::{YdrDocument, YdrEditSession};
     use serde_json::json;
 
@@ -1036,6 +1391,10 @@ mod tests {
 
     fn editable_ydr_fixture() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/ydr/editable.ydr")
+    }
+
+    fn ydd_fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/ydd/editable.ydd")
     }
 
     fn ybn_fixture() -> PathBuf {
@@ -1246,6 +1605,119 @@ mod tests {
             Some("ydr.rebind-texture source and target bindings must differ")
         );
         assert!(!root.join("output.ydr").exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn plans_and_applies_mixed_ydd_operations() {
+        let root = temp_root("ydd-apply");
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.ydd");
+        let output = root.join("output.ydd");
+        fs::copy(ydd_fixture(), &source).unwrap();
+        let source_before = fs::read(&source).unwrap();
+
+        let body = json!({
+            "schema": OPERATION_DOCUMENT_SCHEMA,
+            "schemaVersion": 1,
+            "source": "source.ydd",
+            "output": "output.ydd",
+            "operations": [
+                {
+                    "type": "ydd.translate",
+                    "drawableIndex": 0,
+                    "delta": [1.0, 0.0, 0.0]
+                },
+                {
+                    "type": "ydd.rebind-texture",
+                    "drawableIndex": 0,
+                    "sourceShader": 0,
+                    "sourceParameter": 0,
+                    "targetShader": 0,
+                    "targetParameter": 1
+                },
+                {
+                    "type": "ydd.rebind-shader",
+                    "drawableIndex": 0,
+                    "modelIndex": 0,
+                    "geometryIndex": 0,
+                    "targetShaderIndex": 1
+                }
+            ]
+        })
+        .to_string();
+        let document = parse_operation_document(&body).unwrap();
+        let plan = plan_operation_document(&document, &root).unwrap();
+
+        assert!(plan.allowed);
+        assert_eq!(plan.asset_type, "YDD");
+        assert_eq!(plan.operations.len(), 3);
+        assert!(plan.operations.iter().all(|operation| operation.allowed));
+        assert_eq!(plan.operations[0].details["drawableIndex"], 0);
+        assert_eq!(plan.operations[1].details["targetTexture"], "dict_normal");
+        assert_eq!(plan.operations[2].details["targetShaderIndex"], 1);
+        assert!(!output.exists());
+
+        let result = apply_operation_document(&document, &root).unwrap();
+        assert!(output.is_file());
+        assert!(result.validation.semantic_reopen);
+        assert!(result.validation.source_unchanged);
+        assert_eq!(result.details["translations"], 1);
+        assert_eq!(result.details["textureRebinds"], 1);
+        assert_eq!(result.details["shaderRebinds"], 1);
+        assert_eq!(result.details["editedDrawableIndices"][0], 0);
+        assert_eq!(fs::read(&source).unwrap(), source_before);
+
+        let output_bytes = fs::read(&output).unwrap();
+        let dictionary = YddDictionary::from_bytes(&output_bytes).unwrap();
+        assert_eq!(dictionary.entries().len(), 1);
+        assert_eq!(dictionary.entries()[0].name_hash, 0x1234_5678);
+
+        let session = YddEditSession::from_bytes(&output_bytes, 0).unwrap();
+        assert_eq!(
+            session.texture_bindings()[0].texture_name.as_deref(),
+            Some("dict_normal")
+        );
+        assert_eq!(session.shader_bindings()[0].shader_index, 1);
+        let document = session.document().unwrap();
+        assert_eq!(document.model.primitives[0].positions[0], [1.0, 0.0, 0.0]);
+        assert_eq!(document.model.primitives[0].shader_index, Some(1));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ydd_plan_fails_closed_for_invalid_drawable_selection() {
+        let root = temp_root("ydd-invalid");
+        fs::create_dir_all(&root).unwrap();
+        fs::copy(ydd_fixture(), root.join("source.ydd")).unwrap();
+
+        let body = json!({
+            "schema": OPERATION_DOCUMENT_SCHEMA,
+            "schemaVersion": 1,
+            "source": "source.ydd",
+            "output": "output.ydd",
+            "operations": [
+                {
+                    "type": "ydd.translate",
+                    "drawableIndex": 9,
+                    "delta": [1.0, 0.0, 0.0]
+                }
+            ]
+        })
+        .to_string();
+        let document = parse_operation_document(&body).unwrap();
+        let plan = plan_operation_document(&document, &root).unwrap();
+
+        assert!(!plan.allowed);
+        assert!(!plan.operations[0].allowed);
+        assert!(plan.operations[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("drawable index 9"));
+        assert!(!root.join("output.ydd").exists());
 
         fs::remove_dir_all(root).unwrap();
     }

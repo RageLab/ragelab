@@ -17,6 +17,7 @@ FIXTURES = ROOT / "fixtures" / "synthetic"
 STREAM = FIXTURES / "stream"
 YDR = FIXTURES / "ydr" / "simple.ydr"
 EDITABLE_YDR = FIXTURES / "ydr" / "editable.ydr"
+YDD = FIXTURES / "ydd" / "editable.ydd"
 YBN = FIXTURES / "ybn" / "simple.ybn"
 
 
@@ -105,6 +106,27 @@ def validate_editable_ydr() -> None:
     assert struct.unpack_from("<I", payload, 0x424)[0] == 0x55556666
 
 
+
+def validate_ydd() -> None:
+    data = YDD.read_bytes()
+    assert data[:4] == b"RSC7", f"{YDD}: missing RSC7 magic"
+    version, system_flags, graphics_flags = struct.unpack_from("<III", data, 4)
+    assert version == 165, f"{YDD}: unexpected resource version {version}"
+    assert system_flags == ((1 << 26) | 1)
+    assert graphics_flags == 0
+
+    payload = zlib.decompress(data[16:], -15)
+    assert len(payload) == 2048
+    assert struct.unpack_from("<I", payload, 0x80)[0] == 0x12345678
+    assert payload[0x440:0x44E] == b"test_drawable\0"
+    assert payload[0x600:0x60D] == b"dict_diffuse\0"
+    assert payload[0x620:0x62C] == b"dict_normal\0"
+    assert struct.unpack_from("<H", payload, 0x480 + 0x18)[0] == 2
+    assert struct.unpack_from("<H", payload, 0x640)[0] == 0
+    assert struct.unpack_from("<I", payload, 0x520)[0] == 0x55556666
+    assert struct.unpack_from("<I", payload, 0x524)[0] == 0x55556666
+
+
 def validate_ybn() -> None:
     data = YBN.read_bytes()
     assert data[:4] == b"RSC7", f"{YBN}: missing RSC7 magic"
@@ -148,6 +170,7 @@ def main() -> None:
     validate_ytyp()
     validate_ydr()
     validate_editable_ydr()
+    validate_ydd()
     validate_ybn()
     validate_stream_contract()
     print("synthetic fixture validation: ok")
