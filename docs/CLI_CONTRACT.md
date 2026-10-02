@@ -33,7 +33,7 @@ Errors use the same schema:
 
 Consumers must key compatibility decisions on `schema` and `schemaVersion`, not on human-readable output.
 
-The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `spatial <file> --json`, `plan <operation.json> --json`, `apply <operation.json> --json`, and `workspace scene ... --json` use the common response envelope.
+The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `spatial <file> --json`, `plan <operation.json> --json`, `apply <operation.json> --json`, `workspace preflight ... --json`, `workspace export ... --json`, and `workspace scene ... --json` use the common response envelope.
 
 ## Agent-first surface
 
@@ -164,6 +164,24 @@ ragelab spatial prop.ydr --json
 ```
 
 YMAP may produce world-space bounds or centers. Isolated YDR, YDD, and YBN assets remain `localOnly`; YTD is `nonSpatial`. RageLab does not promote local bounds or filename relationships into world coordinates.
+
+## Workspace preflight and export
+
+`workspace preflight` and `workspace export` expose the engine-owned dependency closure and resource export pipeline to software agents.
+
+```bash
+ragelab workspace preflight ./stream map.ymap --json
+ragelab workspace export ./stream map.ymap --output ./build/resource --json
+ragelab workspace export ./stream map_a.ymap map_b.ymap --output ./build/combined --json
+```
+
+Preflight is read-only and reports the combined closure, unresolved classification, MLO audit summaries, warnings, and whether export requires an explicit unresolved override.
+
+Export supports one or multiple selected YMAP roots. Unknown external dependencies fail closed unless `--allow-unresolved` is supplied. Export-gate rejections use exit code `3` / `unsupported` in structured mode and do not create the destination.
+
+A successful export response includes generated paths, copied-file counts, unresolved classification, and post-export validation. Automation must inspect `data.validation.valid`; warnings do not imply failure.
+
+See [EXPORT.md](EXPORT.md) for the full contract and output layout.
 
 ## Workspace scene
 

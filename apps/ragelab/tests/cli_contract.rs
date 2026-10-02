@@ -151,6 +151,8 @@ fn global_capabilities_preserve_legacy_ids_and_advertise_canonical_ids() {
     assert!(commands.iter().any(|value| value == "ydr.info"));
     assert!(canonical.iter().any(|value| value == "ydr.info"));
     assert!(canonical.iter().any(|value| value == "spatial"));
+    assert!(canonical.iter().any(|value| value == "workspace.preflight"));
+    assert!(canonical.iter().any(|value| value == "workspace.export"));
     assert!(canonical.iter().any(|value| value == "workspace.scene"));
     assert_eq!(body["responseEnvelope"]["schema"], "ragelab.cli.response");
     assert!(body["structuredOutput"]
@@ -168,6 +170,16 @@ fn global_capabilities_preserve_legacy_ids_and_advertise_canonical_ids() {
         .unwrap()
         .iter()
         .any(|value| value == "spatial"));
+    assert!(body["structuredOutput"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "workspace.preflight"));
+    assert!(body["structuredOutput"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "workspace.export"));
     assert!(body["structuredOutput"]
         .as_array()
         .unwrap()
@@ -815,6 +827,161 @@ fn ytd_inventory_and_writers_are_structured_and_non_destructive() {
         .expect("ragelab validate should run");
     assert!(validate_output.status.success());
     assert_eq!(stdout_json(&validate_output)["data"]["valid"], true);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn workspace_preflight_is_structured_for_single_and_combined_maps() {
+    let single = binary()
+        .args([
+            "workspace",
+            "preflight",
+            fixture("stream").to_str().unwrap(),
+            "simple.ymap",
+            "--json",
+        ])
+        .output()
+        .expect("ragelab workspace preflight should run");
+    assert!(single.status.success());
+    let single = stdout_json(&single);
+    assert_eq!(single["command"], "preflight");
+    assert_eq!(single["data"]["selectedRoots"][0], "simple.ymap");
+    assert_eq!(single["data"]["closureYmaps"].as_array().unwrap().len(), 1);
+    assert_eq!(single["data"]["unresolved"]["unknown"], 0);
+    assert_eq!(single["data"]["exportGate"]["allowedWithoutOverride"], true);
+
+    let combined = binary()
+        .args([
+            "workspace",
+            "preflight",
+            fixture("ymap-relations").to_str().unwrap(),
+            "relation_parent.ymap",
+            "relation_child_a.ymap",
+            "--json",
+        ])
+        .output()
+        .expect("ragelab combined preflight should run");
+    assert!(combined.status.success());
+    let combined = stdout_json(&combined);
+    assert_eq!(combined["command"], "preflight");
+    assert_eq!(
+        combined["data"]["selectedRoots"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(
+        combined["data"]["closureYmaps"].as_array().unwrap().len(),
+        4
+    );
+    assert!(combined["data"]["unresolved"]["unknown"].as_u64().unwrap() > 0);
+    assert_eq!(
+        combined["data"]["exportGate"]["requiresAllowUnresolved"],
+        true
+    );
+}
+
+#[test]
+fn workspace_export_is_structured_and_validates_single_resource() {
+    let root = temp_root("workspace-export-single");
+    fs::create_dir_all(&root).unwrap();
+    let output = root.join("single-resource");
+
+    let result = binary()
+        .args([
+            "workspace",
+            "export",
+            fixture("stream").to_str().unwrap(),
+            "simple.ymap",
+            "--output",
+            output.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("ragelab workspace export should run");
+
+    assert!(result.status.success());
+    let body = stdout_json(&result);
+    assert_eq!(body["command"], "export");
+    assert_eq!(body["data"]["resourceName"], "single-resource");
+    assert_eq!(body["data"]["selectedRoots"][0], "simple.ymap");
+    assert_eq!(body["data"]["unresolved"]["unknown"], 0);
+    assert_eq!(body["data"]["validation"]["valid"], true);
+    assert_eq!(body["data"]["validation"]["manifestValid"], true);
+    assert_eq!(body["data"]["validation"]["fxmanifestPresent"], true);
+    assert!(output.join("fxmanifest.lua").is_file());
+    assert!(output.join("stream").join("_manifest.ymf").is_file());
+    assert!(output.join(".ragelab-export.json").is_file());
+    assert!(output.join("stream").join("simple.ymap").is_file());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn combined_workspace_export_respects_unresolved_gate_and_override() {
+    let root = temp_root("workspace-export-combined");
+    fs::create_dir_all(&root).unwrap();
+    let blocked_output = root.join("blocked");
+    let allowed_output = root.join("allowed");
+    let workspace = fixture("ymap-relations");
+
+    let blocked = binary()
+        .args([
+            "workspace",
+            "export",
+            workspace.to_str().unwrap(),
+            "relation_parent.ymap",
+            "relation_child_a.ymap",
+            "--output",
+            blocked_output.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("ragelab combined export should run");
+    assert_eq!(blocked.status.code(), Some(3));
+    assert!(blocked.stderr.is_empty());
+    let blocked_body = stdout_json(&blocked);
+    assert_eq!(blocked_body["command"], "export");
+    assert_eq!(blocked_body["error"]["code"], "unsupported");
+    assert!(!blocked_output.exists());
+
+    let allowed = binary()
+        .args([
+            "workspace",
+            "export",
+            workspace.to_str().unwrap(),
+            "relation_parent.ymap",
+            "relation_child_a.ymap",
+            "--output",
+            allowed_output.to_str().unwrap(),
+            "--allow-unresolved",
+            "--json",
+        ])
+        .output()
+        .expect("ragelab combined export with override should run");
+    assert!(allowed.status.success());
+    let allowed_body = stdout_json(&allowed);
+    assert_eq!(allowed_body["command"], "export");
+    assert_eq!(
+        allowed_body["data"]["selectedRoots"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(allowed_body["data"]["output"]["manifestMaps"], 4);
+    assert_eq!(allowed_body["data"]["unresolved"]["allowUnresolved"], true);
+    assert!(
+        allowed_body["data"]["unresolved"]["unknown"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(allowed_body["data"]["validation"]["valid"], true);
+    assert!(allowed_output
+        .join("stream")
+        .join("_manifest.ymf")
+        .is_file());
+    assert!(allowed_output.join(".ragelab-export.json").is_file());
 
     fs::remove_dir_all(root).unwrap();
 }

@@ -8,8 +8,8 @@ use std::{
 use ragelab_assets::{AssetKind, WorkspaceIndex};
 use ragelab_engine::{
     apply_operation_document, assemble_ymap_scene, isolated_asset_spatial_context,
-    parse_operation_document, plan_operation_document, ymap_spatial_context, OperationError,
-    SceneAssemblyOptions, SceneAssetSelector, SceneCollisionState, SceneManifest,
+    parse_operation_document, plan_operation_document, ymap_spatial_context, EngineError,
+    OperationError, SceneAssemblyOptions, SceneAssetSelector, SceneCollisionState, SceneManifest,
     SceneResolutionReasonCode, SceneResolutionState, SpatialContext, SpatialProvenance,
 };
 use ragelab_resource::{Rsc7Probe, Rsc7Resource};
@@ -36,6 +36,8 @@ pub fn is_structured_command(command: &str) -> bool {
             | "apply"
             | "spatial"
             | "scene"
+            | "preflight"
+            | "export"
     )
 }
 
@@ -45,6 +47,12 @@ pub fn classify_exit(error: &(dyn Error + 'static)) -> (i32, &'static str) {
             io::ErrorKind::InvalidInput => (2, "invalid_input"),
             io::ErrorKind::Unsupported => (3, "unsupported"),
             io::ErrorKind::InvalidData => (4, "validation_failed"),
+            _ => (1, "operation_failed"),
+        };
+    }
+    if let Some(error) = error.downcast_ref::<EngineError>() {
+        return match error {
+            EngineError::ExportGate(_) => (3, "unsupported"),
             _ => (1, "operation_failed"),
         };
     }
@@ -754,6 +762,7 @@ pub fn normalize_command_args(args: Vec<String>) -> Vec<String> {
         ("workspace", "preflight") => Some("preflight"),
         ("workspace", "mlo-audit") => Some("mlo-audit"),
         ("workspace", "extract") => Some("extract"),
+        ("workspace", "export") => Some("export"),
         ("workspace", "scene") => Some("scene"),
         ("gta", "vanilla-index") => Some("vanilla-index"),
         _ => None,
@@ -769,7 +778,7 @@ pub fn normalize_command_args(args: Vec<String>) -> Vec<String> {
     normalized
 }
 
-fn print_success(command: &str, data: Value) -> Result<(), serde_json::Error> {
+pub(crate) fn print_success(command: &str, data: Value) -> Result<(), serde_json::Error> {
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({

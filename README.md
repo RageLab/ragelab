@@ -57,6 +57,8 @@ ragelab ydr info asset.ydr
 ragelab ymap info map.ymap
 ragelab ytd info textures.ytd
 ragelab workspace deps ./stream map.ymap
+ragelab workspace preflight ./stream map.ymap --json
+ragelab workspace export ./stream map.ymap --output ./build/my-resource --json
 ragelab workspace scene ./stream map.ymap --json
 ```
 
@@ -70,7 +72,7 @@ ragelab capabilities --json
 
 Legacy flat command names remain available as compatibility aliases during the 0.x series. New integrations should use the canonical namespace form.
 
-Structured commands return versioned JSON and deterministic process exit codes. The contract is documented in [docs/CLI_CONTRACT.md](docs/CLI_CONTRACT.md). Current format and adapter coverage is tracked in [docs/CAPABILITIES.md](docs/CAPABILITIES.md).
+Structured commands return versioned JSON and deterministic process exit codes. The contract is documented in [docs/CLI_CONTRACT.md](docs/CLI_CONTRACT.md), workspace export behavior in [docs/EXPORT.md](docs/EXPORT.md), and current format/adapter coverage in [docs/CAPABILITIES.md](docs/CAPABILITIES.md).
 
 ## Repository layout
 
