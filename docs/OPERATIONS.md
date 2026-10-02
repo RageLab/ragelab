@@ -205,6 +205,69 @@ YDD requirements:
 - operations are applied in document order to intermediate in-memory YDD bytes, so one document may safely target more than one drawable;
 - no output file is created during planning.
 
+### `ytd.replace-dds`
+
+Performs a layout-preserving replacement of one Legacy YTD texture from an external classic DDS payload.
+
+```json
+{
+  "type": "ytd.replace-dds",
+  "textureIndex": 0,
+  "replacement": "payloads/replacement.dds"
+}
+```
+
+The replacement DDS must match the selected texture's existing dimensions, mip count, format, and encoded allocation.
+
+### `ytd.repack-dds`
+
+Rebuilds one selected Legacy YTD texture from an external classic DDS payload and relocates its encoded payload when required.
+
+```json
+{
+  "type": "ytd.repack-dds",
+  "textureIndex": 0,
+  "replacement": "payloads/resized.dds"
+}
+```
+
+The selected texture keeps its identity and usage metadata. The current writer supports the evidence-backed classic DDS families already implemented by `ragelab-ytd`.
+
+### `ytd.repack-rgba`
+
+Rebuilds one selected 2D Legacy YTD texture from an external raw RGBA8 payload, generates a deterministic full mip chain, and preserves the target texture's existing supported format.
+
+```json
+{
+  "type": "ytd.repack-rgba",
+  "textureIndex": 0,
+  "width": 256,
+  "height": 256,
+  "replacement": "payloads/texture.rgba"
+}
+```
+
+Requirements:
+
+- `width` and `height` must be positive u16 values;
+- the raw file length must equal `width * height * 4` bytes;
+- the selected target must be a supported 2D RGBA8, BC1, or BC3 texture;
+- mip generation and encoding are performed by `ragelab-ytd`, not by the CLI adapter.
+
+### `ytd.rebuild-compact`
+
+Rebuilds a Legacy v13 YTD into the compact deterministic serializer while preserving texture semantics and encoded payloads.
+
+```json
+{
+  "type": "ytd.rebuild-compact"
+}
+```
+
+YTD payload paths are resolved relative to the operation document, just like relative `source` and `output` paths. Payload bytes are not embedded in the operation JSON.
+
+YTD operations are applied in document order to intermediate in-memory bytes during both `plan` and `apply`. Planning reads referenced payload files and performs the real writer/reparse checks but creates no asset output. Apply repeats the sequence, writes with create-new semantics, semantically reopens the result, and verifies the source remains unchanged.
+
 ## Fail-closed behavior
 
 Unsupported operations do not fall back to guessed binary layouts.

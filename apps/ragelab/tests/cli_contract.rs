@@ -5,6 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use ragelab_ytd::Ytd;
 use serde_json::{json, Value};
 
 fn binary() -> Command {
@@ -646,6 +647,164 @@ fn ydd_writers_are_declarative_and_non_destructive() {
     assert_eq!(apply["data"]["details"]["textureRebinds"], 1);
     assert_eq!(apply["data"]["details"]["shaderRebinds"], 1);
     assert_eq!(apply["data"]["details"]["editedDrawableIndices"][0], 0);
+    assert_eq!(apply["data"]["validation"]["semanticReopen"], true);
+    assert_eq!(apply["data"]["validation"]["sourceUnchanged"], true);
+    assert_eq!(fs::read(&source).unwrap(), source_before);
+
+    let validate_output = binary()
+        .args(["validate", output.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab validate should run");
+    assert!(validate_output.status.success());
+    assert_eq!(stdout_json(&validate_output)["data"]["valid"], true);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn ytd_inventory_and_writers_are_structured_and_non_destructive() {
+    let root = temp_root("ytd-plan-apply");
+    fs::create_dir_all(&root).unwrap();
+
+    let source = root.join("source.ytd");
+    let output = root.join("output.ytd");
+    let operation = root.join("operation.json");
+    fs::copy(fixture("ytd/simple.ytd"), &source).unwrap();
+    let source_before = fs::read(&source).unwrap();
+
+    let inspect_output = binary()
+        .args(["inspect", source.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab inspect should run");
+    assert!(inspect_output.status.success());
+    let inspect = stdout_json(&inspect_output);
+    assert_eq!(inspect["data"]["type"], "YTD");
+    assert_eq!(inspect["data"]["details"]["textureCount"], 1);
+    assert_eq!(
+        inspect["data"]["details"]["textures"][0]["name"],
+        "synthetic_diffuse"
+    );
+    assert_eq!(
+        inspect["data"]["details"]["textures"][0]["preview"]["topMipRgba"],
+        true
+    );
+    assert_eq!(
+        inspect["data"]["details"]["textures"][0]["preview"]["classicDds"],
+        true
+    );
+    assert_eq!(
+        inspect["data"]["details"]["textures"][0]["writers"]["rgbaRepack"],
+        true
+    );
+
+    let capabilities_output = binary()
+        .args(["capabilities", source.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab capabilities should run");
+    assert!(capabilities_output.status.success());
+    let capabilities = stdout_json(&capabilities_output);
+    let operations = capabilities["data"]["operations"].as_array().unwrap();
+    assert_eq!(
+        operations
+            .iter()
+            .find(|operation| operation["id"] == "plan")
+            .unwrap()["availability"],
+        "available"
+    );
+    assert_eq!(
+        operations
+            .iter()
+            .find(|operation| operation["id"] == "ytd.repack-rgba")
+            .unwrap()["availability"],
+        "parameterized"
+    );
+    assert_eq!(
+        operations
+            .iter()
+            .find(|operation| operation["id"] == "ytd.rebuild-compact")
+            .unwrap()["availability"],
+        "available"
+    );
+
+    let original_dds = Ytd::texture_dds(&source_before, 0).unwrap();
+    fs::write(root.join("same.dds"), &original_dds).unwrap();
+
+    let resized_rgba = vec![
+        255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+    ];
+    let resized_dds = Ytd::rgba8_dds_with_generated_mips(2, 2, &resized_rgba).unwrap();
+    fs::write(root.join("resized.dds"), &resized_dds).unwrap();
+
+    let rgba = vec![64_u8; 4 * 4 * 4];
+    fs::write(root.join("replacement.rgba"), &rgba).unwrap();
+
+    let body = json!({
+        "schema": "ragelab.operation",
+        "schemaVersion": 1,
+        "source": "source.ytd",
+        "output": "output.ytd",
+        "operations": [
+            {
+                "type": "ytd.replace-dds",
+                "textureIndex": 0,
+                "replacement": "same.dds"
+            },
+            {
+                "type": "ytd.repack-dds",
+                "textureIndex": 0,
+                "replacement": "resized.dds"
+            },
+            {
+                "type": "ytd.repack-rgba",
+                "textureIndex": 0,
+                "width": 4,
+                "height": 4,
+                "replacement": "replacement.rgba"
+            },
+            {
+                "type": "ytd.rebuild-compact"
+            }
+        ]
+    });
+    fs::write(&operation, body.to_string()).unwrap();
+
+    let plan_output = binary()
+        .args(["plan", operation.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab plan should run");
+    assert!(plan_output.status.success());
+    let plan = stdout_json(&plan_output);
+    assert_eq!(plan["data"]["allowed"], true);
+    assert_eq!(plan["data"]["assetType"], "YTD");
+    assert_eq!(
+        plan["data"]["operations"][0]["details"]["layoutPreserved"],
+        true
+    );
+    assert_eq!(
+        plan["data"]["operations"][1]["details"]["sizeAfter"],
+        json!([2, 2])
+    );
+    assert_eq!(
+        plan["data"]["operations"][2]["details"]["sizeAfter"],
+        json!([4, 4])
+    );
+    assert_eq!(
+        plan["data"]["operations"][3]["details"]["layoutRebuilt"],
+        true
+    );
+    assert!(!output.exists());
+
+    let apply_output = binary()
+        .args(["apply", operation.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab apply should run");
+    assert!(apply_output.status.success());
+    let apply = stdout_json(&apply_output);
+    assert_eq!(apply["data"]["assetType"], "YTD");
+    assert_eq!(apply["data"]["details"]["replaceDds"], 1);
+    assert_eq!(apply["data"]["details"]["repackDds"], 1);
+    assert_eq!(apply["data"]["details"]["repackRgba"], 1);
+    assert_eq!(apply["data"]["details"]["compactRebuilds"], 1);
     assert_eq!(apply["data"]["validation"]["semanticReopen"], true);
     assert_eq!(apply["data"]["validation"]["sourceUnchanged"], true);
     assert_eq!(fs::read(&source).unwrap(), source_before);

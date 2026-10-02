@@ -119,6 +119,31 @@ impl TextureFormat {
             _ => self.normalized_name(),
         }
     }
+
+    pub fn supports_rgba_preview(self) -> bool {
+        matches!(
+            self,
+            Self::Bgra8
+                | Self::Bgrx8
+                | Self::B5G5R5A1
+                | Self::A8
+                | Self::Rgba8
+                | Self::R8
+                | Self::Bc1
+                | Self::Bc2
+                | Self::Bc3
+                | Self::Bc4
+                | Self::Bc5
+        )
+    }
+
+    pub fn supports_classic_dds(self) -> bool {
+        matches!(self, Self::Rgba8 | Self::Bc1 | Self::Bc3)
+    }
+
+    pub fn supports_rgba_repack(self) -> bool {
+        matches!(self, Self::Rgba8 | Self::Bc1 | Self::Bc3)
+    }
 }
 
 impl fmt::Display for TextureFormat {

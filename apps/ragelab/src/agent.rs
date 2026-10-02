@@ -846,10 +846,45 @@ fn inspect_format(path: &Path, bytes: &[u8], asset_type: &str) -> Result<Value, 
                 .iter()
                 .map(|texture| texture.format.normalized_name().to_string())
                 .collect::<BTreeSet<_>>();
+            let textures = ytd
+                .textures
+                .iter()
+                .enumerate()
+                .map(|(index, texture)| {
+                    json!({
+                        "index": index,
+                        "name": texture.name,
+                        "dictionaryHash": format!("0x{:08X}", texture.dictionary_hash),
+                        "nameHash": format!("0x{:08X}", texture.name_hash),
+                        "dictionaryHashMatchesName": texture.dictionary_hash_matches_name(),
+                        "width": texture.width,
+                        "height": texture.height,
+                        "depth": texture.depth,
+                        "stride": texture.stride,
+                        "format": texture.format.normalized_name(),
+                        "formatRaw": format!("0x{:08X}", texture.format.raw()),
+                        "mipLevels": texture.levels,
+                        "usage": texture.usage,
+                        "usageFlags": format!("0x{:08X}", texture.usage_flags),
+                        "extraFlags": format!("0x{:08X}", texture.extra_flags),
+                        "encodedBytes": texture.data_length,
+                        "preview": {
+                            "topMipRgba": texture.format.supports_rgba_preview(),
+                            "classicDds": texture.depth == 1
+                                && texture.format.supports_classic_dds(),
+                        },
+                        "writers": {
+                            "rgbaRepack": texture.depth == 1
+                                && texture.format.supports_rgba_repack(),
+                        },
+                    })
+                })
+                .collect::<Vec<_>>();
             Ok(json!({
                 "resourceVersion": ytd.resource_version,
-                "textures": ytd.textures.len(),
+                "textureCount": ytd.textures.len(),
                 "formats": formats,
+                "textures": textures,
             }))
         }
         "YBN" => {
@@ -1147,24 +1182,68 @@ fn operations_for(asset_type: &str, bytes: &[u8]) -> Result<Vec<Value>, Box<dyn 
         }
         "YTD" => {
             let ytd = Ytd::from_bytes(bytes).map_err(validation_error)?;
-            let has_textures = !ytd.textures.is_empty();
+            let dds_available = ytd
+                .textures
+                .iter()
+                .any(|texture| texture.depth == 1 && texture.format.supports_classic_dds());
+            let rgba_available = ytd
+                .textures
+                .iter()
+                .any(|texture| texture.depth == 1 && texture.format.supports_rgba_repack());
+            let compact_result = Ytd::rebuild_legacy_compact(bytes);
+            let compact_available = compact_result.is_ok();
+            let declarative_available = dds_available || rgba_available || compact_available;
             operations.extend([
                 operation("ytd.info", false, false, false),
                 operation("spatial", false, true, false),
+                operation_with_availability(
+                    "plan",
+                    false,
+                    true,
+                    false,
+                    if declarative_available {
+                        "available"
+                    } else {
+                        "unavailable"
+                    },
+                    if declarative_available {
+                        Some("one or more declarative Legacy YTD writers are available")
+                    } else {
+                        Some("no declarative writer is available for this YTD")
+                    },
+                    &[],
+                ),
+                operation_with_availability(
+                    "apply",
+                    true,
+                    true,
+                    false,
+                    if declarative_available {
+                        "available"
+                    } else {
+                        "unavailable"
+                    },
+                    if declarative_available {
+                        Some("one or more declarative Legacy YTD writers are available")
+                    } else {
+                        Some("no declarative writer is available for this YTD")
+                    },
+                    &[],
+                ),
                 operation_with_availability(
                     "ytd.extract-dds",
                     true,
                     false,
                     false,
-                    if has_textures {
+                    if dds_available {
                         "parameterized"
                     } else {
                         "unavailable"
                     },
-                    if has_textures {
-                        Some("requires a valid textureIndex")
+                    if dds_available {
+                        Some("requires a 2D RGBA8, BC1, or BC3 textureIndex")
                     } else {
-                        Some("texture dictionary contains no textures")
+                        Some("no texture supports classic DDS export")
                     },
                     &["textureIndex", "output"],
                 ),
@@ -1173,46 +1252,54 @@ fn operations_for(asset_type: &str, bytes: &[u8]) -> Result<Vec<Value>, Box<dyn 
                     true,
                     false,
                     false,
-                    if has_textures {
+                    if dds_available {
                         "parameterized"
                     } else {
                         "unavailable"
                     },
-                    Some("eligibility depends on the selected texture and replacement DDS"),
-                    &["textureIndex", "replacement", "output"],
+                    Some("eligibility depends on the selected Legacy texture and replacement DDS"),
+                    &["textureIndex", "replacement"],
                 ),
                 operation_with_availability(
                     "ytd.repack-dds",
                     true,
                     false,
                     false,
-                    if has_textures {
+                    if dds_available {
                         "parameterized"
                     } else {
                         "unavailable"
                     },
-                    Some("eligibility depends on the selected texture and replacement DDS"),
-                    &["textureIndex", "replacement", "output"],
+                    Some("eligibility depends on the selected Legacy texture and replacement DDS"),
+                    &["textureIndex", "replacement"],
                 ),
                 operation_with_availability(
                     "ytd.repack-rgba",
                     true,
                     false,
                     false,
-                    if has_textures {
+                    if rgba_available {
                         "parameterized"
                     } else {
                         "unavailable"
                     },
                     Some(
-                        "eligibility depends on the selected texture, dimensions, and RGBA payload",
+                        "requires a 2D RGBA8, BC1, or BC3 target plus dimensions and an external RGBA payload",
                     ),
-                    &["textureIndex", "width", "height", "replacement", "output"],
+                    &["textureIndex", "width", "height", "replacement"],
                 ),
             ]);
 
-            match Ytd::rebuild_legacy_compact(bytes) {
-                Ok(_) => operations.push(operation("ytd.rebuild-compact", true, false, false)),
+            match compact_result {
+                Ok(_) => operations.push(operation_with_availability(
+                    "ytd.rebuild-compact",
+                    true,
+                    false,
+                    false,
+                    "available",
+                    Some("Legacy v13 compact rebuild is supported for this YTD"),
+                    &[],
+                )),
                 Err(error) => operations.push(operation_with_availability(
                     "ytd.rebuild-compact",
                     true,
@@ -1220,7 +1307,7 @@ fn operations_for(asset_type: &str, bytes: &[u8]) -> Result<Vec<Value>, Box<dyn 
                     false,
                     "unavailable",
                     Some(&error.to_string()),
-                    &["output"],
+                    &[],
                 )),
             }
         }

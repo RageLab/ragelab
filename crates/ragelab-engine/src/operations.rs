@@ -11,6 +11,7 @@ use ragelab_ybn::{
 };
 use ragelab_ydd::{YddDictionary, YddEditSession};
 use ragelab_ydr::{ShaderBindingKey, TextureBindingKey, YdrDocument, YdrEditSession};
+use ragelab_ytd::{TextureInfo, Ytd};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -203,12 +204,22 @@ pub fn plan_operation_document(
         plan_ydr_operations(&source_bytes, &document.operations, &mut reasons)?
     } else if asset_type == "YDD" {
         plan_ydd_operations(&source_bytes, &document.operations, &mut reasons)?
+    } else if asset_type == "YTD" {
+        plan_ytd_operations(&source_bytes, &document.operations, base_dir, &mut reasons)?
     } else {
         let mut operations = Vec::with_capacity(document.operations.len());
         for (index, operation) in document.operations.iter().enumerate() {
             let planned = match operation.operation_type.as_str() {
-                "ydr.translate" | "ydr.rebind-texture" | "ydr.rebind-shader" | "ydd.translate"
-                | "ydd.rebind-texture" | "ydd.rebind-shader" => PlannedOperation {
+                "ydr.translate"
+                | "ydr.rebind-texture"
+                | "ydr.rebind-shader"
+                | "ydd.translate"
+                | "ydd.rebind-texture"
+                | "ydd.rebind-shader"
+                | "ytd.replace-dds"
+                | "ytd.repack-dds"
+                | "ytd.repack-rgba"
+                | "ytd.rebuild-compact" => PlannedOperation {
                     index,
                     operation_type: operation.operation_type.clone(),
                     allowed: false,
@@ -217,6 +228,8 @@ pub fn plan_operation_document(
                         operation.operation_type,
                         if operation.operation_type.starts_with("ydd.") {
                             "YDD"
+                        } else if operation.operation_type.starts_with("ytd.") {
+                            "YTD"
                         } else {
                             "YDR"
                         }
@@ -294,6 +307,7 @@ pub fn apply_operation_document(
     match plan.asset_type.as_str() {
         "YDR" => apply_ydr_operations(document, &plan),
         "YDD" => apply_ydd_operations(document, &plan),
+        "YTD" => apply_ytd_operations(document, &plan, base_dir),
         "YBN" => apply_ybn_operations(document, &plan),
         other => Err(OperationError::Rejected(format!(
             "no declarative writer is available for asset type {other}"
@@ -719,6 +733,386 @@ fn parse_ydd_shader_rebind(
     Ok((drawable_index, binding, target_shader_index))
 }
 
+fn plan_ytd_operations(
+    source_bytes: &[u8],
+    specs: &[OperationSpec],
+    base_dir: &Path,
+    reasons: &mut Vec<String>,
+) -> Result<Vec<PlannedOperation>, OperationError> {
+    Ytd::from_bytes(source_bytes)
+        .map_err(|error| OperationError::InvalidSource(error.to_string()))?;
+
+    let mut working_bytes = source_bytes.to_vec();
+    let mut planned = Vec::with_capacity(specs.len());
+
+    for (index, operation) in specs.iter().enumerate() {
+        match apply_ytd_operation_to_bytes(&working_bytes, operation, base_dir) {
+            Ok((rewritten, details)) => {
+                working_bytes = rewritten;
+                planned.push(PlannedOperation {
+                    index,
+                    operation_type: operation.operation_type.clone(),
+                    allowed: true,
+                    reason: None,
+                    details,
+                });
+            }
+            Err(reason) => planned.push(PlannedOperation {
+                index,
+                operation_type: operation.operation_type.clone(),
+                allowed: false,
+                reason: Some(reason),
+                details: Value::Null,
+            }),
+        }
+    }
+
+    if planned.iter().all(|operation| operation.allowed) {
+        if let Err(error) = Ytd::from_bytes(&working_bytes) {
+            reasons.push(format!(
+                "YTD writer failed semantic re-open after planned edits: {error}"
+            ));
+        }
+    }
+
+    Ok(planned)
+}
+
+fn apply_ytd_operation_to_bytes(
+    bytes: &[u8],
+    operation: &OperationSpec,
+    base_dir: &Path,
+) -> Result<(Vec<u8>, Value), String> {
+    match operation.operation_type.as_str() {
+        "ytd.replace-dds" => {
+            const ALLOWED: &[&str] = &["textureIndex", "replacement"];
+            reject_unknown_parameters(operation, ALLOWED)?;
+            let texture_index =
+                required_usize(&operation.parameters, "textureIndex", "ytd.replace-dds")?;
+            let replacement =
+                required_payload_path(&operation.parameters, "replacement", "ytd.replace-dds")?;
+            let replacement_path = resolve_path(base_dir, &replacement);
+            let replacement_bytes = fs::read(&replacement_path).map_err(|error| {
+                format!(
+                    "ytd.replace-dds could not read replacement {}: {error}",
+                    replacement_path.display()
+                )
+            })?;
+
+            let before = Ytd::from_bytes(bytes).map_err(|error| error.to_string())?;
+            let texture = before.textures.get(texture_index).cloned().ok_or_else(|| {
+                format!(
+                    "texture index {texture_index} is out of bounds for YTD with {} textures",
+                    before.textures.len()
+                )
+            })?;
+            let rewritten = Ytd::replace_texture_from_dds(bytes, texture_index, &replacement_bytes)
+                .map_err(|error| error.to_string())?;
+            let after = Ytd::from_bytes(&rewritten).map_err(|error| error.to_string())?;
+            if after != before {
+                return Err(
+                    "layout-preserving DDS replacement unexpectedly changed YTD metadata".into(),
+                );
+            }
+
+            Ok((
+                rewritten,
+                json!({
+                    "textureIndex": texture_index,
+                    "texture": texture.name,
+                    "dictionaryHash": format!("0x{:08X}", texture.dictionary_hash),
+                    "size": [texture.width, texture.height],
+                    "format": texture.format.normalized_name(),
+                    "mipLevels": texture.levels,
+                    "encodedBytes": texture.data_length,
+                    "replacement": replacement.display().to_string(),
+                    "layoutPreserved": true,
+                }),
+            ))
+        }
+        "ytd.repack-dds" => {
+            const ALLOWED: &[&str] = &["textureIndex", "replacement"];
+            reject_unknown_parameters(operation, ALLOWED)?;
+            let texture_index =
+                required_usize(&operation.parameters, "textureIndex", "ytd.repack-dds")?;
+            let replacement =
+                required_payload_path(&operation.parameters, "replacement", "ytd.repack-dds")?;
+            let replacement_path = resolve_path(base_dir, &replacement);
+            let replacement_bytes = fs::read(&replacement_path).map_err(|error| {
+                format!(
+                    "ytd.repack-dds could not read replacement {}: {error}",
+                    replacement_path.display()
+                )
+            })?;
+
+            let before = Ytd::from_bytes(bytes).map_err(|error| error.to_string())?;
+            let before_texture = before.textures.get(texture_index).cloned().ok_or_else(|| {
+                format!(
+                    "texture index {texture_index} is out of bounds for YTD with {} textures",
+                    before.textures.len()
+                )
+            })?;
+            let rewritten =
+                Ytd::replace_texture_from_dds_relocated(bytes, texture_index, &replacement_bytes)
+                    .map_err(|error| error.to_string())?;
+            let after = Ytd::from_bytes(&rewritten).map_err(|error| error.to_string())?;
+            verify_ytd_repack(bytes, &before, &rewritten, &after, texture_index)?;
+            let after_texture = after
+                .textures
+                .get(texture_index)
+                .ok_or_else(|| "repacked YTD lost the target texture".to_string())?;
+
+            Ok((
+                rewritten,
+                json!({
+                    "textureIndex": texture_index,
+                    "texture": after_texture.name,
+                    "dictionaryHash": format!("0x{:08X}", after_texture.dictionary_hash),
+                    "sizeBefore": [before_texture.width, before_texture.height],
+                    "sizeAfter": [after_texture.width, after_texture.height],
+                    "format": after_texture.format.normalized_name(),
+                    "mipLevelsBefore": before_texture.levels,
+                    "mipLevelsAfter": after_texture.levels,
+                    "encodedBytesBefore": before_texture.data_length,
+                    "encodedBytesAfter": after_texture.data_length,
+                    "replacement": replacement.display().to_string(),
+                    "payloadRelocated": true,
+                    "formatPreserved": true,
+                }),
+            ))
+        }
+        "ytd.repack-rgba" => {
+            const ALLOWED: &[&str] = &["textureIndex", "width", "height", "replacement"];
+            reject_unknown_parameters(operation, ALLOWED)?;
+            let texture_index =
+                required_usize(&operation.parameters, "textureIndex", "ytd.repack-rgba")?;
+            let width = required_u16(&operation.parameters, "width", "ytd.repack-rgba")?;
+            let height = required_u16(&operation.parameters, "height", "ytd.repack-rgba")?;
+            if width == 0 || height == 0 {
+                return Err("ytd.repack-rgba width and height must be greater than zero".into());
+            }
+            let replacement =
+                required_payload_path(&operation.parameters, "replacement", "ytd.repack-rgba")?;
+            let replacement_path = resolve_path(base_dir, &replacement);
+            let rgba = fs::read(&replacement_path).map_err(|error| {
+                format!(
+                    "ytd.repack-rgba could not read replacement {}: {error}",
+                    replacement_path.display()
+                )
+            })?;
+            let expected_len = usize::from(width)
+                .checked_mul(usize::from(height))
+                .and_then(|pixels| pixels.checked_mul(4))
+                .ok_or_else(|| {
+                    "ytd.repack-rgba dimensions overflow RGBA byte length".to_string()
+                })?;
+            if rgba.len() != expected_len {
+                return Err(format!(
+                    "ytd.repack-rgba replacement length {} does not match {}x{} RGBA8 payload length {expected_len}",
+                    rgba.len(),
+                    width,
+                    height
+                ));
+            }
+
+            let before = Ytd::from_bytes(bytes).map_err(|error| error.to_string())?;
+            let before_texture = before.textures.get(texture_index).cloned().ok_or_else(|| {
+                format!(
+                    "texture index {texture_index} is out of bounds for YTD with {} textures",
+                    before.textures.len()
+                )
+            })?;
+            let rewritten = Ytd::replace_texture_from_rgba_relocated(
+                bytes,
+                texture_index,
+                width,
+                height,
+                &rgba,
+            )
+            .map_err(|error| error.to_string())?;
+            let after = Ytd::from_bytes(&rewritten).map_err(|error| error.to_string())?;
+            verify_ytd_repack(bytes, &before, &rewritten, &after, texture_index)?;
+            let after_texture = after
+                .textures
+                .get(texture_index)
+                .ok_or_else(|| "RGBA-repacked YTD lost the target texture".to_string())?;
+
+            Ok((
+                rewritten,
+                json!({
+                    "textureIndex": texture_index,
+                    "texture": after_texture.name,
+                    "dictionaryHash": format!("0x{:08X}", after_texture.dictionary_hash),
+                    "sizeBefore": [before_texture.width, before_texture.height],
+                    "sizeAfter": [after_texture.width, after_texture.height],
+                    "format": after_texture.format.normalized_name(),
+                    "mipLevelsBefore": before_texture.levels,
+                    "mipLevelsAfter": after_texture.levels,
+                    "encodedBytesBefore": before_texture.data_length,
+                    "encodedBytesAfter": after_texture.data_length,
+                    "replacement": replacement.display().to_string(),
+                    "rgbaBytes": rgba.len(),
+                    "mipsGenerated": true,
+                    "payloadRelocated": true,
+                    "formatPreserved": true,
+                }),
+            ))
+        }
+        "ytd.rebuild-compact" => {
+            reject_unknown_parameters(operation, &[])?;
+            let before = Ytd::from_bytes(bytes).map_err(|error| error.to_string())?;
+            let rebuilt = Ytd::rebuild_legacy_compact(bytes).map_err(|error| error.to_string())?;
+            let after = Ytd::from_bytes(&rebuilt).map_err(|error| error.to_string())?;
+            verify_ytd_compact(bytes, &before, &rebuilt, &after)?;
+
+            Ok((
+                rebuilt.clone(),
+                json!({
+                    "textures": after.textures.len(),
+                    "sourceBytes": bytes.len(),
+                    "outputBytes": rebuilt.len(),
+                    "layoutRebuilt": true,
+                    "semanticReopen": true,
+                }),
+            ))
+        }
+        other => Err(format!("unsupported operation type: {other}")),
+    }
+}
+
+fn verify_ytd_repack(
+    before_bytes: &[u8],
+    before: &Ytd,
+    after_bytes: &[u8],
+    after: &Ytd,
+    target_index: usize,
+) -> Result<(), String> {
+    if before.resource_version != after.resource_version
+        || before.file_vft != after.file_vft
+        || before.file_unknown != after.file_unknown
+        || before.pages_info_pointer != after.pages_info_pointer
+        || before.textures.len() != after.textures.len()
+    {
+        return Err("repacked YTD unexpectedly changed dictionary-level metadata".into());
+    }
+
+    for (index, (left, right)) in before
+        .textures
+        .iter()
+        .zip(after.textures.iter())
+        .enumerate()
+    {
+        if index == target_index {
+            if !same_ytd_texture_identity(left, right) {
+                return Err(
+                    "repacked YTD unexpectedly changed identity/usage metadata for the target texture"
+                        .into(),
+                );
+            }
+        } else {
+            if left != right {
+                return Err(format!(
+                    "repacked YTD unexpectedly changed texture metadata at index {index}"
+                ));
+            }
+            let left_payload =
+                Ytd::encoded_texture(before_bytes, index).map_err(|error| error.to_string())?;
+            let right_payload =
+                Ytd::encoded_texture(after_bytes, index).map_err(|error| error.to_string())?;
+            if left_payload != right_payload {
+                return Err(format!(
+                    "repacked YTD unexpectedly changed texture payload at index {index}"
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn verify_ytd_compact(
+    before_bytes: &[u8],
+    before: &Ytd,
+    after_bytes: &[u8],
+    after: &Ytd,
+) -> Result<(), String> {
+    if before.resource_version != after.resource_version
+        || before.file_vft != after.file_vft
+        || before.file_unknown != after.file_unknown
+        || before.textures.len() != after.textures.len()
+    {
+        return Err("compact YTD rebuild changed dictionary-level semantics".into());
+    }
+
+    for (index, (left, right)) in before
+        .textures
+        .iter()
+        .zip(after.textures.iter())
+        .enumerate()
+    {
+        if !same_ytd_texture_semantics(left, right) {
+            return Err(format!(
+                "compact YTD rebuild changed semantic metadata at texture {index}"
+            ));
+        }
+        let left_payload =
+            Ytd::encoded_texture(before_bytes, index).map_err(|error| error.to_string())?;
+        let right_payload =
+            Ytd::encoded_texture(after_bytes, index).map_err(|error| error.to_string())?;
+        if left_payload != right_payload {
+            return Err(format!(
+                "compact YTD rebuild changed encoded payload at texture {index}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn same_ytd_texture_identity(left: &TextureInfo, right: &TextureInfo) -> bool {
+    left.dictionary_hash == right.dictionary_hash
+        && left.name == right.name
+        && left.name_hash == right.name_hash
+        && left.depth == right.depth
+        && left.format == right.format
+        && left.usage == right.usage
+        && left.usage_flags == right.usage_flags
+        && left.extra_flags == right.extra_flags
+}
+
+fn same_ytd_texture_semantics(left: &TextureInfo, right: &TextureInfo) -> bool {
+    same_ytd_texture_identity(left, right)
+        && left.width == right.width
+        && left.height == right.height
+        && left.stride == right.stride
+        && left.levels == right.levels
+        && left.data_length == right.data_length
+}
+
+fn required_payload_path(
+    parameters: &Map<String, Value>,
+    key: &str,
+    operation: &str,
+) -> Result<PathBuf, String> {
+    let value = parameters
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{operation} requires string parameter {key}"))?;
+    if value.trim().is_empty() {
+        return Err(format!("{operation} {key} must not be empty"));
+    }
+    Ok(PathBuf::from(value))
+}
+
+fn required_u16(
+    parameters: &Map<String, Value>,
+    key: &str,
+    operation: &str,
+) -> Result<u16, String> {
+    let value = required_usize(parameters, key, operation)?;
+    u16::try_from(value).map_err(|_| format!("{operation} {key} must fit in u16"))
+}
+
 fn plan_ybn_edit_polygon(
     index: usize,
     operation: &OperationSpec,
@@ -970,6 +1364,110 @@ fn apply_ybn_operations(
             "shapePrimitives": reopened.shape_primitive_count(),
             "materials": reopened.materials.len(),
             "polygonEdits": edits.len(),
+        }),
+    })
+}
+
+fn apply_ytd_operations(
+    document: &OperationDocument,
+    plan: &OperationPlan,
+    base_dir: &Path,
+) -> Result<OperationApplyResult, OperationError> {
+    let source_bytes = fs::read(&plan.source)?;
+    Ytd::from_bytes(&source_bytes)
+        .map_err(|error| OperationError::InvalidSource(error.to_string()))?;
+
+    let mut working_bytes = source_bytes.clone();
+    let mut replace_dds_count = 0_usize;
+    let mut repack_dds_count = 0_usize;
+    let mut repack_rgba_count = 0_usize;
+    let mut compact_rebuild_count = 0_usize;
+    let mut texture_indices = Vec::<usize>::new();
+
+    for operation in &document.operations {
+        let (rewritten, details) =
+            apply_ytd_operation_to_bytes(&working_bytes, operation, base_dir)
+                .map_err(OperationError::Writer)?;
+        working_bytes = rewritten;
+
+        if let Some(index) = details.get("textureIndex").and_then(Value::as_u64) {
+            let index = usize::try_from(index)
+                .map_err(|_| OperationError::Writer("texture index overflow".into()))?;
+            if !texture_indices.contains(&index) {
+                texture_indices.push(index);
+            }
+        }
+
+        match operation.operation_type.as_str() {
+            "ytd.replace-dds" => replace_dds_count += 1,
+            "ytd.repack-dds" => repack_dds_count += 1,
+            "ytd.repack-rgba" => repack_rgba_count += 1,
+            "ytd.rebuild-compact" => compact_rebuild_count += 1,
+            other => {
+                return Err(OperationError::Rejected(format!(
+                    "unsupported operation type: {other}"
+                )))
+            }
+        }
+    }
+
+    let reopened = Ytd::from_bytes(&working_bytes)
+        .map_err(|error| OperationError::Writer(error.to_string()))?;
+
+    if let Some(parent) = plan
+        .output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut file = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&plan.output)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(OperationError::Rejected(format!(
+                "output already exists; apply never overwrites existing files: {}",
+                plan.output.display()
+            )))
+        }
+        Err(error) => return Err(OperationError::Io(error)),
+    };
+    file.write_all(&working_bytes)?;
+    file.flush()?;
+
+    let source_unchanged = fs::read(&plan.source)? == source_bytes;
+    if !source_unchanged {
+        return Err(OperationError::Writer(
+            "source asset changed during non-destructive apply".into(),
+        ));
+    }
+
+    texture_indices.sort_unstable();
+
+    Ok(OperationApplyResult {
+        schema: OPERATION_APPLY_SCHEMA,
+        schema_version: OPERATION_DOCUMENT_SCHEMA_VERSION,
+        source: plan.source.clone(),
+        output: plan.output.clone(),
+        asset_type: plan.asset_type.clone(),
+        operations_applied: document.operations.len(),
+        bytes_written: working_bytes.len(),
+        non_destructive: true,
+        validation: ApplyValidation {
+            semantic_reopen: true,
+            source_unchanged,
+        },
+        details: json!({
+            "textures": reopened.textures.len(),
+            "editedTextureIndices": texture_indices,
+            "replaceDds": replace_dds_count,
+            "repackDds": repack_dds_count,
+            "repackRgba": repack_rgba_count,
+            "compactRebuilds": compact_rebuild_count,
         }),
     })
 }
@@ -1378,6 +1876,7 @@ mod tests {
     use ragelab_ybn::{CollisionShape, YbnCollision};
     use ragelab_ydd::{YddDictionary, YddEditSession};
     use ragelab_ydr::{YdrDocument, YdrEditSession};
+    use ragelab_ytd::Ytd;
     use serde_json::json;
 
     use super::{
@@ -1395,6 +1894,10 @@ mod tests {
 
     fn ydd_fixture() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/ydd/editable.ydd")
+    }
+
+    fn ytd_fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/ytd/simple.ytd")
     }
 
     fn ybn_fixture() -> PathBuf {
@@ -1718,6 +2221,126 @@ mod tests {
             .unwrap()
             .contains("drawable index 9"));
         assert!(!root.join("output.ydd").exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn plans_and_applies_mixed_ytd_writers() {
+        let root = temp_root("ytd-apply");
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.ytd");
+        let output = root.join("output.ytd");
+        fs::copy(ytd_fixture(), &source).unwrap();
+        let source_before = fs::read(&source).unwrap();
+
+        let original_dds = Ytd::texture_dds(&source_before, 0).unwrap();
+        fs::write(root.join("same.dds"), &original_dds).unwrap();
+
+        let resized_rgba = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        let resized_dds = Ytd::rgba8_dds_with_generated_mips(2, 2, &resized_rgba).unwrap();
+        fs::write(root.join("resized.dds"), &resized_dds).unwrap();
+
+        let rgba = vec![64_u8; 4 * 4 * 4];
+        fs::write(root.join("replacement.rgba"), &rgba).unwrap();
+
+        let body = json!({
+            "schema": OPERATION_DOCUMENT_SCHEMA,
+            "schemaVersion": 1,
+            "source": "source.ytd",
+            "output": "output.ytd",
+            "operations": [
+                {
+                    "type": "ytd.replace-dds",
+                    "textureIndex": 0,
+                    "replacement": "same.dds"
+                },
+                {
+                    "type": "ytd.repack-dds",
+                    "textureIndex": 0,
+                    "replacement": "resized.dds"
+                },
+                {
+                    "type": "ytd.repack-rgba",
+                    "textureIndex": 0,
+                    "width": 4,
+                    "height": 4,
+                    "replacement": "replacement.rgba"
+                },
+                {
+                    "type": "ytd.rebuild-compact"
+                }
+            ]
+        })
+        .to_string();
+        let document = parse_operation_document(&body).unwrap();
+        let plan = plan_operation_document(&document, &root).unwrap();
+
+        assert!(plan.allowed);
+        assert_eq!(plan.asset_type, "YTD");
+        assert_eq!(plan.operations.len(), 4);
+        assert!(plan.operations.iter().all(|operation| operation.allowed));
+        assert_eq!(plan.operations[0].details["layoutPreserved"], true);
+        assert_eq!(plan.operations[1].details["sizeAfter"], json!([2, 2]));
+        assert_eq!(plan.operations[2].details["sizeAfter"], json!([4, 4]));
+        assert_eq!(plan.operations[3].details["layoutRebuilt"], true);
+        assert!(!output.exists());
+
+        let result = apply_operation_document(&document, &root).unwrap();
+        assert!(output.is_file());
+        assert!(result.validation.semantic_reopen);
+        assert!(result.validation.source_unchanged);
+        assert_eq!(result.details["replaceDds"], 1);
+        assert_eq!(result.details["repackDds"], 1);
+        assert_eq!(result.details["repackRgba"], 1);
+        assert_eq!(result.details["compactRebuilds"], 1);
+        assert_eq!(result.details["editedTextureIndices"][0], 0);
+        assert_eq!(fs::read(&source).unwrap(), source_before);
+
+        let after_bytes = fs::read(&output).unwrap();
+        let after = Ytd::from_bytes(&after_bytes).unwrap();
+        assert_eq!(after.textures.len(), 1);
+        assert_eq!(after.textures[0].name, "synthetic_diffuse");
+        assert_eq!(after.textures[0].width, 4);
+        assert_eq!(after.textures[0].height, 4);
+        assert!(after.textures[0].levels > 1);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ytd_plan_fails_closed_for_missing_external_payload() {
+        let root = temp_root("ytd-missing-payload");
+        fs::create_dir_all(&root).unwrap();
+        fs::copy(ytd_fixture(), root.join("source.ytd")).unwrap();
+
+        let body = json!({
+            "schema": OPERATION_DOCUMENT_SCHEMA,
+            "schemaVersion": 1,
+            "source": "source.ytd",
+            "output": "output.ytd",
+            "operations": [
+                {
+                    "type": "ytd.repack-dds",
+                    "textureIndex": 0,
+                    "replacement": "missing.dds"
+                }
+            ]
+        })
+        .to_string();
+        let document = parse_operation_document(&body).unwrap();
+        let plan = plan_operation_document(&document, &root).unwrap();
+
+        assert!(!plan.allowed);
+        assert!(!plan.operations[0].allowed);
+        assert!(plan.operations[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("missing.dds"));
+        assert!(!root.join("output.ytd").exists());
 
         fs::remove_dir_all(root).unwrap();
     }
