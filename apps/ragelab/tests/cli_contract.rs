@@ -155,6 +155,7 @@ fn global_capabilities_preserve_legacy_ids_and_advertise_canonical_ids() {
     assert!(canonical.iter().any(|value| value == "workspace.preflight"));
     assert!(canonical.iter().any(|value| value == "workspace.export"));
     assert!(canonical.iter().any(|value| value == "workspace.scene"));
+    assert!(canonical.iter().any(|value| value == "gta.discover"));
     assert_eq!(body["responseEnvelope"]["schema"], "ragelab.cli.response");
     assert!(body["structuredOutput"]
         .as_array()
@@ -191,6 +192,11 @@ fn global_capabilities_preserve_legacy_ids_and_advertise_canonical_ids() {
         .unwrap()
         .iter()
         .any(|value| value == "workspace.scene"));
+    assert!(body["structuredOutput"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "gta.discover"));
 }
 
 #[test]
@@ -1237,4 +1243,56 @@ fn ybn_preview_rejects_drawable_selector() {
         .as_str()
         .unwrap()
         .contains("--drawable-index is only valid for YDD preview"));
+}
+
+#[test]
+fn gta_discover_is_structured_and_validates_legacy_override() {
+    let root = temp_root("gta-legacy-discovery");
+    fs::create_dir_all(root.join("update")).unwrap();
+    for relative in [
+        "GTA5.exe",
+        "PlayGTAV.exe",
+        "common.rpf",
+        "x64a.rpf",
+        "update/update.rpf",
+    ] {
+        fs::write(root.join(relative), []).unwrap();
+    }
+
+    let output = binary()
+        .env("RAGELAB_GTA5_LEGACY", &root)
+        .args(["gta", "discover", "--json"])
+        .output()
+        .expect("ragelab gta discover should run");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let body = stdout_json(&output);
+    assert_eq!(body["command"], "gta.discover");
+    assert_eq!(body["data"]["schema"], "ragelab.gta.discovery");
+    assert_eq!(body["data"]["schemaVersion"], 1);
+    assert_eq!(body["data"]["target"]["product"], "gtaV");
+    assert_eq!(body["data"]["target"]["edition"], "legacy");
+    assert_eq!(body["data"]["target"]["steamAppId"], 271590);
+
+    let candidates = body["data"]["candidates"].as_array().unwrap();
+    let candidate = candidates
+        .iter()
+        .find(|candidate| {
+            candidate["provenance"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|source| source["source"] == "environment")
+        })
+        .expect("environment candidate should be present");
+    assert_eq!(candidate["edition"], "legacy");
+    assert_eq!(candidate["valid"], true);
+    assert!(candidate["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|check| !check["required"].as_bool().unwrap() || check["passed"] == true));
+
+    fs::remove_dir_all(root).unwrap();
 }

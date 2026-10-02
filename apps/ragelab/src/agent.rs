@@ -7,10 +7,11 @@ use std::{
 
 use ragelab_assets::{AssetKind, WorkspaceIndex};
 use ragelab_engine::{
-    apply_operation_document, assemble_ymap_scene, isolated_asset_spatial_context,
-    parse_operation_document, plan_operation_document, ymap_spatial_context, EngineError,
-    OperationError, SceneAssemblyOptions, SceneAssetSelector, SceneCollisionState, SceneManifest,
-    SceneResolutionReasonCode, SceneResolutionState, SpatialContext, SpatialProvenance,
+    apply_operation_document, assemble_ymap_scene, discover_gta_v_legacy,
+    isolated_asset_spatial_context, parse_operation_document, plan_operation_document,
+    ymap_spatial_context, EngineError, OperationError, SceneAssemblyOptions, SceneAssetSelector,
+    SceneCollisionState, SceneManifest, SceneResolutionReasonCode, SceneResolutionState,
+    SpatialContext, SpatialProvenance,
 };
 use ragelab_resource::{Rsc7Probe, Rsc7Resource};
 use ragelab_ybn::{CollisionShape, YbnCollision};
@@ -39,6 +40,7 @@ pub fn is_structured_command(command: &str) -> bool {
             | "scene"
             | "preflight"
             | "export"
+            | "gta.discover"
     )
 }
 
@@ -1315,6 +1317,47 @@ fn scene_reason_code(code: SceneResolutionReasonCode) -> &'static str {
     }
 }
 
+pub fn gta_discover(json_output: bool) -> Result<(), Box<dyn Error>> {
+    let report = discover_gta_v_legacy();
+
+    if json_output {
+        print_success("gta.discover", serde_json::to_value(&report)?)?;
+    } else {
+        println!("target: GTA V Legacy");
+        println!("platform: {}", report.platform);
+        println!("valid-installations: {}", report.valid_legacy_installations);
+        println!("candidates: {}", report.candidates.len());
+
+        for candidate in report.candidates {
+            println!(
+                "{} [{}] valid={}",
+                candidate.root.display(),
+                candidate.edition.as_str(),
+                if candidate.valid { "yes" } else { "no" }
+            );
+            for provenance in candidate.provenance {
+                println!(
+                    "  source: {} ({})",
+                    provenance.source.as_str(),
+                    provenance.reference
+                );
+            }
+            for check in candidate.checks {
+                if check.required || !check.passed {
+                    println!(
+                        "  check {}: {}{}",
+                        check.id,
+                        if check.passed { "ok" } else { "missing" },
+                        if check.required { " [required]" } else { "" }
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub fn parse_path_json_args(
     args: impl Iterator<Item = String>,
     usage: &str,
@@ -1406,6 +1449,7 @@ pub fn normalize_command_args(args: Vec<String>) -> Vec<String> {
         ("workspace", "extract") => Some("extract"),
         ("workspace", "export") => Some("export"),
         ("workspace", "scene") => Some("scene"),
+        ("gta", "discover") => Some("gta.discover"),
         ("gta", "vanilla-index") => Some("vanilla-index"),
         _ => None,
     };

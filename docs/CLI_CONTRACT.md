@@ -33,7 +33,7 @@ Errors use the same schema:
 
 Consumers must key compatibility decisions on `schema` and `schemaVersion`, not on human-readable output.
 
-The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `spatial <file> --json`, `preview <file> --json`, `plan <operation.json> --json`, `apply <operation.json> --json`, `workspace preflight ... --json`, `workspace export ... --json`, and `workspace scene ... --json` use the common response envelope.
+The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `spatial <file> --json`, `preview <file> --json`, `plan <operation.json> --json`, `apply <operation.json> --json`, `workspace preflight ... --json`, `workspace export ... --json`, `workspace scene ... --json`, and `gta discover --json` use the common response envelope.
 
 ## Agent-first surface
 
@@ -85,12 +85,20 @@ Legacy flat command names from the initial RageLab extraction remain compatibili
 
 ## Discovery
 
-Global discovery:
+Global command discovery:
 
 ```bash
 ragelab version --json
 ragelab capabilities --json
 ```
+
+Native GTA V Legacy installation discovery:
+
+```bash
+ragelab gta discover --json
+```
+
+The GTA discovery command returns the versioned `ragelab.gta.discovery` payload inside the common response envelope. It reports every candidate root, merged provenance, detected edition, filesystem validation checks, Steam metadata when available, and the number of valid Legacy installations. See [DISCOVERY.md](DISCOVERY.md).
 
 Global `capabilities --json` exposes:
 
