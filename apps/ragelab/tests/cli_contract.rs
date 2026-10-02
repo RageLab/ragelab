@@ -1118,6 +1118,25 @@ fn preview_rejects_limits_above_hard_caps() {
 
 #[test]
 fn ybn_preview_exposes_bounded_mesh_shapes_and_local_spatial_semantics() {
+    let capabilities_output = binary()
+        .args([
+            "capabilities",
+            fixture("ybn/preview.ybn").to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("ragelab capabilities should run");
+    assert!(capabilities_output.status.success());
+    let capabilities = stdout_json(&capabilities_output);
+    let operations = capabilities["data"]["operations"].as_array().unwrap();
+    let preview = operations
+        .iter()
+        .find(|operation| operation["id"] == "preview")
+        .unwrap();
+    assert_eq!(preview["availability"], "available");
+    assert_eq!(preview["structuredOutput"], true);
+    assert_eq!(preview["requiresParameters"], json!([]));
+
     let output = binary()
         .args([
             "preview",

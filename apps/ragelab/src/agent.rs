@@ -2018,6 +2018,15 @@ fn operations_for(asset_type: &str, bytes: &[u8]) -> Result<Vec<Value>, Box<dyn 
                 operation("ybn.info", false, false, false),
                 operation("spatial", false, true, false),
                 operation_with_availability(
+                    "preview",
+                    false,
+                    true,
+                    false,
+                    "available",
+                    Some("renderer-neutral Legacy YBN collision preview is available"),
+                    &[],
+                ),
+                operation_with_availability(
                     "ybn.edit-polygon",
                     true,
                     false,
