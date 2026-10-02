@@ -55,6 +55,8 @@ It does not own presentation or transport concerns.
 
 `ragelab-engine` owns transport-neutral product operations and policies shared by every adapter.
 
+This includes declarative operation parsing, planning, write eligibility orchestration, non-destructive output policy, and post-write semantic verification. Format crates remain authoritative for binary-layout safety and writer capability decisions.
+
 If a rule must behave identically in the CLI, an MCP server, and RageLab Studio, it belongs at or below this layer.
 
 ### CLI

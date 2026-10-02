@@ -1,0 +1,659 @@
+use std::{
+    error::Error,
+    fmt,
+    fs::{self, OpenOptions},
+    io::{self, Write},
+    path::{Path, PathBuf},
+};
+
+use ragelab_ydr::{YdrDocument, YdrEditSession};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
+
+pub const OPERATION_DOCUMENT_SCHEMA: &str = "ragelab.operation";
+pub const OPERATION_DOCUMENT_SCHEMA_VERSION: u64 = 1;
+pub const OPERATION_PLAN_SCHEMA: &str = "ragelab.operation.plan";
+pub const OPERATION_APPLY_SCHEMA: &str = "ragelab.operation.apply";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OperationDocument {
+    pub schema: String,
+    pub schema_version: u64,
+    pub source: PathBuf,
+    pub output: PathBuf,
+    pub operations: Vec<OperationSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperationSpec {
+    #[serde(rename = "type")]
+    pub operation_type: String,
+    #[serde(flatten)]
+    pub parameters: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationPlan {
+    pub schema: &'static str,
+    pub schema_version: u64,
+    pub source: PathBuf,
+    pub output: PathBuf,
+    pub asset_type: String,
+    pub allowed: bool,
+    pub non_destructive: bool,
+    pub output_exists: bool,
+    pub source_bytes: usize,
+    pub operations: Vec<PlannedOperation>,
+    pub reasons: Vec<String>,
+    pub writes: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlannedOperation {
+    pub index: usize,
+    #[serde(rename = "type")]
+    pub operation_type: String,
+    pub allowed: bool,
+    pub reason: Option<String>,
+    pub details: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationApplyResult {
+    pub schema: &'static str,
+    pub schema_version: u64,
+    pub source: PathBuf,
+    pub output: PathBuf,
+    pub asset_type: String,
+    pub operations_applied: usize,
+    pub bytes_written: usize,
+    pub non_destructive: bool,
+    pub validation: ApplyValidation,
+    pub details: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyValidation {
+    pub semantic_reopen: bool,
+    pub source_unchanged: bool,
+}
+
+#[derive(Debug)]
+pub enum OperationError {
+    InvalidDocument(String),
+    InvalidSource(String),
+    Rejected(String),
+    Writer(String),
+    Io(io::Error),
+}
+
+impl OperationError {
+    pub fn error_kind(&self) -> io::ErrorKind {
+        match self {
+            Self::InvalidDocument(_) => io::ErrorKind::InvalidInput,
+            Self::InvalidSource(_) => io::ErrorKind::InvalidData,
+            Self::Rejected(_) => io::ErrorKind::Unsupported,
+            Self::Writer(_) => io::ErrorKind::Other,
+            Self::Io(error) => error.kind(),
+        }
+    }
+}
+
+impl fmt::Display for OperationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidDocument(message) => {
+                write!(formatter, "invalid operation document: {message}")
+            }
+            Self::InvalidSource(message) => write!(formatter, "invalid source asset: {message}"),
+            Self::Rejected(message) => write!(formatter, "operation rejected: {message}"),
+            Self::Writer(message) => write!(formatter, "operation writer failed: {message}"),
+            Self::Io(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for OperationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<io::Error> for OperationError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+pub fn parse_operation_document(input: &str) -> Result<OperationDocument, OperationError> {
+    let document = serde_json::from_str::<OperationDocument>(input)
+        .map_err(|error| OperationError::InvalidDocument(error.to_string()))?;
+
+    if document.schema != OPERATION_DOCUMENT_SCHEMA {
+        return Err(OperationError::InvalidDocument(format!(
+            "unsupported schema {:?}; expected {:?}",
+            document.schema, OPERATION_DOCUMENT_SCHEMA
+        )));
+    }
+    if document.schema_version != OPERATION_DOCUMENT_SCHEMA_VERSION {
+        return Err(OperationError::InvalidDocument(format!(
+            "unsupported schemaVersion {}; expected {}",
+            document.schema_version, OPERATION_DOCUMENT_SCHEMA_VERSION
+        )));
+    }
+    if document.source.as_os_str().is_empty() {
+        return Err(OperationError::InvalidDocument(
+            "source must not be empty".into(),
+        ));
+    }
+    if document.output.as_os_str().is_empty() {
+        return Err(OperationError::InvalidDocument(
+            "output must not be empty".into(),
+        ));
+    }
+    if document.operations.is_empty() {
+        return Err(OperationError::InvalidDocument(
+            "operations must contain at least one operation".into(),
+        ));
+    }
+
+    Ok(document)
+}
+
+pub fn plan_operation_document(
+    document: &OperationDocument,
+    base_dir: &Path,
+) -> Result<OperationPlan, OperationError> {
+    let source = resolve_path(base_dir, &document.source);
+    let output = resolve_path(base_dir, &document.output);
+    let source_bytes = fs::read(&source)?;
+    let asset_type = asset_type(&source).to_string();
+    let output_exists = output.exists();
+    let mut reasons = Vec::new();
+
+    if output_exists {
+        reasons.push(format!(
+            "output already exists; apply never overwrites existing files: {}",
+            output.display()
+        ));
+    }
+
+    let ydr_capability = if asset_type == "YDR" {
+        let session = YdrEditSession::from_bytes(&source_bytes)
+            .map_err(|error| OperationError::InvalidSource(error.to_string()))?;
+        Some(session.rigid_translation_capability())
+    } else {
+        None
+    };
+
+    let mut operations = Vec::with_capacity(document.operations.len());
+    for (index, operation) in document.operations.iter().enumerate() {
+        let planned = match operation.operation_type.as_str() {
+            "ydr.translate" => {
+                plan_ydr_translate(index, operation, &asset_type, ydr_capability.as_ref())
+            }
+            other => PlannedOperation {
+                index,
+                operation_type: other.to_string(),
+                allowed: false,
+                reason: Some(format!("unsupported operation type: {other}")),
+                details: Value::Null,
+            },
+        };
+        operations.push(planned);
+    }
+
+    let allowed = reasons.is_empty() && operations.iter().all(|operation| operation.allowed);
+
+    Ok(OperationPlan {
+        schema: OPERATION_PLAN_SCHEMA,
+        schema_version: OPERATION_DOCUMENT_SCHEMA_VERSION,
+        source,
+        output: output.clone(),
+        asset_type,
+        allowed,
+        non_destructive: true,
+        output_exists,
+        source_bytes: source_bytes.len(),
+        operations,
+        reasons,
+        writes: vec![output],
+    })
+}
+
+pub fn apply_operation_document(
+    document: &OperationDocument,
+    base_dir: &Path,
+) -> Result<OperationApplyResult, OperationError> {
+    let plan = plan_operation_document(document, base_dir)?;
+    if !plan.allowed {
+        let mut reasons = plan.reasons.clone();
+        reasons.extend(
+            plan.operations
+                .iter()
+                .filter_map(|operation| operation.reason.clone()),
+        );
+        return Err(OperationError::Rejected(reasons.join("; ")));
+    }
+
+    match plan.asset_type.as_str() {
+        "YDR" => apply_ydr_operations(document, &plan),
+        other => Err(OperationError::Rejected(format!(
+            "no declarative writer is available for asset type {other}"
+        ))),
+    }
+}
+
+fn plan_ydr_translate(
+    index: usize,
+    operation: &OperationSpec,
+    asset_type: &str,
+    capability: Option<&ragelab_ydr::EditCapability>,
+) -> PlannedOperation {
+    let mut reason = None;
+    let mut details = Value::Null;
+
+    if asset_type != "YDR" {
+        reason = Some(format!(
+            "ydr.translate requires a YDR source, found {asset_type}"
+        ));
+    } else {
+        match parse_translation_delta(operation) {
+            Ok(delta) => {
+                details = json!({ "delta": delta });
+                if let Some(capability) = capability {
+                    if !capability.writable {
+                        reason = Some(
+                            capability
+                                .reason
+                                .clone()
+                                .unwrap_or_else(|| "rigid translation is unavailable".into()),
+                        );
+                    }
+                }
+            }
+            Err(message) => reason = Some(message),
+        }
+    }
+
+    PlannedOperation {
+        index,
+        operation_type: operation.operation_type.clone(),
+        allowed: reason.is_none(),
+        reason,
+        details,
+    }
+}
+
+fn apply_ydr_operations(
+    document: &OperationDocument,
+    plan: &OperationPlan,
+) -> Result<OperationApplyResult, OperationError> {
+    let source_bytes = fs::read(&plan.source)?;
+    let mut session = YdrEditSession::from_bytes(&source_bytes)
+        .map_err(|error| OperationError::InvalidSource(error.to_string()))?;
+    let before = session
+        .document()
+        .map_err(|error| OperationError::InvalidSource(error.to_string()))?;
+
+    let mut effective_delta = [0.0_f32; 3];
+    for operation in &document.operations {
+        match operation.operation_type.as_str() {
+            "ydr.translate" => {
+                let delta = parse_translation_delta(operation).map_err(OperationError::Rejected)?;
+                for index in 0..3 {
+                    effective_delta[index] += delta[index];
+                    if !effective_delta[index].is_finite() {
+                        return Err(OperationError::Rejected(
+                            "combined translation delta is not finite".into(),
+                        ));
+                    }
+                }
+                session
+                    .translate_rigid_model(delta)
+                    .map_err(|error| OperationError::Writer(error.to_string()))?;
+            }
+            other => {
+                return Err(OperationError::Rejected(format!(
+                    "unsupported operation type: {other}"
+                )))
+            }
+        }
+    }
+
+    let rewritten = session
+        .to_bytes()
+        .map_err(|error| OperationError::Writer(error.to_string()))?;
+    let reopened = YdrEditSession::from_bytes(&rewritten)
+        .map_err(|error| OperationError::Writer(error.to_string()))?;
+    let after = reopened
+        .document()
+        .map_err(|error| OperationError::Writer(error.to_string()))?;
+    verify_rigid_translation(&before, &after, effective_delta)
+        .map_err(|error| OperationError::Writer(error.to_string()))?;
+
+    if let Some(parent) = plan
+        .output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut file = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&plan.output)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(OperationError::Rejected(format!(
+                "output already exists; apply never overwrites existing files: {}",
+                plan.output.display()
+            )))
+        }
+        Err(error) => return Err(OperationError::Io(error)),
+    };
+    file.write_all(&rewritten)?;
+    file.flush()?;
+
+    let source_unchanged = fs::read(&plan.source)? == source_bytes;
+    if !source_unchanged {
+        return Err(OperationError::Writer(
+            "source asset changed during non-destructive apply".into(),
+        ));
+    }
+
+    Ok(OperationApplyResult {
+        schema: OPERATION_APPLY_SCHEMA,
+        schema_version: OPERATION_DOCUMENT_SCHEMA_VERSION,
+        source: plan.source.clone(),
+        output: plan.output.clone(),
+        asset_type: plan.asset_type.clone(),
+        operations_applied: document.operations.len(),
+        bytes_written: rewritten.len(),
+        non_destructive: true,
+        validation: ApplyValidation {
+            semantic_reopen: true,
+            source_unchanged,
+        },
+        details: json!({
+            "effectiveTranslation": effective_delta,
+            "vertices": after.model.vertex_count(),
+        }),
+    })
+}
+
+fn parse_translation_delta(operation: &OperationSpec) -> Result<[f32; 3], String> {
+    if operation.parameters.len() != 1 || !operation.parameters.contains_key("delta") {
+        return Err("ydr.translate accepts exactly one parameter: delta".into());
+    }
+
+    let values = operation
+        .parameters
+        .get("delta")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            "ydr.translate delta must be an array of three finite numbers".to_string()
+        })?;
+    if values.len() != 3 {
+        return Err("ydr.translate delta must contain exactly three values".into());
+    }
+
+    let mut delta = [0.0_f32; 3];
+    for (index, value) in values.iter().enumerate() {
+        let value = value
+            .as_f64()
+            .ok_or_else(|| "ydr.translate delta must contain only numbers".to_string())?;
+        if !value.is_finite() || value < f32::MIN as f64 || value > f32::MAX as f64 {
+            return Err("ydr.translate delta must contain only finite f32 values".into());
+        }
+        delta[index] = value as f32;
+    }
+
+    if delta == [0.0, 0.0, 0.0] {
+        return Err("ydr.translate delta must not be zero".into());
+    }
+
+    Ok(delta)
+}
+
+fn verify_rigid_translation(
+    before: &YdrDocument,
+    after: &YdrDocument,
+    delta: [f32; 3],
+) -> Result<(), io::Error> {
+    let before_model = &before.model;
+    let after_model = &after.model;
+    if before_model.name != after_model.name
+        || before_model.lod != after_model.lod
+        || before_model.coordinate_convention != after_model.coordinate_convention
+        || before_model.shaders != after_model.shaders
+        || before_model.primitives.len() != after_model.primitives.len()
+        || before_model.bounds.radius != after_model.bounds.radius
+        || translated_vec3(before_model.bounds.center, delta) != after_model.bounds.center
+        || translated_vec3(before_model.bounds.min, delta) != after_model.bounds.min
+        || translated_vec3(before_model.bounds.max, delta) != after_model.bounds.max
+    {
+        return Err(io::Error::other(
+            "rigid translation changed drawable metadata or bounds unexpectedly",
+        ));
+    }
+
+    let embedded_textures_match = match (
+        before.embedded_textures.as_ref(),
+        after.embedded_textures.as_ref(),
+    ) {
+        (None, None) => true,
+        (Some(left), Some(right)) => left.textures() == right.textures(),
+        _ => false,
+    };
+    if !embedded_textures_match {
+        return Err(io::Error::other(
+            "rigid translation changed embedded texture metadata",
+        ));
+    }
+
+    for (before_primitive, after_primitive) in before_model
+        .primitives
+        .iter()
+        .zip(after_model.primitives.iter())
+    {
+        if before_primitive.model_index != after_primitive.model_index
+            || before_primitive.geometry_index != after_primitive.geometry_index
+            || before_primitive.shader_index != after_primitive.shader_index
+            || before_primitive.topology != after_primitive.topology
+            || before_primitive.normals != after_primitive.normals
+            || before_primitive.uv0 != after_primitive.uv0
+            || before_primitive.indices != after_primitive.indices
+            || before_primitive.declaration != after_primitive.declaration
+            || before_primitive.positions.len() != after_primitive.positions.len()
+        {
+            return Err(io::Error::other(
+                "rigid translation changed primitive topology or non-position attributes",
+            ));
+        }
+        for (before_position, after_position) in before_primitive
+            .positions
+            .iter()
+            .zip(after_primitive.positions.iter())
+        {
+            if translated_vec3(*before_position, delta) != *after_position {
+                return Err(io::Error::other(
+                    "rigid translation produced an unexpected vertex position",
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn translated_vec3(value: [f32; 3], delta: [f32; 3]) -> [f32; 3] {
+    [
+        value[0] + delta[0],
+        value[1] + delta[1],
+        value[2] + delta[2],
+    ]
+}
+
+fn resolve_path(base_dir: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_dir.join(path)
+    }
+}
+
+fn asset_type(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "ydr" => "YDR",
+        "ydd" => "YDD",
+        "ytd" => "YTD",
+        "ybn" => "YBN",
+        "ymap" => "YMAP",
+        "ytyp" => "YTYP",
+        "ymf" => "YMF",
+        "" => "UNKNOWN",
+        _ => "UNKNOWN",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        process,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use ragelab_ydr::YdrDocument;
+    use serde_json::json;
+
+    use super::{
+        apply_operation_document, parse_operation_document, plan_operation_document,
+        OPERATION_DOCUMENT_SCHEMA,
+    };
+
+    fn fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/ydr/simple.ydr")
+    }
+
+    fn temp_root(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "ragelab-operation-{label}-{}-{nonce}",
+            process::id()
+        ))
+    }
+
+    fn document_json(source: &str, output: &str) -> String {
+        json!({
+            "schema": OPERATION_DOCUMENT_SCHEMA,
+            "schemaVersion": 1,
+            "source": source,
+            "output": output,
+            "operations": [
+                {
+                    "type": "ydr.translate",
+                    "delta": [1.0, 2.0, 3.0]
+                }
+            ]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn parses_and_plans_supported_ydr_translation() {
+        let root = temp_root("plan");
+        fs::create_dir_all(&root).unwrap();
+        fs::copy(fixture(), root.join("source.ydr")).unwrap();
+
+        let document =
+            parse_operation_document(&document_json("source.ydr", "output.ydr")).unwrap();
+        let plan = plan_operation_document(&document, &root).unwrap();
+
+        assert!(plan.allowed);
+        assert!(plan.non_destructive);
+        assert!(!plan.output_exists);
+        assert_eq!(plan.asset_type, "YDR");
+        assert_eq!(plan.operations.len(), 1);
+        assert!(plan.operations[0].allowed);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn plan_fails_closed_for_unknown_operation() {
+        let root = temp_root("unknown");
+        fs::create_dir_all(&root).unwrap();
+        fs::copy(fixture(), root.join("source.ydr")).unwrap();
+
+        let body = json!({
+            "schema": OPERATION_DOCUMENT_SCHEMA,
+            "schemaVersion": 1,
+            "source": "source.ydr",
+            "output": "output.ydr",
+            "operations": [{"type": "ydr.rotate", "degrees": 90}]
+        })
+        .to_string();
+        let document = parse_operation_document(&body).unwrap();
+        let plan = plan_operation_document(&document, &root).unwrap();
+
+        assert!(!plan.allowed);
+        assert_eq!(
+            plan.operations[0].reason.as_deref(),
+            Some("unsupported operation type: ydr.rotate")
+        );
+        assert!(!root.join("output.ydr").exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn apply_writes_new_asset_and_preserves_source() {
+        let root = temp_root("apply");
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.ydr");
+        let output = root.join("output.ydr");
+        fs::copy(fixture(), &source).unwrap();
+        let source_before = fs::read(&source).unwrap();
+
+        let document =
+            parse_operation_document(&document_json("source.ydr", "output.ydr")).unwrap();
+        let result = apply_operation_document(&document, &root).unwrap();
+
+        assert!(output.is_file());
+        assert_eq!(fs::read(&source).unwrap(), source_before);
+        assert!(result.validation.semantic_reopen);
+        assert!(result.validation.source_unchanged);
+
+        let before = YdrDocument::from_bytes(&source_before).unwrap();
+        let after = YdrDocument::from_bytes(&fs::read(&output).unwrap()).unwrap();
+        assert_eq!(before.model.primitives[0].positions[0], [0.0, 0.0, 0.0]);
+        assert_eq!(after.model.primitives[0].positions[0], [1.0, 2.0, 3.0]);
+
+        let second = apply_operation_document(&document, &root).unwrap_err();
+        assert!(second.to_string().contains("never overwrites"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+}

@@ -42,8 +42,12 @@ The primary automation flow is:
 ```bash
 ragelab inspect asset.ydr --json
 ragelab capabilities asset.ydr --json
-ragelab validate asset.ydr --json
+ragelab plan operation.json --json
+ragelab apply operation.json --json
+ragelab validate output.ydr --json
 ```
+
+Declarative mutations are versioned, fail closed, and non-destructive by default. The operation document contract is documented in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 Canonical format and workspace commands use namespaces:
 

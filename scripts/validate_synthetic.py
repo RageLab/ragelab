@@ -2,7 +2,7 @@
 """Validate the committed synthetic fixtures without requiring the Rust toolchain.
 
 This is intentionally an independent smoke check, not a replacement for
-`cargo test`. It verifies the generated RSC7 envelope, selected META/schema
+cargo test. It verifies the generated RSC7 envelope, selected META/schema
 facts, semantic fixture values and the loose dependency-index filename contract.
 """
 
@@ -15,6 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "fixtures" / "synthetic"
 STREAM = FIXTURES / "stream"
+YDR = FIXTURES / "ydr" / "simple.ydr"
 
 
 def jenkins(text: str) -> int:
@@ -64,6 +65,25 @@ def validate_ytyp() -> None:
     assert struct.pack("<I", jenkins("CBaseArchetypeDef")) in payload
 
 
+def validate_ydr() -> None:
+    data = YDR.read_bytes()
+    assert data[:4] == b"RSC7", f"{YDR}: missing RSC7 magic"
+    version, system_flags, graphics_flags = struct.unpack_from("<III", data, 4)
+    assert version == 165, f"{YDR}: unexpected resource version {version}"
+    assert system_flags == ((1 << 26) | 1), f"{YDR}: unexpected system flags"
+    assert graphics_flags == 0, f"{YDR}: synthetic fixture should have no graphics segment"
+
+    payload = zlib.decompress(data[16:], -15)
+    assert len(payload) == 2048, f"{YDR}: expected 2048 decompressed bytes"
+    assert payload[0x340:0x34E] == b"test_drawable\0"
+    assert struct.unpack_from("<H", payload, 0x330)[0] == 0
+    assert struct.unpack_from("<H", payload, 0x332)[0] == 1
+    assert struct.unpack_from("<H", payload, 0x334)[0] == 2
+    assert struct.unpack_from("<fff", payload, 0x2C0) == (0.0, 0.0, 0.0)
+    assert struct.unpack_from("<fff", payload, 0x2C0 + 36) == (1.0, 0.0, 0.0)
+    assert struct.unpack_from("<fff", payload, 0x2C0 + 72) == (0.0, 1.0, 0.0)
+
+
 def validate_stream_contract() -> None:
     expected = {
         "simple.ymap": joaat("simple"),
@@ -86,6 +106,7 @@ def validate_stream_contract() -> None:
 def main() -> None:
     validate_ymap()
     validate_ytyp()
+    validate_ydr()
     validate_stream_contract()
     print("synthetic fixture validation: ok")
 

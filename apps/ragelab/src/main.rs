@@ -75,6 +75,18 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn Error>> {
                 agent::parse_path_json_args(args, "usage: ragelab validate <file> [--json]")?;
             agent::validate(&path, json)?;
         }
+        "plan" => {
+            let (path, json) =
+                agent::parse_path_json_args(args, "usage: ragelab plan <operation.json> [--json]")?;
+            agent::plan_operation_file(&path, json)?;
+        }
+        "apply" => {
+            let (path, json) = agent::parse_path_json_args(
+                args,
+                "usage: ragelab apply <operation.json> [--json]",
+            )?;
+            agent::apply_operation_file(&path, json)?;
+        }
         "hash" => {
             let name = required_arg(args.next(), "usage: ragelab hash <name>")?;
             let hash = joaat(&name);
@@ -450,6 +462,8 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "capabilities",
         "inspect",
         "validate",
+        "plan",
+        "apply",
         "hash",
         "meta-hash",
         "probe",
@@ -512,6 +526,8 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "capabilities",
         "inspect",
         "validate",
+        "plan",
+        "apply",
         "hash",
         "meta-hash",
         "probe",
@@ -578,7 +594,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
                 "version": env!("CARGO_PKG_VERSION"),
                 "commands": DISCOVERY_COMMANDS,
                 "canonicalCommands": CANONICAL_COMMANDS,
-                "structuredOutput": ["version", "capabilities", "inspect", "validate"],
+                "structuredOutput": ["version", "capabilities", "inspect", "validate", "plan", "apply"],
                 "legacyAliases": LEGACY_ALIASES,
                 "responseEnvelope": {
                     "schema": agent::RESPONSE_SCHEMA,
@@ -603,6 +619,8 @@ Agent-first commands:\n  \
 ragelab inspect <file> [--json]\n  \
 ragelab capabilities [file] [--json]\n  \
 ragelab validate <file> [--json]\n  \
+ragelab plan <operation.json> [--json]\n  \
+ragelab apply <operation.json> [--json]\n  \
 ragelab version [--json]\n\n\
 Format commands:\n  \
 ragelab ydr info <file.ydr>\n  \

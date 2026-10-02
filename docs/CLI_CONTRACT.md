@@ -33,7 +33,7 @@ Errors use the same schema:
 
 Consumers must key compatibility decisions on `schema` and `schemaVersion`, not on human-readable output.
 
-The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. Per-file `capabilities <file> --json`, `inspect <file> --json`, and `validate <file> --json` use the common response envelope.
+The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `plan <operation.json> --json`, and `apply <operation.json> --json` use the common response envelope.
 
 ## Agent-first surface
 
@@ -43,15 +43,17 @@ The primary structured workflow is:
 inspect -> capabilities -> plan -> apply -> validate
 ```
 
-The current contract implements the first, second, and final stages:
+The current contract implements the complete control loop:
 
 ```bash
 ragelab inspect <file> --json
 ragelab capabilities <file> --json
-ragelab validate <file> --json
+ragelab plan <operation.json> --json
+ragelab apply <operation.json> --json
+ragelab validate <output-file> --json
 ```
 
-`plan` and `apply` are reserved for the declarative operation contract.
+Declarative operation documents are specified in [OPERATIONS.md](OPERATIONS.md).
 
 ## Command taxonomy
 
@@ -111,6 +113,14 @@ Each operation reports:
 - `requiresWorkspace`.
 
 A capability entry reports availability in the current binary. It does not override format-specific write eligibility. Write operations still fail closed when the asset layout is unsupported.
+
+## Plan and apply
+
+`plan` and `apply` consume a versioned `ragelab.operation` document.
+
+`plan` is read-only and may return `allowed: false` while still exiting successfully because planning itself completed. `apply` plans again, requires an allowed plan, and uses non-overwriting output creation.
+
+See [OPERATIONS.md](OPERATIONS.md) for schema and writer guarantees.
 
 ## Inspect
 

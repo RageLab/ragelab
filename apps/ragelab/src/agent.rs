@@ -5,6 +5,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ragelab_engine::{
+    apply_operation_document, parse_operation_document, plan_operation_document, OperationError,
+};
 use ragelab_resource::{Rsc7Probe, Rsc7Resource};
 use ragelab_ybn::YbnCollision;
 use ragelab_ydd::YddDictionary;
@@ -19,7 +22,10 @@ pub const RESPONSE_SCHEMA: &str = "ragelab.cli.response";
 pub const RESPONSE_SCHEMA_VERSION: u64 = 1;
 
 pub fn is_structured_command(command: &str) -> bool {
-    matches!(command, "version" | "capabilities" | "inspect" | "validate")
+    matches!(
+        command,
+        "version" | "capabilities" | "inspect" | "validate" | "plan" | "apply"
+    )
 }
 
 pub fn classify_exit(error: &(dyn Error + 'static)) -> (i32, &'static str) {
@@ -167,6 +173,82 @@ pub fn validate(path: &Path, json_output: bool) -> Result<(), Box<dyn Error>> {
         for check in checks {
             println!("check: {check}");
         }
+    }
+
+    Ok(())
+}
+
+pub fn plan_operation_file(path: &Path, json_output: bool) -> Result<(), Box<dyn Error>> {
+    let operation_path = path.canonicalize()?;
+    let body = fs::read_to_string(&operation_path)?;
+    let document = parse_operation_document(&body).map_err(operation_error)?;
+    let base_dir = operation_path.parent().unwrap_or_else(|| Path::new("."));
+    let plan = plan_operation_document(&document, base_dir).map_err(operation_error)?;
+
+    if json_output {
+        print_success("plan", serde_json::to_value(&plan)?)?;
+    } else {
+        println!("operation: {}", path.display());
+        println!("source: {}", plan.source.display());
+        println!("output: {}", plan.output.display());
+        println!("asset-type: {}", plan.asset_type);
+        println!("allowed: {}", if plan.allowed { "yes" } else { "no" });
+        println!("non-destructive: yes");
+        for operation in &plan.operations {
+            let state = if operation.allowed {
+                "allowed"
+            } else {
+                "blocked"
+            };
+            println!(
+                "operation[{}]: {} [{state}]",
+                operation.index, operation.operation_type
+            );
+            if let Some(reason) = &operation.reason {
+                println!("  reason: {reason}");
+            }
+        }
+        for reason in &plan.reasons {
+            println!("reason: {reason}");
+        }
+    }
+
+    Ok(())
+}
+
+pub fn apply_operation_file(path: &Path, json_output: bool) -> Result<(), Box<dyn Error>> {
+    let operation_path = path.canonicalize()?;
+    let body = fs::read_to_string(&operation_path)?;
+    let document = parse_operation_document(&body).map_err(operation_error)?;
+    let base_dir = operation_path.parent().unwrap_or_else(|| Path::new("."));
+    let result = apply_operation_document(&document, base_dir).map_err(operation_error)?;
+
+    if json_output {
+        print_success("apply", serde_json::to_value(&result)?)?;
+    } else {
+        println!("operation: {}", path.display());
+        println!("source: {}", result.source.display());
+        println!("output: {}", result.output.display());
+        println!("asset-type: {}", result.asset_type);
+        println!("operations-applied: {}", result.operations_applied);
+        println!("bytes-written: {}", result.bytes_written);
+        println!("non-destructive: yes");
+        println!(
+            "semantic-reopen: {}",
+            if result.validation.semantic_reopen {
+                "ok"
+            } else {
+                "failed"
+            }
+        );
+        println!(
+            "source-unchanged: {}",
+            if result.validation.source_unchanged {
+                "yes"
+            } else {
+                "no"
+            }
+        );
     }
 
     Ok(())
@@ -458,6 +540,8 @@ fn operations_for(asset_type: &str) -> Vec<Value> {
     match asset_type {
         "YDR" => {
             operations.extend([
+                operation("plan", false, true, false),
+                operation("apply", true, true, false),
                 operation("ydr.info", false, false, false),
                 operation("ydr.translate", true, false, false),
                 operation("ydr.rebind-texture", true, false, false),
@@ -546,6 +630,10 @@ fn asset_type(path: &Path) -> &'static str {
 
 fn validation_error(error: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+}
+
+fn operation_error(error: OperationError) -> io::Error {
+    io::Error::new(error.error_kind(), error.to_string())
 }
 
 #[cfg(test)]
