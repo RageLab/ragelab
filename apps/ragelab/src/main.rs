@@ -85,7 +85,7 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn Error>> {
             agent::spatial(&path, json)?;
         }
         "preview" => {
-            const USAGE: &str = "usage: ragelab preview <file> [--drawable-index <n>] [--max-primitives <n>] [--max-vertices <n>] [--max-indices <n>] [--max-shaders <n>] [--max-texture-references <n>] [--json]";
+            const USAGE: &str = "usage: ragelab preview <file> [--drawable-index <n>] [--max-primitives <n>] [--max-vertices <n>] [--max-indices <n>] [--max-shaders <n>] [--max-texture-references <n>] [--max-children <n>] [--max-materials <n>] [--json]";
             let (path, options, json) = agent::parse_preview_args(args, USAGE)?;
             agent::preview(&path, options, json)?;
         }
@@ -654,7 +654,7 @@ ragelab inspect <file> [--json]\n  \
 ragelab capabilities [file] [--json]\n  \
 ragelab validate <file> [--json]\n  \
 ragelab spatial <file> [--json]\n  \
-ragelab preview <file> [--drawable-index <n>] [--max-primitives <n>] [--max-vertices <n>] [--max-indices <n>] [--max-shaders <n>] [--max-texture-references <n>] [--json]\n  \
+ragelab preview <file> [--drawable-index <n>] [--max-primitives <n>] [--max-vertices <n>] [--max-indices <n>] [--max-shaders <n>] [--max-texture-references <n>] [--max-children <n>] [--max-materials <n>] [--json]\n  \
 ragelab plan <operation.json> [--json]\n  \
 ragelab apply <operation.json> [--json]\n  \
 ragelab version [--json]\n\n\

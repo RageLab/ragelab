@@ -1115,3 +1115,107 @@ fn preview_rejects_limits_above_hard_caps() {
         .unwrap()
         .contains("hard limit 100000"));
 }
+
+#[test]
+fn ybn_preview_exposes_bounded_mesh_shapes_and_local_spatial_semantics() {
+    let output = binary()
+        .args([
+            "preview",
+            fixture("ybn/preview.ybn").to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("ragelab preview should run");
+
+    assert!(output.status.success());
+    let body = stdout_json(&output);
+    assert_eq!(body["command"], "preview");
+    assert_eq!(body["data"]["type"], "YBN");
+    assert_eq!(body["data"]["spatial"]["classification"], "localOnly");
+    assert_eq!(
+        body["data"]["spatial"]["coordinateConvention"],
+        "sourceXyzZUp"
+    );
+    assert_eq!(body["data"]["preview"]["kind"], "collision");
+    assert_eq!(body["data"]["preview"]["counts"]["children"], 1);
+    assert_eq!(body["data"]["preview"]["counts"]["materials"], 2);
+    assert_eq!(body["data"]["preview"]["counts"]["meshPrimitives"], 1);
+    assert_eq!(body["data"]["preview"]["counts"]["shapePrimitives"], 1);
+    assert_eq!(body["data"]["preview"]["counts"]["vertices"], 3);
+    assert_eq!(body["data"]["preview"]["counts"]["indices"], 3);
+    assert_eq!(
+        body["data"]["preview"]["mesh"]["positions"],
+        json!([[10.0, 20.0, 30.0], [11.0, 20.0, 30.0], [10.0, 21.0, 30.0]])
+    );
+    assert_eq!(
+        body["data"]["preview"]["mesh"]["primitives"][0]["indices"],
+        json!([0, 1, 2])
+    );
+    assert_eq!(
+        body["data"]["preview"]["shapePrimitives"][0]["shape"]["kind"],
+        "sphere"
+    );
+    assert_eq!(
+        body["data"]["preview"]["shapePrimitives"][0]["shape"]["center"],
+        json!([11.0, 20.0, 30.0])
+    );
+    assert_eq!(
+        body["data"]["preview"]["shapePrimitives"][0]["materialIndex"],
+        1
+    );
+
+    let bounded = binary()
+        .args([
+            "preview",
+            fixture("ybn/preview.ybn").to_str().unwrap(),
+            "--max-vertices",
+            "2",
+            "--max-materials",
+            "1",
+            "--json",
+        ])
+        .output()
+        .expect("bounded YBN preview should run");
+
+    assert!(bounded.status.success());
+    let bounded = stdout_json(&bounded);
+    assert_eq!(
+        bounded["data"]["preview"]["mesh"]["positionsIncluded"],
+        false
+    );
+    assert!(bounded["data"]["preview"]["mesh"]["positions"].is_null());
+    assert_eq!(
+        bounded["data"]["preview"]["mesh"]["primitives"][0]["indicesIncluded"],
+        false
+    );
+    assert!(bounded["data"]["preview"]["mesh"]["primitives"][0]["indices"].is_null());
+    assert_eq!(bounded["data"]["preview"]["emitted"]["vertices"], 0);
+    assert_eq!(bounded["data"]["preview"]["emitted"]["materials"], 1);
+    assert_eq!(bounded["data"]["preview"]["truncated"]["vertices"], true);
+    assert_eq!(bounded["data"]["preview"]["truncated"]["materials"], true);
+    assert_eq!(bounded["data"]["preview"]["truncated"]["indices"], true);
+}
+
+#[test]
+fn ybn_preview_rejects_drawable_selector() {
+    let output = binary()
+        .args([
+            "preview",
+            fixture("ybn/preview.ybn").to_str().unwrap(),
+            "--drawable-index",
+            "0",
+            "--json",
+        ])
+        .output()
+        .expect("ragelab preview should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stderr.is_empty());
+    let body = stdout_json(&output);
+    assert_eq!(body["command"], "preview");
+    assert_eq!(body["error"]["code"], "invalid_input");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("--drawable-index is only valid for YDD preview"));
+}

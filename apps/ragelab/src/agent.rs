@@ -13,7 +13,7 @@ use ragelab_engine::{
     SceneResolutionReasonCode, SceneResolutionState, SpatialContext, SpatialProvenance,
 };
 use ragelab_resource::{Rsc7Probe, Rsc7Resource};
-use ragelab_ybn::YbnCollision;
+use ragelab_ybn::{CollisionShape, YbnCollision};
 use ragelab_ydd::{YddDictionary, YddEditSession};
 use ragelab_ydr::{YdrDocument, YdrEditSession, YdrModel};
 use ragelab_ymap::Ymap;
@@ -327,12 +327,16 @@ const DEFAULT_PREVIEW_MAX_VERTICES: usize = 10_000;
 const DEFAULT_PREVIEW_MAX_INDICES: usize = 30_000;
 const DEFAULT_PREVIEW_MAX_SHADERS: usize = 128;
 const DEFAULT_PREVIEW_MAX_TEXTURE_REFERENCES: usize = 512;
+const DEFAULT_PREVIEW_MAX_CHILDREN: usize = 256;
+const DEFAULT_PREVIEW_MAX_MATERIALS: usize = 512;
 
 const HARD_PREVIEW_MAX_PRIMITIVES: usize = 512;
 const HARD_PREVIEW_MAX_VERTICES: usize = 100_000;
 const HARD_PREVIEW_MAX_INDICES: usize = 300_000;
 const HARD_PREVIEW_MAX_SHADERS: usize = 1_024;
 const HARD_PREVIEW_MAX_TEXTURE_REFERENCES: usize = 4_096;
+const HARD_PREVIEW_MAX_CHILDREN: usize = 4_096;
+const HARD_PREVIEW_MAX_MATERIALS: usize = 8_192;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreviewOptions {
@@ -342,6 +346,8 @@ pub struct PreviewOptions {
     pub max_indices: usize,
     pub max_shaders: usize,
     pub max_texture_references: usize,
+    pub max_children: usize,
+    pub max_materials: usize,
 }
 
 impl Default for PreviewOptions {
@@ -353,6 +359,8 @@ impl Default for PreviewOptions {
             max_indices: DEFAULT_PREVIEW_MAX_INDICES,
             max_shaders: DEFAULT_PREVIEW_MAX_SHADERS,
             max_texture_references: DEFAULT_PREVIEW_MAX_TEXTURE_REFERENCES,
+            max_children: DEFAULT_PREVIEW_MAX_CHILDREN,
+            max_materials: DEFAULT_PREVIEW_MAX_MATERIALS,
         }
     }
 }
@@ -416,6 +424,22 @@ pub fn parse_preview_args(
                     usage,
                 )?;
             }
+            "--max-children" => {
+                options.max_children = parse_preview_limit(
+                    args.next(),
+                    "--max-children",
+                    HARD_PREVIEW_MAX_CHILDREN,
+                    usage,
+                )?;
+            }
+            "--max-materials" => {
+                options.max_materials = parse_preview_limit(
+                    args.next(),
+                    "--max-materials",
+                    HARD_PREVIEW_MAX_MATERIALS,
+                    usage,
+                )?;
+            }
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -473,6 +497,47 @@ pub fn preview(
 ) -> Result<(), Box<dyn Error>> {
     let bytes = fs::read(path)?;
     let asset_type = asset_type(path);
+
+    if asset_type == "YBN" {
+        if options.drawable_index.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--drawable-index is only valid for YDD preview",
+            )
+            .into());
+        }
+
+        let collision = YbnCollision::from_bytes(&bytes).map_err(validation_error)?;
+        let data = collision_preview_json(&collision, options);
+
+        if json_output {
+            print_success(
+                "preview",
+                json!({
+                    "path": path.display().to_string(),
+                    "type": asset_type,
+                    "spatial": {
+                        "classification": "localOnly",
+                        "coordinateConvention": collision.coordinate_convention,
+                    },
+                    "preview": data,
+                }),
+            )?;
+        } else {
+            println!("file: {}", path.display());
+            println!("type: {asset_type}");
+            println!("children: {}", collision.children.len());
+            println!("materials: {}", collision.materials.len());
+            println!("mesh-primitives: {}", collision.primitives.len());
+            println!("shape-primitives: {}", collision.shape_primitives.len());
+            println!("vertices: {}", collision.vertex_count());
+            println!("indices: {}", collision.index_count());
+            println!("triangles: {}", collision.triangle_count());
+            println!("spatial: localOnly");
+        }
+
+        return Ok(());
+    }
 
     let (model, selector) = match asset_type {
         "YDR" => {
@@ -706,6 +771,196 @@ fn model_preview_json(model: &YdrModel, options: PreviewOptions, selector: Value
             "geometryOmittedPrimitives": geometry_omitted,
         },
     })
+}
+
+fn collision_preview_json(collision: &YbnCollision, options: PreviewOptions) -> Value {
+    let positions_included = collision.positions.len() <= options.max_vertices;
+    let positions = if positions_included {
+        json!(collision.positions)
+    } else {
+        Value::Null
+    };
+
+    let mut remaining_indices = options.max_indices;
+    let mut remaining_primitives = options.max_primitives;
+    let mut emitted_indices = 0_usize;
+    let mut mesh_primitives = Vec::new();
+
+    for primitive in &collision.primitives {
+        if remaining_primitives == 0 {
+            break;
+        }
+        remaining_primitives -= 1;
+
+        let indices_included = positions_included && primitive.indices.len() <= remaining_indices;
+        let indices = if indices_included {
+            remaining_indices -= primitive.indices.len();
+            emitted_indices += primitive.indices.len();
+            json!(primitive.indices)
+        } else {
+            Value::Null
+        };
+
+        mesh_primitives.push(json!({
+            "childIndex": primitive.child_index,
+            "materialIndex": primitive.material_index,
+            "indexCount": primitive.indices.len(),
+            "triangleCount": primitive.indices.len() / 3,
+            "indicesIncluded": indices_included,
+            "indicesOmittedReason": if indices_included {
+                Value::Null
+            } else if !positions_included {
+                Value::String("vertex preview limits".into())
+            } else {
+                Value::String("index preview limits".into())
+            },
+            "indices": indices,
+        }));
+    }
+
+    let emitted_mesh_primitives = mesh_primitives.len();
+    let mut shape_primitives = Vec::new();
+    for primitive in &collision.shape_primitives {
+        if remaining_primitives == 0 {
+            break;
+        }
+        remaining_primitives -= 1;
+
+        shape_primitives.push(json!({
+            "childIndex": primitive.child_index,
+            "materialIndex": primitive.material_index,
+            "polygonIndex": primitive.polygon_index,
+            "shape": collision_shape_json(&primitive.shape),
+        }));
+    }
+    let emitted_shape_primitives = shape_primitives.len();
+
+    let children = collision
+        .children
+        .iter()
+        .take(options.max_children)
+        .map(|child| {
+            json!({
+                "index": child.index,
+                "boundsType": child.bounds_type.as_str(),
+                "bounds": {
+                    "min": child.bounds.min,
+                    "max": child.bounds.max,
+                    "center": child.bounds.center,
+                    "sphereCenter": child.bounds.sphere_center,
+                    "sphereRadius": child.bounds.sphere_radius,
+                },
+                "vertices": child.vertices,
+                "triangles": child.triangles,
+                "shapePrimitives": child.shape_primitives,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let materials = collision
+        .materials
+        .iter()
+        .take(options.max_materials)
+        .map(|material| {
+            json!({
+                "index": material.index,
+                "childIndex": material.child_index,
+                "localIndex": material.local_index,
+                "materialType": material.material_type,
+                "proceduralId": material.procedural_id,
+                "flags": format!("0x{:04X}", material.flags),
+                "colorIndex": material.color_index,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "kind": "collision",
+        "coordinateConvention": collision.coordinate_convention,
+        "bounds": {
+            "min": collision.bounds.min,
+            "max": collision.bounds.max,
+            "center": collision.bounds.center,
+            "sphereCenter": collision.bounds.sphere_center,
+            "sphereRadius": collision.bounds.sphere_radius,
+        },
+        "counts": {
+            "children": collision.children.len(),
+            "materials": collision.materials.len(),
+            "meshPrimitives": collision.primitives.len(),
+            "shapePrimitives": collision.shape_primitives.len(),
+            "vertices": collision.vertex_count(),
+            "indices": collision.index_count(),
+            "triangles": collision.triangle_count(),
+        },
+        "children": children,
+        "materials": materials,
+        "mesh": {
+            "positionsIncluded": positions_included,
+            "positionsOmittedReason": if positions_included {
+                Value::Null
+            } else {
+                Value::String("vertex preview limits".into())
+            },
+            "positions": positions,
+            "primitives": mesh_primitives,
+        },
+        "shapePrimitives": shape_primitives,
+        "limits": {
+            "maxPrimitives": options.max_primitives,
+            "maxVertices": options.max_vertices,
+            "maxIndices": options.max_indices,
+            "maxChildren": options.max_children,
+            "maxMaterials": options.max_materials,
+        },
+        "emitted": {
+            "children": collision.children.len().min(options.max_children),
+            "materials": collision.materials.len().min(options.max_materials),
+            "meshPrimitives": emitted_mesh_primitives,
+            "shapePrimitives": emitted_shape_primitives,
+            "vertices": if positions_included {
+                collision.positions.len()
+            } else {
+                0
+            },
+            "indices": emitted_indices,
+        },
+        "truncated": {
+            "children": collision.children.len() > options.max_children,
+            "materials": collision.materials.len() > options.max_materials,
+            "primitives": collision.primitives.len() + collision.shape_primitives.len()
+                > options.max_primitives,
+            "vertices": !positions_included,
+            "indices": emitted_indices < collision.index_count(),
+        },
+    })
+}
+
+fn collision_shape_json(shape: &CollisionShape) -> Value {
+    match shape {
+        CollisionShape::Sphere { center, radius } => json!({
+            "kind": "sphere",
+            "center": center,
+            "radius": radius,
+        }),
+        CollisionShape::Capsule { start, end, radius } => json!({
+            "kind": "capsule",
+            "start": start,
+            "end": end,
+            "radius": radius,
+        }),
+        CollisionShape::Box { corner, edges } => json!({
+            "kind": "box",
+            "corner": corner,
+            "edges": edges,
+        }),
+        CollisionShape::Cylinder { start, end, radius } => json!({
+            "kind": "cylinder",
+            "start": start,
+            "end": end,
+            "radius": radius,
+        }),
+    }
 }
 
 pub fn spatial(path: &Path, json_output: bool) -> Result<(), Box<dyn Error>> {

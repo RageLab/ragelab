@@ -19,6 +19,7 @@ YDR = FIXTURES / "ydr" / "simple.ydr"
 EDITABLE_YDR = FIXTURES / "ydr" / "editable.ydr"
 YDD = FIXTURES / "ydd" / "editable.ydd"
 YBN = FIXTURES / "ybn" / "simple.ybn"
+PREVIEW_YBN = FIXTURES / "ybn" / "preview.ybn"
 
 
 def jenkins(text: str) -> int:
@@ -146,6 +147,32 @@ def validate_ybn() -> None:
     assert struct.unpack_from("<I", payload, 0x528)[0] == (70 | (8 << 8))
 
 
+def validate_preview_ybn() -> None:
+    data = PREVIEW_YBN.read_bytes()
+    assert data[:4] == b"RSC7", f"{PREVIEW_YBN}: missing RSC7 magic"
+    version, system_flags, graphics_flags = struct.unpack_from("<III", data, 4)
+    assert version == 43, f"{PREVIEW_YBN}: unexpected resource version {version}"
+    assert system_flags == ((1 << 26) | 1)
+    assert graphics_flags == 0
+
+    payload = zlib.decompress(data[16:], -15)
+    assert len(payload) == 2048
+    assert struct.unpack_from("<I", payload, 0x200 + 0xD4)[0] == 2
+
+    # Polygon 0 is a triangle using vertices 0, 1, 2.
+    assert payload[0x500] & 7 == 0
+    assert struct.unpack_from("<H", payload, 0x504)[0] == 0
+    assert struct.unpack_from("<H", payload, 0x506)[0] == 1
+    assert struct.unpack_from("<H", payload, 0x508)[0] == 2
+
+    # Polygon 1 is a sphere using material slot 1.
+    assert payload[0x510] & 7 == 1
+    assert struct.unpack_from("<H", payload, 0x512)[0] == 1
+    assert struct.unpack_from("<f", payload, 0x514)[0] == 1.5
+    assert payload[0x540] == 0
+    assert payload[0x541] == 1
+
+
 def validate_stream_contract() -> None:
     expected = {
         "simple.ymap": joaat("simple"),
@@ -172,6 +199,7 @@ def main() -> None:
     validate_editable_ydr()
     validate_ydd()
     validate_ybn()
+    validate_preview_ybn()
     validate_stream_contract()
     print("synthetic fixture validation: ok")
 

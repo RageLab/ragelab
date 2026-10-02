@@ -7,6 +7,7 @@ RageLab exposes renderer-neutral Legacy/Gen8 preview data for software agents an
 ```bash
 ragelab preview asset.ydr --json
 ragelab preview dictionary.ydd --drawable-index 0 --json
+ragelab preview collision.ybn --json
 ```
 
 YDD requires an explicit zero-based `--drawable-index`. YDR rejects that selector.
@@ -23,6 +24,23 @@ YDR and selected YDD drawables report:
 - positions, normals, UV0, and indices when the complete primitive fits the remaining geometry budget.
 
 Isolated drawable preview data is always `localOnly`. RageLab does not infer a world transform from filenames, bounds, dictionary membership, or workspace relationships.
+
+## Collision preview
+
+Legacy YBN preview reports renderer-neutral collision data:
+
+- root and child bounds;
+- child type and per-child vertex/triangle/shape counts;
+- bounded collision material metadata;
+- bounded mesh positions and material-grouped triangle indices;
+- sphere, capsule, box, and cylinder shape primitives;
+- source polygon index when available.
+
+YBN preview is always `localOnly`. The normalized coordinates already include the transforms encoded inside the collision resource, but RageLab does not infer any placement of an isolated YBN in world space.
+
+The mesh position array is all-or-nothing. If the complete global position array exceeds `--max-vertices`, positions are omitted and all mesh indices are also omitted. This prevents emitted indices from referring to vertices that are absent from the response.
+
+The `--max-primitives` budget is shared by mesh primitive groups and shape primitives. Mesh groups consume the budget first, followed by shape primitives.
 
 ## Geometry integrity
 
@@ -49,6 +67,8 @@ Defaults:
 | indices | 30,000 | 300,000 |
 | shaders | 128 | 1,024 |
 | texture references | 512 | 4,096 |
+| children | 256 | 4,096 |
+| materials | 512 | 8,192 |
 
 Override them with:
 
@@ -58,10 +78,12 @@ Override them with:
 --max-indices <n>
 --max-shaders <n>
 --max-texture-references <n>
+--max-children <n>
+--max-materials <n>
 ```
 
 All limits must be positive. Requests above the hard maximum fail with `invalid_input` rather than generating an unbounded JSON response.
 
 ## Compatibility
 
-The current model preview contract targets GTA V Legacy/Gen8 YDR resource version 165 and Legacy YDD dictionaries that contain supported YDR drawables. Enhanced/Gen9 is outside the active compatibility contract.
+The current preview contract targets GTA V Legacy/Gen8 YDR resource version 165, Legacy YDD dictionaries containing supported YDR drawables, and Legacy PC YBN resource version 43. Enhanced/Gen9 is outside the active compatibility contract.
