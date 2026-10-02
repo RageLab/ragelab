@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CMapParentTxds>
+  <txdRelationships>
+    <Item>
+      <parent>test_textures_parent</parent>
+      <child>test_textures</child>
+    </Item>
+    <Item>
+      <parent>test_textures_grandparent</parent>
+      <child>test_textures_parent</child>
+    </Item>
+  </txdRelationships>
+</CMapParentTxds>

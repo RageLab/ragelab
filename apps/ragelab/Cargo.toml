@@ -1,0 +1,24 @@
+[package]
+name = "ragelab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ragelab-assets = { path = "../../crates/ragelab-assets" }
+ragelab-engine = { path = "../../crates/ragelab-engine" }
+ragelab-hash = { path = "../../crates/ragelab-hash" }
+ragelab-meta = { path = "../../crates/ragelab-meta" }
+ragelab-resource = { path = "../../crates/ragelab-resource" }
+ragelab-ymap = { path = "../../crates/ragelab-ymap" }
+ragelab-ytd = { path = "../../crates/ragelab-ytd" }
+ragelab-ytyp = { path = "../../crates/ragelab-ytyp" }
+ragelab-ymf = { path = "../../crates/ragelab-ymf" }
+ragelab-ydr = { path = "../../crates/ragelab-ydr" }
+ragelab-ydd = { path = "../../crates/ragelab-ydd" }
+ragelab-ybn = { path = "../../crates/ragelab-ybn" }
+serde_json = "1.0"
+
+[lints]
+workspace = true

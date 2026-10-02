@@ -1,0 +1,18 @@
+[package]
+name = "ragelab-assets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ragelab-hash = { path = "../ragelab-hash" }
+ragelab-meta = { path = "../ragelab-meta" }
+ragelab-rbf = { path = "../ragelab-rbf" }
+ragelab-ymap = { path = "../ragelab-ymap" }
+ragelab-ydd = { path = "../ragelab-ydd" }
+ragelab-ytyp = { path = "../ragelab-ytyp" }
+ragelab-ymf = { path = "../ragelab-ymf" }
+
+[lints]
+workspace = true

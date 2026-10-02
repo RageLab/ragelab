@@ -1,0 +1,13 @@
+[package]
+name = "ragelab-ymf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ragelab-meta = { path = "../ragelab-meta" }
+ragelab-pso = { path = "../ragelab-pso" }
+
+[lints]
+workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "ragelab-ybn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ragelab-resource = { path = "../ragelab-resource" }
+
+[dev-dependencies]
+flate2 = "1"
+
+[lints]
+workspace = true

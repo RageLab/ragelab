@@ -1,0 +1,13 @@
+[package]
+name = "ragelab-ytd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ragelab-hash = { path = "../ragelab-hash" }
+ragelab-resource = { path = "../ragelab-resource" }
+
+[lints]
+workspace = true

@@ -1,0 +1,11 @@
+name=0x6C3AE62A (simple_map)
+parent=<none>
+entities=1
+unique_archetypes=1
+entity[0].archetype=0xEF3DBDA5 (test_archetype)
+entity[0].position=1,2,3
+entity[0].rotation=0,0,0,1
+entity[0].flags=0x55AA55AA
+entity[0].parent_index=None
+physics_dictionaries=1
+physics[0]=0xA18F1BB9 (test_collision)

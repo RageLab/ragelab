@@ -1,0 +1,10 @@
+YTYP name:              0xAA2B639B (simple)
+archetypes:             1
+kind:                   Base
+archetype name:         0xEF3DBDA5 (test_archetype)
+asset type:             Drawable (2)
+asset name:             0x4431E7D7 (test_drawable)
+texture dictionary:     0x94A896A3 (test_textures)
+physics dictionary:     0xA18F1BB9 (test_collision)
+clip dictionary:        0x5D68DAE9 (test_clip)
+drawable dictionary:    0x4583EF51 (test_drawable_dict)

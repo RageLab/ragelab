@@ -1,0 +1,14 @@
+[package]
+name = "ragelab-ymap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ragelab-hash = { path = "../ragelab-hash" }
+ragelab-meta = { path = "../ragelab-meta" }
+ragelab-resource = { path = "../ragelab-resource" }
+
+[lints]
+workspace = true

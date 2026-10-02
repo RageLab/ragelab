@@ -1,0 +1,16 @@
+[package]
+name = "ragelab-ydr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ragelab-resource = { path = "../ragelab-resource" }
+ragelab-ytd = { path = "../ragelab-ytd" }
+
+[dev-dependencies]
+flate2 = "1"
+
+[lints]
+workspace = true

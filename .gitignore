@@ -1,0 +1,16 @@
+/target/
+.DS_Store
+*.zip
+*.local
+*.local.*
+.env
+.env.*
+!.env.example
+
+# Local workspaces, catalogs, exports, and proprietary validation data
+/workspaces/
+/.catalogs/
+/.exports/
+/.runtime/
+/validation/private/
+/fixtures/private/
