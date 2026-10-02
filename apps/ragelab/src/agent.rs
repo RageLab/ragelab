@@ -566,7 +566,14 @@ fn operations_for(asset_type: &str) -> Vec<Value> {
                 operation("ytd.rebuild-compact", true, false, false),
             ]);
         }
-        "YBN" => operations.push(operation("ybn.info", false, false, false)),
+        "YBN" => {
+            operations.extend([
+                operation("plan", false, true, false),
+                operation("apply", true, true, false),
+                operation("ybn.info", false, false, false),
+                operation("ybn.edit-polygon", true, false, false),
+            ]);
+        }
         "YMAP" => {
             operations.extend([
                 operation("ymap.info", false, false, false),

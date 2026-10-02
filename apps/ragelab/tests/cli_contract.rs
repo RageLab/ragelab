@@ -218,3 +218,76 @@ fn declarative_plan_and_apply_are_structured_and_non_destructive() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn ybn_capabilities_and_declarative_polygon_edit_are_agent_accessible() {
+    let root = temp_root("ybn-plan-apply");
+    fs::create_dir_all(&root).unwrap();
+
+    let source = root.join("source.ybn");
+    let output = root.join("output.ybn");
+    let operation = root.join("operation.json");
+    fs::copy(fixture("ybn/simple.ybn"), &source).unwrap();
+    let source_before = fs::read(&source).unwrap();
+
+    let capabilities_output = binary()
+        .args(["capabilities", source.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab capabilities should run");
+    assert!(capabilities_output.status.success());
+    let capabilities = stdout_json(&capabilities_output);
+    let operations = capabilities["data"]["operations"].as_array().unwrap();
+    assert!(operations
+        .iter()
+        .any(|operation| operation["id"] == "ybn.edit-polygon"));
+    assert!(operations.iter().any(|operation| operation["id"] == "plan"));
+    assert!(operations
+        .iter()
+        .any(|operation| operation["id"] == "apply"));
+
+    let body = json!({
+        "schema": "ragelab.operation",
+        "schemaVersion": 1,
+        "source": "source.ybn",
+        "output": "output.ybn",
+        "operations": [
+            {
+                "type": "ybn.edit-polygon",
+                "childIndex": 0,
+                "polygonIndex": 0,
+                "kind": "sphere",
+                "radius": 2.75,
+                "materialIndex": 1
+            }
+        ]
+    });
+    fs::write(&operation, body.to_string()).unwrap();
+
+    let plan_output = binary()
+        .args(["plan", operation.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab plan should run");
+    assert!(plan_output.status.success());
+    assert_eq!(stdout_json(&plan_output)["data"]["allowed"], true);
+    assert!(!output.exists());
+
+    let apply_output = binary()
+        .args(["apply", operation.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab apply should run");
+    assert!(apply_output.status.success());
+    let apply = stdout_json(&apply_output);
+    assert_eq!(apply["data"]["assetType"], "YBN");
+    assert_eq!(apply["data"]["validation"]["semanticReopen"], true);
+    assert_eq!(apply["data"]["validation"]["sourceUnchanged"], true);
+    assert_eq!(fs::read(&source).unwrap(), source_before);
+
+    let validate_output = binary()
+        .args(["validate", output.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab validate should run");
+    assert!(validate_output.status.success());
+    assert_eq!(stdout_json(&validate_output)["data"]["valid"], true);
+
+    fs::remove_dir_all(root).unwrap();
+}

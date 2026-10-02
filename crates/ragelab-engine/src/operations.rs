@@ -6,6 +6,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ragelab_ybn::{
+    repack_polygon_edits, CollisionShape, YbnCollision, YbnPolygonEdit, YbnPolygonKind,
+};
 use ragelab_ydr::{YdrDocument, YdrEditSession};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -193,12 +196,23 @@ pub fn plan_operation_document(
     } else {
         None
     };
+    let ybn_collision = if asset_type == "YBN" {
+        Some(
+            YbnCollision::from_bytes(&source_bytes)
+                .map_err(|error| OperationError::InvalidSource(error.to_string()))?,
+        )
+    } else {
+        None
+    };
 
     let mut operations = Vec::with_capacity(document.operations.len());
     for (index, operation) in document.operations.iter().enumerate() {
         let planned = match operation.operation_type.as_str() {
             "ydr.translate" => {
                 plan_ydr_translate(index, operation, &asset_type, ydr_capability.as_ref())
+            }
+            "ybn.edit-polygon" => {
+                plan_ybn_edit_polygon(index, operation, &asset_type, ybn_collision.as_ref())
             }
             other => PlannedOperation {
                 index,
@@ -209,6 +223,25 @@ pub fn plan_operation_document(
             },
         };
         operations.push(planned);
+    }
+
+    if asset_type == "YBN" && operations.iter().all(|operation| operation.allowed) {
+        let collision = ybn_collision
+            .as_ref()
+            .expect("YBN collision should be available after successful parse");
+        let edits = document
+            .operations
+            .iter()
+            .map(|operation| parse_ybn_polygon_edit(operation, collision))
+            .collect::<Result<Vec<_>, _>>();
+        match edits {
+            Ok(edits) => {
+                if let Err(error) = repack_polygon_edits(&source_bytes, &edits) {
+                    reasons.push(format!("YBN writer rejected planned edits: {error}"));
+                }
+            }
+            Err(reason) => reasons.push(reason),
+        }
     }
 
     let allowed = reasons.is_empty() && operations.iter().all(|operation| operation.allowed);
@@ -246,6 +279,7 @@ pub fn apply_operation_document(
 
     match plan.asset_type.as_str() {
         "YDR" => apply_ydr_operations(document, &plan),
+        "YBN" => apply_ybn_operations(document, &plan),
         other => Err(OperationError::Rejected(format!(
             "no declarative writer is available for asset type {other}"
         ))),
@@ -291,6 +325,261 @@ fn plan_ydr_translate(
         reason,
         details,
     }
+}
+
+fn plan_ybn_edit_polygon(
+    index: usize,
+    operation: &OperationSpec,
+    asset_type: &str,
+    collision: Option<&YbnCollision>,
+) -> PlannedOperation {
+    let mut reason = None;
+    let mut details = Value::Null;
+
+    if asset_type != "YBN" {
+        reason = Some(format!(
+            "ybn.edit-polygon requires a YBN source, found {asset_type}"
+        ));
+    } else if let Some(collision) = collision {
+        match parse_ybn_polygon_edit(operation, collision) {
+            Ok(_) => details = Value::Object(operation.parameters.clone()),
+            Err(message) => reason = Some(message),
+        }
+    } else {
+        reason = Some("YBN source could not be parsed".into());
+    }
+
+    PlannedOperation {
+        index,
+        operation_type: operation.operation_type.clone(),
+        allowed: reason.is_none(),
+        reason,
+        details,
+    }
+}
+
+fn parse_ybn_polygon_edit(
+    operation: &OperationSpec,
+    collision: &YbnCollision,
+) -> Result<YbnPolygonEdit, String> {
+    const ALLOWED: &[&str] = &[
+        "childIndex",
+        "polygonIndex",
+        "kind",
+        "radius",
+        "materialIndex",
+    ];
+
+    for key in operation.parameters.keys() {
+        if !ALLOWED.contains(&key.as_str()) {
+            return Err(format!("ybn.edit-polygon has unknown parameter: {key}"));
+        }
+    }
+
+    let child_index = required_usize(&operation.parameters, "childIndex", "ybn.edit-polygon")?;
+    let polygon_index = required_usize(&operation.parameters, "polygonIndex", "ybn.edit-polygon")?;
+    let kind = operation
+        .parameters
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "ybn.edit-polygon kind must be a string".to_string())?;
+    let expected_kind = parse_ybn_polygon_kind(kind)?;
+
+    let primitive = collision
+        .shape_primitives
+        .iter()
+        .find(|primitive| {
+            primitive.child_index == child_index && primitive.polygon_index == Some(polygon_index)
+        })
+        .ok_or_else(|| {
+            format!("child {child_index} polygon {polygon_index} is not an editable shape polygon")
+        })?;
+    let actual_kind = collision_shape_kind(&primitive.shape);
+    if actual_kind != expected_kind {
+        return Err(format!(
+            "child {child_index} polygon {polygon_index} is {}, not {}",
+            ybn_kind_name(actual_kind),
+            ybn_kind_name(expected_kind)
+        ));
+    }
+
+    let radius = match operation.parameters.get("radius") {
+        Some(value) => {
+            let radius = value.as_f64().ok_or_else(|| {
+                "ybn.edit-polygon radius must be a finite number greater than zero".to_string()
+            })?;
+            if !radius.is_finite()
+                || radius <= 0.0
+                || radius < f32::MIN as f64
+                || radius > f32::MAX as f64
+            {
+                return Err(
+                    "ybn.edit-polygon radius must be a finite f32 greater than zero".into(),
+                );
+            }
+            if expected_kind == YbnPolygonKind::Box {
+                return Err("ybn.edit-polygon box polygons do not expose radius edits".into());
+            }
+            Some(radius as f32)
+        }
+        None => None,
+    };
+
+    let local_material = match operation.parameters.get("materialIndex") {
+        Some(value) => {
+            let material_index = json_usize(value, "materialIndex", "ybn.edit-polygon")?;
+            let material = collision
+                .materials
+                .iter()
+                .find(|material| material.index == material_index)
+                .ok_or_else(|| {
+                    format!(
+                        "ybn.edit-polygon materialIndex {material_index} does not exist in the source"
+                    )
+                })?;
+            if material.child_index != child_index {
+                return Err(format!(
+                    "ybn.edit-polygon materialIndex {material_index} belongs to child {}, not child {child_index}",
+                    material.child_index
+                ));
+            }
+            Some(material.local_index)
+        }
+        None => None,
+    };
+
+    if radius.is_none() && local_material.is_none() {
+        return Err(
+            "ybn.edit-polygon requires at least one mutable field: radius or materialIndex".into(),
+        );
+    }
+
+    Ok(YbnPolygonEdit {
+        child_index,
+        polygon_index,
+        expected_kind,
+        radius,
+        local_material,
+    })
+}
+
+fn required_usize(
+    parameters: &Map<String, Value>,
+    key: &str,
+    operation: &str,
+) -> Result<usize, String> {
+    let value = parameters
+        .get(key)
+        .ok_or_else(|| format!("{operation} requires {key}"))?;
+    json_usize(value, key, operation)
+}
+
+fn json_usize(value: &Value, key: &str, operation: &str) -> Result<usize, String> {
+    let value = value
+        .as_u64()
+        .ok_or_else(|| format!("{operation} {key} must be a non-negative integer"))?;
+    usize::try_from(value).map_err(|_| format!("{operation} {key} is too large"))
+}
+
+fn parse_ybn_polygon_kind(value: &str) -> Result<YbnPolygonKind, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "sphere" => Ok(YbnPolygonKind::Sphere),
+        "capsule" => Ok(YbnPolygonKind::Capsule),
+        "box" => Ok(YbnPolygonKind::Box),
+        "cylinder" => Ok(YbnPolygonKind::Cylinder),
+        _ => Err(format!(
+            "unsupported ybn.edit-polygon kind {value:?}; expected sphere, capsule, box, or cylinder"
+        )),
+    }
+}
+
+fn collision_shape_kind(shape: &CollisionShape) -> YbnPolygonKind {
+    match shape {
+        CollisionShape::Sphere { .. } => YbnPolygonKind::Sphere,
+        CollisionShape::Capsule { .. } => YbnPolygonKind::Capsule,
+        CollisionShape::Box { .. } => YbnPolygonKind::Box,
+        CollisionShape::Cylinder { .. } => YbnPolygonKind::Cylinder,
+    }
+}
+
+fn ybn_kind_name(kind: YbnPolygonKind) -> &'static str {
+    match kind {
+        YbnPolygonKind::Sphere => "sphere",
+        YbnPolygonKind::Capsule => "capsule",
+        YbnPolygonKind::Box => "box",
+        YbnPolygonKind::Cylinder => "cylinder",
+    }
+}
+
+fn apply_ybn_operations(
+    document: &OperationDocument,
+    plan: &OperationPlan,
+) -> Result<OperationApplyResult, OperationError> {
+    let source_bytes = fs::read(&plan.source)?;
+    let collision = YbnCollision::from_bytes(&source_bytes)
+        .map_err(|error| OperationError::InvalidSource(error.to_string()))?;
+    let edits = document
+        .operations
+        .iter()
+        .map(|operation| parse_ybn_polygon_edit(operation, &collision))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(OperationError::Rejected)?;
+    let rewritten = repack_polygon_edits(&source_bytes, &edits)
+        .map_err(|error| OperationError::Writer(error.to_string()))?;
+    let reopened = YbnCollision::from_bytes(&rewritten)
+        .map_err(|error| OperationError::Writer(error.to_string()))?;
+
+    if let Some(parent) = plan
+        .output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut file = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&plan.output)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(OperationError::Rejected(format!(
+                "output already exists; apply never overwrites existing files: {}",
+                plan.output.display()
+            )))
+        }
+        Err(error) => return Err(OperationError::Io(error)),
+    };
+    file.write_all(&rewritten)?;
+    file.flush()?;
+
+    let source_unchanged = fs::read(&plan.source)? == source_bytes;
+    if !source_unchanged {
+        return Err(OperationError::Writer(
+            "source asset changed during non-destructive apply".into(),
+        ));
+    }
+
+    Ok(OperationApplyResult {
+        schema: OPERATION_APPLY_SCHEMA,
+        schema_version: OPERATION_DOCUMENT_SCHEMA_VERSION,
+        source: plan.source.clone(),
+        output: plan.output.clone(),
+        asset_type: plan.asset_type.clone(),
+        operations_applied: document.operations.len(),
+        bytes_written: rewritten.len(),
+        non_destructive: true,
+        validation: ApplyValidation {
+            semantic_reopen: true,
+            source_unchanged,
+        },
+        details: json!({
+            "shapePrimitives": reopened.shape_primitive_count(),
+            "materials": reopened.materials.len(),
+            "polygonEdits": edits.len(),
+        }),
+    })
 }
 
 fn apply_ydr_operations(
@@ -542,6 +831,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    use ragelab_ybn::{CollisionShape, YbnCollision};
     use ragelab_ydr::YdrDocument;
     use serde_json::json;
 
@@ -552,6 +842,10 @@ mod tests {
 
     fn fixture() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/ydr/simple.ydr")
+    }
+
+    fn ybn_fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/ybn/simple.ybn")
     }
 
     fn temp_root(label: &str) -> PathBuf {
@@ -653,6 +947,60 @@ mod tests {
 
         let second = apply_operation_document(&document, &root).unwrap_err();
         assert!(second.to_string().contains("never overwrites"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn plans_and_applies_ybn_polygon_radius_and_material_edit() {
+        let root = temp_root("ybn-apply");
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.ybn");
+        let output = root.join("output.ybn");
+        fs::copy(ybn_fixture(), &source).unwrap();
+        let source_before = fs::read(&source).unwrap();
+
+        let body = json!({
+            "schema": OPERATION_DOCUMENT_SCHEMA,
+            "schemaVersion": 1,
+            "source": "source.ybn",
+            "output": "output.ybn",
+            "operations": [
+                {
+                    "type": "ybn.edit-polygon",
+                    "childIndex": 0,
+                    "polygonIndex": 0,
+                    "kind": "sphere",
+                    "radius": 2.75,
+                    "materialIndex": 1
+                }
+            ]
+        })
+        .to_string();
+        let document = parse_operation_document(&body).unwrap();
+        let plan = plan_operation_document(&document, &root).unwrap();
+
+        assert!(plan.allowed);
+        assert_eq!(plan.asset_type, "YBN");
+        assert_eq!(plan.operations.len(), 1);
+        assert!(plan.operations[0].allowed);
+        assert!(!output.exists());
+
+        let result = apply_operation_document(&document, &root).unwrap();
+        assert!(output.is_file());
+        assert_eq!(fs::read(&source).unwrap(), source_before);
+        assert!(result.validation.semantic_reopen);
+        assert!(result.validation.source_unchanged);
+
+        let collision = YbnCollision::from_bytes(&fs::read(&output).unwrap()).unwrap();
+        assert_eq!(collision.shape_primitives[0].material_index, 1);
+        assert_eq!(
+            collision.shape_primitives[0].shape,
+            CollisionShape::Sphere {
+                center: [11.0, 20.0, 30.0],
+                radius: 2.75,
+            }
+        );
 
         fs::remove_dir_all(root).unwrap();
     }

@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "fixtures" / "synthetic"
 STREAM = FIXTURES / "stream"
 YDR = FIXTURES / "ydr" / "simple.ydr"
+YBN = FIXTURES / "ybn" / "simple.ybn"
 
 
 def jenkins(text: str) -> int:
@@ -84,6 +85,25 @@ def validate_ydr() -> None:
     assert struct.unpack_from("<fff", payload, 0x2C0 + 72) == (0.0, 1.0, 0.0)
 
 
+def validate_ybn() -> None:
+    data = YBN.read_bytes()
+    assert data[:4] == b"RSC7", f"{YBN}: missing RSC7 magic"
+    version, system_flags, graphics_flags = struct.unpack_from("<III", data, 4)
+    assert version == 43, f"{YBN}: unexpected resource version {version}"
+    assert system_flags == ((1 << 26) | 1), f"{YBN}: unexpected system flags"
+    assert graphics_flags == 0, f"{YBN}: synthetic fixture should have no graphics segment"
+
+    payload = zlib.decompress(data[16:], -15)
+    assert len(payload) == 2048, f"{YBN}: expected 2048 decompressed bytes"
+    assert struct.unpack_from("<H", payload, 0x500)[0] == 1
+    assert struct.unpack_from("<H", payload, 0x502)[0] == 1
+    assert struct.unpack_from("<f", payload, 0x504)[0] == 1.5
+    assert payload[0x200 + 0x120] == 2
+    assert payload[0x540] == 0
+    assert struct.unpack_from("<I", payload, 0x520)[0] == (69 | (7 << 8) | (3 << 24))
+    assert struct.unpack_from("<I", payload, 0x528)[0] == (70 | (8 << 8))
+
+
 def validate_stream_contract() -> None:
     expected = {
         "simple.ymap": joaat("simple"),
@@ -107,6 +127,7 @@ def main() -> None:
     validate_ymap()
     validate_ytyp()
     validate_ydr()
+    validate_ybn()
     validate_stream_contract()
     print("synthetic fixture validation: ok")
 
