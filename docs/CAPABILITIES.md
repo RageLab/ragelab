@@ -2,6 +2,8 @@
 
 This document tracks the public RageLab capability surface. It distinguishes core support from CLI exposure and agent-facing structured contracts.
 
+The current compatibility target is GTA V Legacy/Gen8. Enhanced/Gen9 is not part of the active support contract.
+
 ## Availability states
 
 `ragelab capabilities <file> --json` reports an `availability` value for each operation:
@@ -18,7 +20,7 @@ Writer eligibility remains fail-closed. A listed operation is not permission to 
 | Domain | Read / inspection | Mutation / export | Agent-first structured surface | Status |
 | --- | --- | --- | --- | --- |
 | RSC7 | probe, container validation | resource re-encode primitives in core | `inspect`, `validate` | Available |
-| YDR | inspect, validate, spatial context, bindings and model diagnostics | rigid translation, texture rebind, shader rebind | `inspect`, `validate`, `spatial`, `capabilities`; declarative `ydr.translate` through `plan/apply` | Partial |
+| YDR | inspect, validate, spatial context, bindings and model diagnostics | rigid translation, texture rebind, shader rebind | `inspect`, `validate`, `spatial`, `capabilities`; declarative `ydr.translate`, `ydr.rebind-texture`, and `ydr.rebind-shader` through `plan/apply` | Available for current controlled writer scope |
 | YDD | dictionary/drawable inspection, validate, spatial context | selected drawable translation, texture rebind, shader rebind | `inspect`, `validate`, `spatial`, `capabilities` | Partial |
 | YTD | dictionary inspection, DDS extraction, decode support in core | DDS replacement, relocation/repack, RGBA repack, compact rebuild | `inspect`, `validate`, `spatial`, `capabilities` | Partial |
 | YBN | collision inspection, validate, spatial context | conservative sphere/capsule/cylinder radius edits and same-child material edits | `inspect`, `validate`, `spatial`, `capabilities`; declarative `ybn.edit-polygon` through `plan/apply` | Available for supported polygon edits |
@@ -46,12 +48,11 @@ Not every writer has been moved to the declarative operation document yet. Legac
 
 The following capabilities already exist in RageLab or existed in the former HTTP adapter and are candidates for the next agent-facing work:
 
-1. Declarative YDR texture/shader rebind operations.
-2. Declarative YDD translation and binding edits with explicit drawable selection.
-3. Structured YTD texture inventory/preview and declarative replacement/repack operations.
-4. Batch and combined workspace export using the existing multi-map engine paths.
-5. Structured normalized model and collision preview data for headless consumers.
-6. GTA/FiveM installation discovery and native catalog construction.
+1. Declarative YDD translation and binding edits with explicit drawable selection.
+2. Structured YTD texture inventory/preview and declarative replacement/repack operations.
+3. Batch and combined workspace export using the existing multi-map engine paths.
+4. Structured normalized model and collision preview data for headless consumers.
+5. GTA/FiveM installation discovery and native catalog construction.
 
 Managed browser uploads, HTTP process state, and web-only transport behavior are not CLI parity targets.
 

@@ -2,6 +2,8 @@
 
 RageLab supports versioned operation documents for agent-driven, reproducible mutations.
 
+The current mutation scope targets GTA V Legacy/Gen8 assets. Enhanced/Gen9 support is intentionally deferred to a separate future milestone.
+
 The operation engine lives in `ragelab-engine`. CLI, MCP, and desktop adapters must use the same planner and writer policy.
 
 ## Schema
@@ -108,6 +110,50 @@ Requirements:
 - topology, shader bindings, non-position vertex attributes, embedded texture metadata, and bounds invariants are checked after rewrite.
 
 Multiple `ydr.translate` operations may be listed in one document. They are applied in order and the final semantic verification uses the effective combined translation.
+
+### `ydr.rebind-texture`
+
+Rebinds an existing texture parameter to the TextureBase already referenced by another compatible binding in the same Legacy YDR.
+
+```json
+{
+  "type": "ydr.rebind-texture",
+  "sourceShader": 0,
+  "sourceParameter": 0,
+  "targetShader": 0,
+  "targetParameter": 1
+}
+```
+
+Requirements:
+
+- source and target bindings must already exist;
+- source and target parameter hashes must match;
+- the source TextureBase must be uniquely referenced so aliases are not modified implicitly;
+- the target must already have a valid texture name;
+- no new TextureBase, string, shader parameter, or resource layout is created.
+
+### `ydr.rebind-shader`
+
+Rebinds an existing geometry to another shader already present in the same Legacy YDR.
+
+```json
+{
+  "type": "ydr.rebind-shader",
+  "modelIndex": 0,
+  "geometryIndex": 0,
+  "targetShaderIndex": 1
+}
+```
+
+Requirements:
+
+- the selected geometry binding must exist;
+- `targetShaderIndex` must reference an existing shader;
+- rebinding to the shader already in use is rejected;
+- no shader definitions, parameter blocks, geometry, or topology are created.
+
+YDR operations are simulated in document order during `plan`. A multi-operation document must serialize and semantically reopen successfully in memory before the plan is marked allowed. `apply` repeats the same sequence against a fresh edit session and preserves create-new output semantics.
 
 ## Fail-closed behavior
 

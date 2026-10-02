@@ -911,18 +911,30 @@ fn operations_for(asset_type: &str, bytes: &[u8]) -> Result<Vec<Value>, Box<dyn 
             match YdrEditSession::from_bytes(bytes) {
                 Ok(session) => {
                     let translation = session.rigid_translation_capability();
+                    let texture_available = !session.texture_bindings().is_empty();
+                    let shader_available =
+                        !session.shader_bindings().is_empty() && session.shader_count() > 0;
+                    let declarative_available =
+                        translation.writable || texture_available || shader_available;
+                    let declarative_reason = if declarative_available {
+                        Some("one or more declarative YDR writers are available")
+                    } else {
+                        translation.reason.as_deref().or(Some(
+                            "no declarative translation or rebind writer is available for this YDR",
+                        ))
+                    };
                     let translation_reason = translation.reason.as_deref();
                     operations.push(operation_with_availability(
                         "plan",
                         false,
                         true,
                         false,
-                        if translation.writable {
+                        if declarative_available {
                             "available"
                         } else {
                             "unavailable"
                         },
-                        translation_reason,
+                        declarative_reason,
                         &[],
                     ));
                     operations.push(operation_with_availability(
@@ -930,12 +942,12 @@ fn operations_for(asset_type: &str, bytes: &[u8]) -> Result<Vec<Value>, Box<dyn 
                         true,
                         true,
                         false,
-                        if translation.writable {
+                        if declarative_available {
                             "available"
                         } else {
                             "unavailable"
                         },
-                        translation_reason,
+                        declarative_reason,
                         &[],
                     ));
                     operations.push(operation_with_availability(
@@ -952,7 +964,6 @@ fn operations_for(asset_type: &str, bytes: &[u8]) -> Result<Vec<Value>, Box<dyn 
                         &["delta"],
                     ));
 
-                    let texture_available = !session.texture_bindings().is_empty();
                     operations.push(operation_with_availability(
                         "ydr.rebind-texture",
                         true,
@@ -976,8 +987,6 @@ fn operations_for(asset_type: &str, bytes: &[u8]) -> Result<Vec<Value>, Box<dyn 
                         ],
                     ));
 
-                    let shader_available =
-                        !session.shader_bindings().is_empty() && session.shader_count() > 0;
                     operations.push(operation_with_availability(
                         "ydr.rebind-shader",
                         true,

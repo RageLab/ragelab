@@ -8,7 +8,9 @@ import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT = ROOT / "fixtures" / "synthetic" / "ydr" / "simple.ydr"
+OUTPUT_DIR = ROOT / "fixtures" / "synthetic" / "ydr"
+SIMPLE_OUTPUT = OUTPUT_DIR / "simple.ydr"
+EDITABLE_OUTPUT = OUTPUT_DIR / "editable.ydr"
 
 SYSTEM_BASE = 0x50000000
 SYSTEM_SIZE = 2048
@@ -36,7 +38,7 @@ def write_f32(buffer: bytearray, offset: int, value: float) -> None:
     struct.pack_into("<f", buffer, offset, value)
 
 
-def generate() -> bytes:
+def generate(*, editable: bool = False) -> bytes:
     system = bytearray(SYSTEM_SIZE)
 
     # Drawable root.
@@ -127,6 +129,9 @@ def generate() -> bytes:
     write_u16(system, 0x334, 2)
     system[0x340:0x34E] = b"test_drawable\0"
 
+    if editable:
+        add_editable_shader_layout(system)
+
     compressor = zlib.compressobj(level=6, wbits=-15)
     compressed = compressor.compress(bytes(system)) + compressor.flush()
 
@@ -139,10 +144,53 @@ def generate() -> bytes:
     return bytes(output)
 
 
+def add_editable_shader_layout(system: bytearray) -> None:
+    """Add two existing shaders and two compatible texture bindings."""
+
+    # Drawable -> ShaderGroup -> two ShaderFX objects.
+    write_u64(system, 0x10, pointer(0x380))
+    write_u64(system, 0x380 + 0x10, pointer(0x3C0))
+    write_u16(system, 0x380 + 0x18, 2)
+    write_u16(system, 0x380 + 0x1A, 2)
+    write_u64(system, 0x3C0, pointer(0x3D0))
+    write_u64(system, 0x3C8, pointer(0x560))
+
+    # Shader 0 owns two texture parameters with the same parameter hash.
+    write_u64(system, 0x3D0, pointer(0x400))
+    write_u32(system, 0x3D0 + 0x08, 0x1111_2222)
+    system[0x3D0 + 0x10] = 2
+    write_u32(system, 0x3D0 + 0x18, 0x3333_4444)
+    system[0x3D0 + 0x27] = 2
+
+    system[0x400] = 0
+    write_u64(system, 0x408, pointer(0x440))
+    system[0x410] = 0
+    write_u64(system, 0x418, pointer(0x4A0))
+    write_u32(system, 0x420, 0x5555_6666)
+    write_u32(system, 0x424, 0x5555_6666)
+
+    write_u64(system, 0x440 + 0x28, pointer(0x500))
+    write_u64(system, 0x4A0 + 0x28, pointer(0x520))
+    system[0x500:0x50D] = b"test_diffuse\0"
+    system[0x520:0x52C] = b"test_normal\0"
+
+    # Shader 1 is an existing target shader. No new shader data is created by edits.
+    write_u32(system, 0x560 + 0x08, 0x9999_AAAA)
+    write_u32(system, 0x560 + 0x18, 0xBBBB_CCCC)
+
+    # Geometry 0 initially uses shader 0.
+    write_u64(system, 0x0F0 + 0x20, pointer(0x540))
+    write_u16(system, 0x540, 0)
+
+
 def main() -> None:
-    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT.write_bytes(generate())
-    print(f"wrote {OUTPUT} ({OUTPUT.stat().st_size} bytes)")
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    for output, editable in [
+        (SIMPLE_OUTPUT, False),
+        (EDITABLE_OUTPUT, True),
+    ]:
+        output.write_bytes(generate(editable=editable))
+        print(f"wrote {output} ({output.stat().st_size} bytes)")
 
 
 if __name__ == "__main__":

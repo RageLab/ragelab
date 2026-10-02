@@ -435,3 +435,106 @@ fn ymap_capabilities_mark_workspace_scene_as_context_required() {
     assert_eq!(scene["availability"], "contextRequired");
     assert_eq!(scene["requiresWorkspace"], true);
 }
+
+#[test]
+fn ydr_rebinds_are_declarative_and_non_destructive() {
+    let root = temp_root("ydr-rebind");
+    fs::create_dir_all(&root).unwrap();
+
+    let source = root.join("source.ydr");
+    let output = root.join("output.ydr");
+    let operation = root.join("operation.json");
+    fs::copy(fixture("ydr/editable.ydr"), &source).unwrap();
+    let source_before = fs::read(&source).unwrap();
+
+    let capabilities_output = binary()
+        .args(["capabilities", source.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab capabilities should run");
+    assert!(capabilities_output.status.success());
+    let capabilities = stdout_json(&capabilities_output);
+    let operations = capabilities["data"]["operations"].as_array().unwrap();
+    assert_eq!(
+        operations
+            .iter()
+            .find(|operation| operation["id"] == "ydr.rebind-texture")
+            .unwrap()["availability"],
+        "parameterized"
+    );
+    assert_eq!(
+        operations
+            .iter()
+            .find(|operation| operation["id"] == "ydr.rebind-shader")
+            .unwrap()["availability"],
+        "parameterized"
+    );
+    assert_eq!(
+        operations
+            .iter()
+            .find(|operation| operation["id"] == "plan")
+            .unwrap()["availability"],
+        "available"
+    );
+
+    let body = json!({
+        "schema": "ragelab.operation",
+        "schemaVersion": 1,
+        "source": "source.ydr",
+        "output": "output.ydr",
+        "operations": [
+            {
+                "type": "ydr.rebind-texture",
+                "sourceShader": 0,
+                "sourceParameter": 0,
+                "targetShader": 0,
+                "targetParameter": 1
+            },
+            {
+                "type": "ydr.rebind-shader",
+                "modelIndex": 0,
+                "geometryIndex": 0,
+                "targetShaderIndex": 1
+            }
+        ]
+    });
+    fs::write(&operation, body.to_string()).unwrap();
+
+    let plan_output = binary()
+        .args(["plan", operation.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab plan should run");
+    assert!(plan_output.status.success());
+    let plan = stdout_json(&plan_output);
+    assert_eq!(plan["data"]["allowed"], true);
+    assert_eq!(
+        plan["data"]["operations"][0]["details"]["targetTexture"],
+        "test_normal"
+    );
+    assert_eq!(
+        plan["data"]["operations"][1]["details"]["targetShaderIndex"],
+        1
+    );
+    assert!(!output.exists());
+
+    let apply_output = binary()
+        .args(["apply", operation.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab apply should run");
+    assert!(apply_output.status.success());
+    let apply = stdout_json(&apply_output);
+    assert_eq!(apply["data"]["assetType"], "YDR");
+    assert_eq!(apply["data"]["details"]["textureRebinds"], 1);
+    assert_eq!(apply["data"]["details"]["shaderRebinds"], 1);
+    assert_eq!(apply["data"]["validation"]["semanticReopen"], true);
+    assert_eq!(apply["data"]["validation"]["sourceUnchanged"], true);
+    assert_eq!(fs::read(&source).unwrap(), source_before);
+
+    let validate_output = binary()
+        .args(["validate", output.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab validate should run");
+    assert!(validate_output.status.success());
+    assert_eq!(stdout_json(&validate_output)["data"]["valid"], true);
+
+    fs::remove_dir_all(root).unwrap();
+}

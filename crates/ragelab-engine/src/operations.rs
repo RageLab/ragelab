@@ -9,7 +9,7 @@ use std::{
 use ragelab_ybn::{
     repack_polygon_edits, CollisionShape, YbnCollision, YbnPolygonEdit, YbnPolygonKind,
 };
-use ragelab_ydr::{YdrDocument, YdrEditSession};
+use ragelab_ydr::{ShaderBindingKey, TextureBindingKey, YdrDocument, YdrEditSession};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -189,13 +189,6 @@ pub fn plan_operation_document(
         ));
     }
 
-    let ydr_capability = if asset_type == "YDR" {
-        let session = YdrEditSession::from_bytes(&source_bytes)
-            .map_err(|error| OperationError::InvalidSource(error.to_string()))?;
-        Some(session.rigid_translation_capability())
-    } else {
-        None
-    };
     let ybn_collision = if asset_type == "YBN" {
         Some(
             YbnCollision::from_bytes(&source_bytes)
@@ -205,25 +198,37 @@ pub fn plan_operation_document(
         None
     };
 
-    let mut operations = Vec::with_capacity(document.operations.len());
-    for (index, operation) in document.operations.iter().enumerate() {
-        let planned = match operation.operation_type.as_str() {
-            "ydr.translate" => {
-                plan_ydr_translate(index, operation, &asset_type, ydr_capability.as_ref())
-            }
-            "ybn.edit-polygon" => {
-                plan_ybn_edit_polygon(index, operation, &asset_type, ybn_collision.as_ref())
-            }
-            other => PlannedOperation {
-                index,
-                operation_type: other.to_string(),
-                allowed: false,
-                reason: Some(format!("unsupported operation type: {other}")),
-                details: Value::Null,
-            },
-        };
-        operations.push(planned);
-    }
+    let operations = if asset_type == "YDR" {
+        plan_ydr_operations(&source_bytes, &document.operations, &mut reasons)?
+    } else {
+        let mut operations = Vec::with_capacity(document.operations.len());
+        for (index, operation) in document.operations.iter().enumerate() {
+            let planned = match operation.operation_type.as_str() {
+                "ydr.translate" | "ydr.rebind-texture" | "ydr.rebind-shader" => PlannedOperation {
+                    index,
+                    operation_type: operation.operation_type.clone(),
+                    allowed: false,
+                    reason: Some(format!(
+                        "{} requires a YDR source, found {asset_type}",
+                        operation.operation_type
+                    )),
+                    details: Value::Null,
+                },
+                "ybn.edit-polygon" => {
+                    plan_ybn_edit_polygon(index, operation, &asset_type, ybn_collision.as_ref())
+                }
+                other => PlannedOperation {
+                    index,
+                    operation_type: other.to_string(),
+                    allowed: false,
+                    reason: Some(format!("unsupported operation type: {other}")),
+                    details: Value::Null,
+                },
+            };
+            operations.push(planned);
+        }
+        operations
+    };
 
     if asset_type == "YBN" && operations.iter().all(|operation| operation.allowed) {
         let collision = ybn_collision
@@ -286,45 +291,192 @@ pub fn apply_operation_document(
     }
 }
 
-fn plan_ydr_translate(
-    index: usize,
-    operation: &OperationSpec,
-    asset_type: &str,
-    capability: Option<&ragelab_ydr::EditCapability>,
-) -> PlannedOperation {
-    let mut reason = None;
-    let mut details = Value::Null;
+fn plan_ydr_operations(
+    source_bytes: &[u8],
+    specs: &[OperationSpec],
+    reasons: &mut Vec<String>,
+) -> Result<Vec<PlannedOperation>, OperationError> {
+    let mut session = YdrEditSession::from_bytes(source_bytes)
+        .map_err(|error| OperationError::InvalidSource(error.to_string()))?;
+    let mut planned = Vec::with_capacity(specs.len());
 
-    if asset_type != "YDR" {
-        reason = Some(format!(
-            "ydr.translate requires a YDR source, found {asset_type}"
-        ));
-    } else {
-        match parse_translation_delta(operation) {
-            Ok(delta) => {
-                details = json!({ "delta": delta });
-                if let Some(capability) = capability {
-                    if !capability.writable {
-                        reason = Some(
-                            capability
-                                .reason
-                                .clone()
-                                .unwrap_or_else(|| "rigid translation is unavailable".into()),
-                        );
-                    }
-                }
-            }
-            Err(message) => reason = Some(message),
+    for (index, operation) in specs.iter().enumerate() {
+        let result = match operation.operation_type.as_str() {
+            "ydr.translate" => parse_translation_delta(operation).and_then(|delta| {
+                session
+                    .translate_rigid_model(delta)
+                    .map_err(|error| error.to_string())?;
+                Ok(json!({ "delta": delta }))
+            }),
+            "ydr.rebind-texture" => plan_ydr_texture_rebind(&mut session, operation),
+            "ydr.rebind-shader" => plan_ydr_shader_rebind(&mut session, operation),
+            other => Err(format!("unsupported operation type: {other}")),
+        };
+
+        match result {
+            Ok(details) => planned.push(PlannedOperation {
+                index,
+                operation_type: operation.operation_type.clone(),
+                allowed: true,
+                reason: None,
+                details,
+            }),
+            Err(reason) => planned.push(PlannedOperation {
+                index,
+                operation_type: operation.operation_type.clone(),
+                allowed: false,
+                reason: Some(reason),
+                details: Value::Null,
+            }),
         }
     }
 
-    PlannedOperation {
-        index,
-        operation_type: operation.operation_type.clone(),
-        allowed: reason.is_none(),
-        reason,
-        details,
+    if planned.iter().all(|operation| operation.allowed) {
+        if let Err(error) = session.to_bytes() {
+            reasons.push(format!("YDR writer rejected planned edits: {error}"));
+        }
     }
+
+    Ok(planned)
+}
+
+fn plan_ydr_texture_rebind(
+    session: &mut YdrEditSession,
+    operation: &OperationSpec,
+) -> Result<Value, String> {
+    let (source, target) = parse_ydr_texture_rebind(operation)?;
+    let target_binding = session
+        .texture_bindings()
+        .iter()
+        .find(|binding| binding.key == target)
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "target texture binding shader {} parameter {} was not found",
+                target.shader_index, target.parameter_index
+            )
+        })?;
+
+    session
+        .rebind_texture(source, target)
+        .map_err(|error| error.to_string())?;
+
+    Ok(json!({
+        "source": {
+            "shaderIndex": source.shader_index,
+            "parameterIndex": source.parameter_index,
+        },
+        "target": {
+            "shaderIndex": target.shader_index,
+            "parameterIndex": target.parameter_index,
+        },
+        "targetParameterHash": format!("0x{:08X}", target_binding.parameter_hash),
+        "targetTexture": target_binding.texture_name,
+    }))
+}
+
+fn plan_ydr_shader_rebind(
+    session: &mut YdrEditSession,
+    operation: &OperationSpec,
+) -> Result<Value, String> {
+    let (binding, target_shader_index) = parse_ydr_shader_rebind(operation)?;
+    let current = session
+        .shader_bindings()
+        .iter()
+        .find(|candidate| candidate.key == binding)
+        .copied()
+        .ok_or_else(|| {
+            format!(
+                "shader binding model {} geometry {} was not found",
+                binding.model_index, binding.geometry_index
+            )
+        })?;
+    if current.shader_index == target_shader_index {
+        return Err("source geometry already uses target shader".into());
+    }
+
+    session
+        .rebind_shader(binding, target_shader_index)
+        .map_err(|error| error.to_string())?;
+
+    Ok(json!({
+        "binding": {
+            "modelIndex": binding.model_index,
+            "geometryIndex": binding.geometry_index,
+        },
+        "sourceShaderIndex": current.shader_index,
+        "targetShaderIndex": target_shader_index,
+    }))
+}
+
+fn parse_ydr_texture_rebind(
+    operation: &OperationSpec,
+) -> Result<(TextureBindingKey, TextureBindingKey), String> {
+    const ALLOWED: &[&str] = &[
+        "sourceShader",
+        "sourceParameter",
+        "targetShader",
+        "targetParameter",
+    ];
+    reject_unknown_parameters(operation, ALLOWED)?;
+
+    let source = TextureBindingKey {
+        shader_index: required_usize(&operation.parameters, "sourceShader", "ydr.rebind-texture")?,
+        parameter_index: required_usize(
+            &operation.parameters,
+            "sourceParameter",
+            "ydr.rebind-texture",
+        )?,
+    };
+    let target = TextureBindingKey {
+        shader_index: required_usize(&operation.parameters, "targetShader", "ydr.rebind-texture")?,
+        parameter_index: required_usize(
+            &operation.parameters,
+            "targetParameter",
+            "ydr.rebind-texture",
+        )?,
+    };
+
+    if source == target {
+        return Err("ydr.rebind-texture source and target bindings must differ".into());
+    }
+
+    Ok((source, target))
+}
+
+fn parse_ydr_shader_rebind(operation: &OperationSpec) -> Result<(ShaderBindingKey, u16), String> {
+    const ALLOWED: &[&str] = &["modelIndex", "geometryIndex", "targetShaderIndex"];
+    reject_unknown_parameters(operation, ALLOWED)?;
+
+    let binding = ShaderBindingKey {
+        model_index: required_usize(&operation.parameters, "modelIndex", "ydr.rebind-shader")?,
+        geometry_index: required_usize(
+            &operation.parameters,
+            "geometryIndex",
+            "ydr.rebind-shader",
+        )?,
+    };
+    let target = required_usize(
+        &operation.parameters,
+        "targetShaderIndex",
+        "ydr.rebind-shader",
+    )?;
+    let target_shader_index = u16::try_from(target)
+        .map_err(|_| "ydr.rebind-shader targetShaderIndex must fit in u16".to_string())?;
+
+    Ok((binding, target_shader_index))
+}
+
+fn reject_unknown_parameters(operation: &OperationSpec, allowed: &[&str]) -> Result<(), String> {
+    for key in operation.parameters.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(format!(
+                "{} has unknown parameter: {key}",
+                operation.operation_type
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn plan_ybn_edit_polygon(
@@ -594,6 +746,10 @@ fn apply_ydr_operations(
         .map_err(|error| OperationError::InvalidSource(error.to_string()))?;
 
     let mut effective_delta = [0.0_f32; 3];
+    let mut translation_count = 0_usize;
+    let mut texture_rebind_count = 0_usize;
+    let mut shader_rebind_count = 0_usize;
+
     for operation in &document.operations {
         match operation.operation_type.as_str() {
             "ydr.translate" => {
@@ -609,6 +765,15 @@ fn apply_ydr_operations(
                 session
                     .translate_rigid_model(delta)
                     .map_err(|error| OperationError::Writer(error.to_string()))?;
+                translation_count += 1;
+            }
+            "ydr.rebind-texture" => {
+                plan_ydr_texture_rebind(&mut session, operation).map_err(OperationError::Writer)?;
+                texture_rebind_count += 1;
+            }
+            "ydr.rebind-shader" => {
+                plan_ydr_shader_rebind(&mut session, operation).map_err(OperationError::Writer)?;
+                shader_rebind_count += 1;
             }
             other => {
                 return Err(OperationError::Rejected(format!(
@@ -618,6 +783,8 @@ fn apply_ydr_operations(
         }
     }
 
+    let expected_shader_bindings = session.shader_bindings().to_vec();
+    let expected_texture_bindings = session.texture_bindings().to_vec();
     let rewritten = session
         .to_bytes()
         .map_err(|error| OperationError::Writer(error.to_string()))?;
@@ -626,8 +793,23 @@ fn apply_ydr_operations(
     let after = reopened
         .document()
         .map_err(|error| OperationError::Writer(error.to_string()))?;
-    verify_rigid_translation(&before, &after, effective_delta)
-        .map_err(|error| OperationError::Writer(error.to_string()))?;
+
+    if reopened.shader_bindings() != expected_shader_bindings
+        || reopened.texture_bindings() != expected_texture_bindings
+    {
+        return Err(OperationError::Writer(
+            "edited YDR binding state changed after semantic re-open".into(),
+        ));
+    }
+
+    verify_ydr_operation_result(
+        &before,
+        &after,
+        effective_delta,
+        texture_rebind_count > 0,
+        shader_rebind_count > 0,
+    )
+    .map_err(|error| OperationError::Writer(error.to_string()))?;
 
     if let Some(parent) = plan
         .output
@@ -676,6 +858,11 @@ fn apply_ydr_operations(
         },
         details: json!({
             "effectiveTranslation": effective_delta,
+            "translations": translation_count,
+            "textureRebinds": texture_rebind_count,
+            "shaderRebinds": shader_rebind_count,
+            "shaderCount": reopened.shader_count(),
+            "textureBindings": reopened.texture_bindings().len(),
             "vertices": after.model.vertex_count(),
         }),
     })
@@ -715,17 +902,19 @@ fn parse_translation_delta(operation: &OperationSpec) -> Result<[f32; 3], String
     Ok(delta)
 }
 
-fn verify_rigid_translation(
+fn verify_ydr_operation_result(
     before: &YdrDocument,
     after: &YdrDocument,
     delta: [f32; 3],
+    allow_texture_rebind: bool,
+    allow_shader_rebind: bool,
 ) -> Result<(), io::Error> {
     let before_model = &before.model;
     let after_model = &after.model;
     if before_model.name != after_model.name
         || before_model.lod != after_model.lod
         || before_model.coordinate_convention != after_model.coordinate_convention
-        || before_model.shaders != after_model.shaders
+        || (!allow_texture_rebind && before_model.shaders != after_model.shaders)
         || before_model.primitives.len() != after_model.primitives.len()
         || before_model.bounds.radius != after_model.bounds.radius
         || translated_vec3(before_model.bounds.center, delta) != after_model.bounds.center
@@ -758,7 +947,8 @@ fn verify_rigid_translation(
     {
         if before_primitive.model_index != after_primitive.model_index
             || before_primitive.geometry_index != after_primitive.geometry_index
-            || before_primitive.shader_index != after_primitive.shader_index
+            || (!allow_shader_rebind
+                && before_primitive.shader_index != after_primitive.shader_index)
             || before_primitive.topology != after_primitive.topology
             || before_primitive.normals != after_primitive.normals
             || before_primitive.uv0 != after_primitive.uv0
@@ -832,7 +1022,7 @@ mod tests {
     };
 
     use ragelab_ybn::{CollisionShape, YbnCollision};
-    use ragelab_ydr::YdrDocument;
+    use ragelab_ydr::{YdrDocument, YdrEditSession};
     use serde_json::json;
 
     use super::{
@@ -842,6 +1032,10 @@ mod tests {
 
     fn fixture() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/ydr/simple.ydr")
+    }
+
+    fn editable_ydr_fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/ydr/editable.ydr")
     }
 
     fn ybn_fixture() -> PathBuf {
@@ -947,6 +1141,111 @@ mod tests {
 
         let second = apply_operation_document(&document, &root).unwrap_err();
         assert!(second.to_string().contains("never overwrites"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn plans_and_applies_mixed_ydr_rebind_operations() {
+        let root = temp_root("ydr-rebind");
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.ydr");
+        let output = root.join("output.ydr");
+        fs::copy(editable_ydr_fixture(), &source).unwrap();
+        let source_before = fs::read(&source).unwrap();
+
+        let body = json!({
+            "schema": OPERATION_DOCUMENT_SCHEMA,
+            "schemaVersion": 1,
+            "source": "source.ydr",
+            "output": "output.ydr",
+            "operations": [
+                {
+                    "type": "ydr.translate",
+                    "delta": [1.0, 0.0, 0.0]
+                },
+                {
+                    "type": "ydr.rebind-texture",
+                    "sourceShader": 0,
+                    "sourceParameter": 0,
+                    "targetShader": 0,
+                    "targetParameter": 1
+                },
+                {
+                    "type": "ydr.rebind-shader",
+                    "modelIndex": 0,
+                    "geometryIndex": 0,
+                    "targetShaderIndex": 1
+                }
+            ]
+        })
+        .to_string();
+        let document = parse_operation_document(&body).unwrap();
+        let plan = plan_operation_document(&document, &root).unwrap();
+
+        assert!(plan.allowed);
+        assert_eq!(plan.operations.len(), 3);
+        assert!(plan.operations.iter().all(|operation| operation.allowed));
+        assert_eq!(plan.operations[1].details["targetTexture"], "test_normal");
+        assert_eq!(plan.operations[2].details["targetShaderIndex"], 1);
+        assert!(!output.exists());
+
+        let result = apply_operation_document(&document, &root).unwrap();
+        assert!(output.is_file());
+        assert!(result.validation.semantic_reopen);
+        assert!(result.validation.source_unchanged);
+        assert_eq!(result.details["translations"], 1);
+        assert_eq!(result.details["textureRebinds"], 1);
+        assert_eq!(result.details["shaderRebinds"], 1);
+        assert_eq!(fs::read(&source).unwrap(), source_before);
+
+        let output_bytes = fs::read(&output).unwrap();
+        let session = YdrEditSession::from_bytes(&output_bytes).unwrap();
+        assert_eq!(
+            session.texture_bindings()[0].texture_name.as_deref(),
+            Some("test_normal")
+        );
+        assert_eq!(session.shader_bindings()[0].shader_index, 1);
+
+        let after = session.document().unwrap();
+        assert_eq!(after.model.primitives[0].positions[0], [1.0, 0.0, 0.0]);
+        assert_eq!(after.model.primitives[0].shader_index, Some(1));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ydr_rebind_plan_fails_closed_for_invalid_selection() {
+        let root = temp_root("ydr-rebind-invalid");
+        fs::create_dir_all(&root).unwrap();
+        fs::copy(editable_ydr_fixture(), root.join("source.ydr")).unwrap();
+
+        let body = json!({
+            "schema": OPERATION_DOCUMENT_SCHEMA,
+            "schemaVersion": 1,
+            "source": "source.ydr",
+            "output": "output.ydr",
+            "operations": [
+                {
+                    "type": "ydr.rebind-texture",
+                    "sourceShader": 0,
+                    "sourceParameter": 0,
+                    "targetShader": 0,
+                    "targetParameter": 0
+                }
+            ]
+        })
+        .to_string();
+        let document = parse_operation_document(&body).unwrap();
+        let plan = plan_operation_document(&document, &root).unwrap();
+
+        assert!(!plan.allowed);
+        assert!(!plan.operations[0].allowed);
+        assert_eq!(
+            plan.operations[0].reason.as_deref(),
+            Some("ydr.rebind-texture source and target bindings must differ")
+        );
+        assert!(!root.join("output.ydr").exists());
 
         fs::remove_dir_all(root).unwrap();
     }
