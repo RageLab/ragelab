@@ -1,3 +1,5 @@
+mod agent;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
@@ -25,14 +27,25 @@ use ragelab_ytyp::{ArchetypeKind, AssetType, Ytyp};
 use serde_json::json;
 
 fn main() {
-    if let Err(error) = run() {
-        eprintln!("error: {error}");
-        std::process::exit(1);
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    let command = args.first().cloned().unwrap_or_else(|| "help".to_string());
+    let structured_error =
+        args.iter().any(|arg| arg == "--json") && agent::is_structured_command(&command);
+
+    if let Err(error) = run(args) {
+        let (exit_code, _) = agent::classify_exit(error.as_ref());
+        if structured_error {
+            agent::print_error(&command, error.as_ref());
+        } else {
+            eprintln!("error: {error}");
+        }
+        std::process::exit(exit_code);
     }
 }
 
-fn run() -> Result<(), Box<dyn Error>> {
-    let mut args = env::args().skip(1);
+fn run(args: Vec<String>) -> Result<(), Box<dyn Error>> {
+    let normalized = agent::normalize_command_args(args);
+    let mut args = normalized.into_iter();
     let Some(command) = args.next() else {
         print_help();
         return Ok(());
@@ -44,8 +57,23 @@ fn run() -> Result<(), Box<dyn Error>> {
             print_version(json)?;
         }
         "capabilities" => {
-            let json = parse_json_flag(args, "usage: ragelab capabilities [--json]")?;
-            print_capabilities(json)?;
+            const USAGE: &str = "usage: ragelab capabilities [file] [--json]";
+            let (path, json) = agent::parse_capabilities_args(args, USAGE)?;
+            if let Some(path) = path {
+                agent::capabilities(&path, json)?;
+            } else {
+                print_capabilities(json)?;
+            }
+        }
+        "inspect" => {
+            let (path, json) =
+                agent::parse_path_json_args(args, "usage: ragelab inspect <file> [--json]")?;
+            agent::inspect(&path, json)?;
+        }
+        "validate" => {
+            let (path, json) =
+                agent::parse_path_json_args(args, "usage: ragelab validate <file> [--json]")?;
+            agent::validate(&path, json)?;
         }
         "hash" => {
             let name = required_arg(args.next(), "usage: ragelab hash <name>")?;
@@ -417,9 +445,73 @@ fn print_version(json_output: bool) -> Result<(), Box<dyn Error>> {
 }
 
 fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
-    const COMMANDS: &[&str] = &[
+    const CANONICAL_COMMANDS: &[&str] = &[
         "version",
         "capabilities",
+        "inspect",
+        "validate",
+        "hash",
+        "meta-hash",
+        "probe",
+        "ydr.info",
+        "ydr.translate",
+        "ydr.rebind-texture",
+        "ydr.rebind-shader",
+        "ydd.info",
+        "ydd.translate",
+        "ydd.rebind-texture",
+        "ydd.rebind-shader",
+        "ytd.info",
+        "ytd.extract-dds",
+        "ytd.replace-dds",
+        "ytd.repack-dds",
+        "ytd.repack-rgba",
+        "ytd.rebuild-compact",
+        "ybn.info",
+        "ymap.info",
+        "ytyp.info",
+        "ymf.info",
+        "workspace.scan",
+        "workspace.deps",
+        "workspace.providers",
+        "workspace.preflight",
+        "workspace.mlo-audit",
+        "workspace.extract",
+        "gta.vanilla-index",
+    ];
+    const LEGACY_ALIASES: &[&str] = &[
+        "meta-info",
+        "ymap-info",
+        "ytyp-info",
+        "ydr-info",
+        "ydd-info",
+        "ydr-rebind-texture",
+        "ydd-rebind-texture",
+        "ydr-rebind-shader",
+        "ydd-rebind-shader",
+        "ydr-translate",
+        "ydd-translate",
+        "ybn-info",
+        "ymf-info",
+        "ytd-info",
+        "ytd-dds",
+        "ytd-replace-dds",
+        "ytd-repack-dds",
+        "ytd-repack-rgba",
+        "ytd-rebuild-compact",
+        "extract",
+        "preflight",
+        "mlo-audit",
+        "deps",
+        "providers",
+        "scan",
+        "vanilla-index",
+    ];
+    const DISCOVERY_COMMANDS: &[&str] = &[
+        "version",
+        "capabilities",
+        "inspect",
+        "validate",
         "hash",
         "meta-hash",
         "probe",
@@ -449,6 +541,31 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "providers",
         "scan",
         "vanilla-index",
+        "ydr.info",
+        "ydr.translate",
+        "ydr.rebind-texture",
+        "ydr.rebind-shader",
+        "ydd.info",
+        "ydd.translate",
+        "ydd.rebind-texture",
+        "ydd.rebind-shader",
+        "ytd.info",
+        "ytd.extract-dds",
+        "ytd.replace-dds",
+        "ytd.repack-dds",
+        "ytd.repack-rgba",
+        "ytd.rebuild-compact",
+        "ybn.info",
+        "ymap.info",
+        "ytyp.info",
+        "ymf.info",
+        "workspace.scan",
+        "workspace.deps",
+        "workspace.providers",
+        "workspace.preflight",
+        "workspace.mlo-audit",
+        "workspace.extract",
+        "gta.vanilla-index",
     ];
 
     if json_output {
@@ -459,54 +576,68 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
                 "schemaVersion": 1,
                 "product": "RageLab",
                 "version": env!("CARGO_PKG_VERSION"),
-                "commands": COMMANDS,
-                "structuredOutput": ["version", "capabilities"],
+                "commands": DISCOVERY_COMMANDS,
+                "canonicalCommands": CANONICAL_COMMANDS,
+                "structuredOutput": ["version", "capabilities", "inspect", "validate"],
+                "legacyAliases": LEGACY_ALIASES,
+                "responseEnvelope": {
+                    "schema": agent::RESPONSE_SCHEMA,
+                    "schemaVersion": agent::RESPONSE_SCHEMA_VERSION,
+                }
             }))?
         );
     } else {
         println!("RageLab {} capabilities:", env!("CARGO_PKG_VERSION"));
-        for command in COMMANDS {
+        for command in CANONICAL_COMMANDS {
             println!("{command}");
         }
+        println!("\nLegacy flat command aliases remain available during the 0.x series.");
     }
     Ok(())
 }
 
 fn print_help() {
     println!(
-        "ragelab 0.1.0\n\n\
-Usage:\n  \
-ragelab version [--json]\n  \
-ragelab capabilities [--json]\n  \
+        "ragelab {}\n\n\
+Agent-first commands:\n  \
+ragelab inspect <file> [--json]\n  \
+ragelab capabilities [file] [--json]\n  \
+ragelab validate <file> [--json]\n  \
+ragelab version [--json]\n\n\
+Format commands:\n  \
+ragelab ydr info <file.ydr>\n  \
+ragelab ydr translate <source.ydr> <dx> <dy> <dz> <output.ydr>\n  \
+ragelab ydr rebind-texture <source.ydr> <source-shader> <source-param> <target-shader> <target-param> <output.ydr>\n  \
+ragelab ydr rebind-shader <source.ydr> <model-index> <geometry-index> <target-shader-index> <output.ydr>\n  \
+ragelab ydd info <file.ydd> [drawable-index]\n  \
+ragelab ydd translate <source.ydd> <drawable-index> <dx> <dy> <dz> <output.ydd>\n  \
+ragelab ydd rebind-texture <source.ydd> <drawable-index> <source-shader> <source-param> <target-shader> <target-param> <output.ydd>\n  \
+ragelab ydd rebind-shader <source.ydd> <drawable-index> <model-index> <geometry-index> <target-shader-index> <output.ydd>\n  \
+ragelab ytd info <file.ytd>\n  \
+ragelab ytd extract-dds <file.ytd> <texture-index> <output.dds>\n  \
+ragelab ytd replace-dds <source.ytd> <texture-index> <replacement.dds> <output.ytd>\n  \
+ragelab ytd repack-dds <source.ytd> <texture-index> <replacement.dds> <output.ytd>\n  \
+ragelab ytd repack-rgba <source.ytd> <texture-index> <width> <height> <replacement.rgba> <output.ytd>\n  \
+ragelab ytd rebuild-compact <source.ytd> <output.ytd>\n  \
+ragelab ybn info <file.ybn>\n  \
+ragelab ymap info <file.ymap>\n  \
+ragelab ytyp info <file.ytyp>\n  \
+ragelab ymf info <_manifest.ymf>\n\n\
+Workspace commands:\n  \
+ragelab workspace scan <directory>\n  \
+ragelab workspace deps <directory> <file.ymap>\n  \
+ragelab workspace providers <directory> <file.ymap>\n  \
+ragelab workspace preflight <directory> <file.ymap> [more.ymap ...] [catalog options]\n  \
+ragelab workspace mlo-audit <directory> <file.ymap> [catalog options]\n  \
+ragelab workspace extract <directory> <file.ymap> <output> [--allow-unresolved] [--overwrite]\n  \
+ragelab gta vanilla-index <extracted-gta-directory> <output.txt>\n\n\
+Utility commands:\n  \
 ragelab hash <asset-name>\n  \
 ragelab meta-hash <case-sensitive-name>\n  \
 ragelab probe <file>\n  \
-ragelab meta-info <file>\n  \
-ragelab ymap-info <file.ymap>\n  \
-ragelab ytyp-info <file.ytyp>\n  \
-ragelab ydr-info <file.ydr>\n  \
-ragelab ydd-info <file.ydd> [drawable-index]\n  \
-ragelab ydr-rebind-texture <source.ydr> <source-shader> <source-param> <target-shader> <target-param> <output.ydr>\n  \
-ragelab ydd-rebind-texture <source.ydd> <drawable-index> <source-shader> <source-param> <target-shader> <target-param> <output.ydd>\n  \
-ragelab ydr-rebind-shader <source.ydr> <model-index> <geometry-index> <target-shader-index> <output.ydr>\n  \
-ragelab ydd-rebind-shader <source.ydd> <drawable-index> <model-index> <geometry-index> <target-shader-index> <output.ydd>\n  \
-ragelab ydr-translate <source.ydr> <dx> <dy> <dz> <output.ydr>\n  \
-ragelab ydd-translate <source.ydd> <drawable-index> <dx> <dy> <dz> <output.ydd>\n  \
-ragelab ybn-info <file.ybn>\n  \
-ragelab ytd-info <file.ytd> [texture-name-or-index]\n  \
-ragelab ymf-info <_manifest.ymf>\n  \
-ragelab ytd-dds <file.ytd> <texture-index> <output.dds>\n  \
-ragelab ytd-replace-dds <source.ytd> <texture-index> <replacement.dds> <output.ytd>\n  \
-ragelab ytd-repack-dds <source.ytd> <texture-index> <replacement.dds> <output.ytd>\n  \
-ragelab ytd-repack-rgba <source.ytd> <texture-index> <width> <height> <replacement.rgba> <output.ytd>\n  \
-ragelab ytd-rebuild-compact <source.ytd> <output.ytd>\n  \
-ragelab extract <directory> <file.ymap> <output> [--allow-unresolved] [--overwrite]\n  \
-ragelab preflight <directory> <file.ymap> [more.ymap ...] [--durtyfree-object-list <ObjectList.ini>] [--vanilla-file-index <paths.txt>]\n  \
-ragelab mlo-audit <directory> <file.ymap> [--durtyfree-object-list <ObjectList.ini>] [--vanilla-file-index <paths.txt>]\n  \
-ragelab providers <directory> <file.ymap>\n  \
-ragelab deps <directory> <file.ymap>\n  \
-ragelab scan <directory>\n  \
-ragelab vanilla-index <extracted-gta-directory> <output.txt>"
+ragelab meta-info <file>\n\n\
+Legacy flat aliases remain available during the 0.x series.",
+        env!("CARGO_PKG_VERSION")
     );
 }
 

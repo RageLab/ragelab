@@ -37,32 +37,34 @@ Build the CLI:
 cargo build -p ragelab
 ```
 
-Inspect available commands:
+The primary automation flow is:
+
+```bash
+ragelab inspect asset.ydr --json
+ragelab capabilities asset.ydr --json
+ragelab validate asset.ydr --json
+```
+
+Canonical format and workspace commands use namespaces:
+
+```bash
+ragelab ydr info asset.ydr
+ragelab ymap info map.ymap
+ragelab ytd info textures.ytd
+ragelab workspace deps ./stream map.ymap
+```
+
+Global discovery:
 
 ```bash
 ragelab --help
-ragelab capabilities
-ragelab capabilities --json
-```
-
-Examples:
-
-```bash
-ragelab probe asset.ydr
-ragelab ydr-info asset.ydr
-ragelab ymap-info map.ymap
-ragelab deps ./stream map.ymap
-ragelab ytd-info textures.ytd
-```
-
-Machine-readable discovery starts with:
-
-```bash
 ragelab version --json
 ragelab capabilities --json
 ```
 
-The JSON contract is documented in [docs/CLI_CONTRACT.md](docs/CLI_CONTRACT.md).
+Legacy flat command names remain available as compatibility aliases during the 0.x series. New integrations should use the canonical namespace form.
+
+Structured commands return versioned JSON and deterministic process exit codes. The contract is documented in [docs/CLI_CONTRACT.md](docs/CLI_CONTRACT.md).
 
 ## Repository layout
 
