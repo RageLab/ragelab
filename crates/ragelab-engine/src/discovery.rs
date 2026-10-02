@@ -11,6 +11,143 @@ pub const GTA_V_DISCOVERY_SCHEMA_VERSION: u64 = 1;
 pub const GTA_V_LEGACY_STEAM_APP_ID: u32 = 271_590;
 pub const GTA_V_ENHANCED_STEAM_APP_ID: u32 = 3_240_220;
 pub const GTA_V_LEGACY_ENV: &str = "RAGELAB_GTA5_LEGACY";
+pub const FIVEM_DISCOVERY_SCHEMA: &str = "ragelab.fivem.discovery";
+pub const FIVEM_DISCOVERY_SCHEMA_VERSION: u64 = 1;
+pub const FIVEM_ENV: &str = "RAGELAB_FIVEM";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FiveMDiscoverySource {
+    ExplicitPath,
+    Environment,
+    LocalAppData,
+}
+
+impl FiveMDiscoverySource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExplicitPath => "explicitPath",
+            Self::Environment => "environment",
+            Self::LocalAppData => "localAppData",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FiveMDiscoveryProvenance {
+    pub source: FiveMDiscoverySource,
+    pub reference: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FiveMInstallCheck {
+    pub id: &'static str,
+    pub required: bool,
+    pub passed: bool,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FiveMStoragePath {
+    pub id: &'static str,
+    pub path: PathBuf,
+    pub exists: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FiveMGtaRelationshipStatus {
+    MissingConfiguration,
+    InvalidConfiguredPath,
+    ValidLegacy,
+    InvalidLegacy,
+    Enhanced,
+    Ambiguous,
+    Unknown,
+}
+
+impl FiveMGtaRelationshipStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingConfiguration => "missingConfiguration",
+            Self::InvalidConfiguredPath => "invalidConfiguredPath",
+            Self::ValidLegacy => "validLegacy",
+            Self::InvalidLegacy => "invalidLegacy",
+            Self::Enhanced => "enhanced",
+            Self::Ambiguous => "ambiguous",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FiveMGtaRelationship {
+    pub status: FiveMGtaRelationshipStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configured_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installation: Option<GtaVInstallation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FiveMInstallation {
+    pub root: PathBuf,
+    pub app_root: PathBuf,
+    pub valid: bool,
+    pub checks: Vec<FiveMInstallCheck>,
+    pub storage_paths: Vec<FiveMStoragePath>,
+    pub provenance: Vec<FiveMDiscoveryProvenance>,
+    pub citizen_fx_ini: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saved_build_number: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_channel: Option<String>,
+    pub gta: FiveMGtaRelationship,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FiveMDiscoveryReport {
+    pub schema: &'static str,
+    pub schema_version: u64,
+    pub platform: String,
+    pub valid_installations: usize,
+    pub legacy_linked_installations: usize,
+    pub candidates: Vec<FiveMInstallation>,
+}
+
+#[derive(Debug, Clone)]
+struct FiveMCandidateSeed {
+    root: PathBuf,
+    provenance: Vec<FiveMDiscoveryProvenance>,
+}
+
+impl FiveMCandidateSeed {
+    fn new(root: PathBuf, source: FiveMDiscoverySource, reference: impl Into<String>) -> Self {
+        Self {
+            root,
+            provenance: vec![FiveMDiscoveryProvenance {
+                source,
+                reference: reference.into(),
+            }],
+        }
+    }
+
+    fn merge(&mut self, other: FiveMCandidateSeed) {
+        for provenance in other.provenance {
+            if !self.provenance.contains(&provenance) {
+                self.provenance.push(provenance);
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -566,6 +703,280 @@ fn dedupe_paths(paths: &mut Vec<PathBuf>) {
     paths.retain(|path| seen.insert(candidate_key(path), ()).is_none());
 }
 
+pub fn discover_fivem_legacy() -> FiveMDiscoveryReport {
+    let mut seeds = Vec::new();
+
+    if let Some(root) = env::var_os(FIVEM_ENV).filter(|value| !value.is_empty()) {
+        seeds.push(FiveMCandidateSeed::new(
+            PathBuf::from(root),
+            FiveMDiscoverySource::Environment,
+            FIVEM_ENV,
+        ));
+    }
+
+    #[cfg(windows)]
+    if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
+        let root = PathBuf::from(local_app_data).join("FiveM");
+        if root.is_dir() || root.join("FiveM.app").is_dir() {
+            seeds.push(FiveMCandidateSeed::new(
+                root,
+                FiveMDiscoverySource::LocalAppData,
+                r"%LOCALAPPDATA%\FiveM",
+            ));
+        }
+    }
+
+    let mut merged = BTreeMap::<String, FiveMCandidateSeed>::new();
+    for mut seed in seeds {
+        let (root, _) = normalize_fivem_roots(&seed.root);
+        seed.root = root;
+        let key = candidate_key(&seed.root);
+        if let Some(existing) = merged.get_mut(&key) {
+            existing.merge(seed);
+        } else {
+            merged.insert(key, seed);
+        }
+    }
+
+    let mut candidates = merged
+        .into_values()
+        .map(validate_fivem_candidate)
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        right.valid.cmp(&left.valid).then_with(|| {
+            left.root
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .cmp(&right.root.to_string_lossy().to_ascii_lowercase())
+        })
+    });
+
+    let valid_installations = candidates
+        .iter()
+        .filter(|candidate| candidate.valid)
+        .count();
+    let legacy_linked_installations = candidates
+        .iter()
+        .filter(|candidate| candidate.gta.status == FiveMGtaRelationshipStatus::ValidLegacy)
+        .count();
+
+    FiveMDiscoveryReport {
+        schema: FIVEM_DISCOVERY_SCHEMA,
+        schema_version: FIVEM_DISCOVERY_SCHEMA_VERSION,
+        platform: env::consts::OS.to_string(),
+        valid_installations,
+        legacy_linked_installations,
+        candidates,
+    }
+}
+
+pub fn validate_fivem_installation(root: &Path) -> FiveMInstallation {
+    validate_fivem_candidate(FiveMCandidateSeed::new(
+        root.to_path_buf(),
+        FiveMDiscoverySource::ExplicitPath,
+        "explicit path",
+    ))
+}
+
+fn validate_fivem_candidate(seed: FiveMCandidateSeed) -> FiveMInstallation {
+    let (root, app_root) = normalize_fivem_roots(&seed.root);
+    let root = fs::canonicalize(&root)
+        .map(clean_display_path)
+        .unwrap_or_else(|_| clean_display_path(root));
+    let app_root = fs::canonicalize(&app_root)
+        .map(clean_display_path)
+        .unwrap_or_else(|_| clean_display_path(app_root));
+
+    let citizen_fx_ini = app_root.join("CitizenFX.ini");
+    let executable = root.join("FiveM.exe");
+    let data_root = app_root.join("data");
+    let game_storage = data_root.join("game-storage");
+    let cache_root = data_root.join("cache");
+    let citizen_root = app_root.join("citizen");
+
+    let ini_body = fs::read_to_string(&citizen_fx_ini).ok();
+    let iv_path = ini_body
+        .as_deref()
+        .and_then(|body| parse_citizen_fx_game_value(body, "IVPath"))
+        .map(PathBuf::from);
+    let saved_build_number = ini_body
+        .as_deref()
+        .and_then(|body| parse_citizen_fx_game_value(body, "SavedBuildNumber"));
+    let update_channel = ini_body
+        .as_deref()
+        .and_then(|body| parse_citizen_fx_game_value(body, "UpdateChannel"));
+
+    let checks = vec![
+        FiveMInstallCheck {
+            id: "rootDirectory",
+            required: true,
+            passed: root.is_dir(),
+            path: root.clone(),
+        },
+        FiveMInstallCheck {
+            id: "appDirectory",
+            required: true,
+            passed: app_root.is_dir(),
+            path: app_root.clone(),
+        },
+        FiveMInstallCheck {
+            id: "citizenFxIni",
+            required: true,
+            passed: citizen_fx_ini.is_file(),
+            path: citizen_fx_ini.clone(),
+        },
+        FiveMInstallCheck {
+            id: "citizenFxIniReadable",
+            required: true,
+            passed: ini_body.is_some(),
+            path: citizen_fx_ini.clone(),
+        },
+        FiveMInstallCheck {
+            id: "executable",
+            required: false,
+            passed: executable.is_file(),
+            path: executable,
+        },
+    ];
+
+    let valid = checks
+        .iter()
+        .filter(|check| check.required)
+        .all(|check| check.passed);
+
+    let storage_paths = vec![
+        FiveMStoragePath {
+            id: "data",
+            exists: data_root.is_dir(),
+            path: data_root,
+        },
+        FiveMStoragePath {
+            id: "gameStorage",
+            exists: game_storage.is_dir(),
+            path: game_storage,
+        },
+        FiveMStoragePath {
+            id: "cache",
+            exists: cache_root.is_dir(),
+            path: cache_root,
+        },
+        FiveMStoragePath {
+            id: "citizen",
+            exists: citizen_root.is_dir(),
+            path: citizen_root,
+        },
+    ];
+
+    let gta = fivem_gta_relationship(iv_path, &citizen_fx_ini);
+
+    FiveMInstallation {
+        root,
+        app_root,
+        valid,
+        checks,
+        storage_paths,
+        provenance: seed.provenance,
+        citizen_fx_ini,
+        saved_build_number,
+        update_channel,
+        gta,
+    }
+}
+
+fn normalize_fivem_roots(path: &Path) -> (PathBuf, PathBuf) {
+    let path = clean_display_path(path.to_path_buf());
+    let is_app_root = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("FiveM.app"));
+
+    if is_app_root {
+        let root = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.clone());
+        (root, path)
+    } else {
+        let app_root = path.join("FiveM.app");
+        (path, app_root)
+    }
+}
+
+fn parse_citizen_fx_game_value(input: &str, key: &str) -> Option<String> {
+    let mut in_game_section = false;
+
+    for raw_line in input.lines() {
+        let line = raw_line.trim_start_matches('\u{feff}').trim();
+        if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            in_game_section = line[1..line.len() - 1].trim().eq_ignore_ascii_case("Game");
+            continue;
+        }
+        if !in_game_section {
+            continue;
+        }
+
+        let Some((field, value)) = line.split_once('=') else {
+            continue;
+        };
+        if !field.trim().eq_ignore_ascii_case(key) {
+            continue;
+        }
+
+        let value = value.trim().trim_matches('"').trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+
+    None
+}
+
+fn fivem_gta_relationship(
+    configured_path: Option<PathBuf>,
+    citizen_fx_ini: &Path,
+) -> FiveMGtaRelationship {
+    let evidence = citizen_fx_ini
+        .is_file()
+        .then(|| citizen_fx_ini.to_path_buf());
+
+    let Some(configured_path) = configured_path else {
+        return FiveMGtaRelationship {
+            status: FiveMGtaRelationshipStatus::MissingConfiguration,
+            configured_path: None,
+            evidence,
+            installation: None,
+        };
+    };
+
+    if !configured_path.is_absolute() {
+        return FiveMGtaRelationship {
+            status: FiveMGtaRelationshipStatus::InvalidConfiguredPath,
+            configured_path: Some(configured_path),
+            evidence,
+            installation: None,
+        };
+    }
+
+    let installation = validate_gta_v_installation(&configured_path);
+    let status = match installation.edition {
+        GtaVEdition::Legacy if installation.valid => FiveMGtaRelationshipStatus::ValidLegacy,
+        GtaVEdition::Legacy => FiveMGtaRelationshipStatus::InvalidLegacy,
+        GtaVEdition::Enhanced => FiveMGtaRelationshipStatus::Enhanced,
+        GtaVEdition::Ambiguous => FiveMGtaRelationshipStatus::Ambiguous,
+        GtaVEdition::Unknown => FiveMGtaRelationshipStatus::Unknown,
+    };
+
+    FiveMGtaRelationship {
+        status,
+        configured_path: Some(configured_path),
+        evidence,
+        installation: Some(installation),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -604,6 +1015,21 @@ mod tests {
         ] {
             touch(root, marker);
         }
+    }
+
+    fn create_fivem_fixture(root: &Path, gta_root: &Path) {
+        let app_root = root.join("FiveM.app");
+        fs::create_dir_all(app_root.join("data").join("game-storage")).unwrap();
+        fs::create_dir_all(app_root.join("citizen")).unwrap();
+        touch(root, "FiveM.exe");
+        fs::write(
+            app_root.join("CitizenFX.ini"),
+            format!(
+                "[Game]\nIVPath={}\nSavedBuildNumber=3095\nUpdateChannel=production\n",
+                gta_root.display()
+            ),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -733,5 +1159,98 @@ mod tests {
         ));
 
         assert_eq!(left.provenance.len(), 2);
+    }
+
+    #[test]
+    fn parses_citizenfx_game_fields() {
+        let body = "\u{feff}[Game]\nIVPath=\"C:\\Games\\Grand Theft Auto V\"\nSavedBuildNumber=3095\nUpdateChannel=production\n";
+
+        assert_eq!(
+            parse_citizen_fx_game_value(body, "IVPath").as_deref(),
+            Some(r"C:\Games\Grand Theft Auto V")
+        );
+        assert_eq!(
+            parse_citizen_fx_game_value(body, "savedbuildnumber").as_deref(),
+            Some("3095")
+        );
+        assert_eq!(
+            parse_citizen_fx_game_value(body, "UpdateChannel").as_deref(),
+            Some("production")
+        );
+    }
+
+    #[test]
+    fn validates_fivem_and_legacy_ivpath_relationship() {
+        let base = temp_root("fivem-legacy");
+        let gta_root = base.join("gta");
+        let fivem_root = base.join("FiveM");
+        create_legacy_fixture(&gta_root);
+        create_fivem_fixture(&fivem_root, &gta_root);
+
+        let installation = validate_fivem_installation(&fivem_root);
+        assert!(installation.valid);
+        assert_eq!(
+            installation.gta.status,
+            FiveMGtaRelationshipStatus::ValidLegacy
+        );
+        assert!(installation
+            .gta
+            .installation
+            .as_ref()
+            .is_some_and(|gta| gta.valid && gta.edition == GtaVEdition::Legacy));
+        assert_eq!(installation.saved_build_number.as_deref(), Some("3095"));
+        assert_eq!(installation.update_channel.as_deref(), Some("production"));
+        assert!(installation
+            .storage_paths
+            .iter()
+            .find(|path| path.id == "gameStorage")
+            .is_some_and(|path| path.exists));
+
+        let from_app_root = validate_fivem_installation(&fivem_root.join("FiveM.app"));
+        assert!(from_app_root.valid);
+        assert_eq!(
+            from_app_root.gta.status,
+            FiveMGtaRelationshipStatus::ValidLegacy
+        );
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn rejects_incomplete_fivem_installation_and_relative_ivpath() {
+        let base = temp_root("fivem-invalid");
+        let fivem_root = base.join("FiveM");
+        let app_root = fivem_root.join("FiveM.app");
+        fs::create_dir_all(&app_root).unwrap();
+        fs::write(
+            app_root.join("CitizenFX.ini"),
+            "[Game]\nIVPath=relative\\gta\n",
+        )
+        .unwrap();
+
+        let installation = validate_fivem_installation(&fivem_root);
+        assert!(installation.valid);
+        assert_eq!(
+            installation.gta.status,
+            FiveMGtaRelationshipStatus::InvalidConfiguredPath
+        );
+        assert!(
+            !installation
+                .checks
+                .iter()
+                .find(|check| check.id == "executable")
+                .unwrap()
+                .passed
+        );
+
+        fs::remove_file(app_root.join("CitizenFX.ini")).unwrap();
+        let incomplete = validate_fivem_installation(&fivem_root);
+        assert!(!incomplete.valid);
+        assert_eq!(
+            incomplete.gta.status,
+            FiveMGtaRelationshipStatus::MissingConfiguration
+        );
+
+        fs::remove_dir_all(base).unwrap();
     }
 }

@@ -62,6 +62,7 @@ ragelab workspace preflight ./stream map.ymap --json
 ragelab workspace export ./stream map.ymap --output ./build/my-resource --json
 ragelab workspace scene ./stream map.ymap --json
 ragelab gta discover --json
+ragelab fivem discover --json
 ```
 
 Global discovery:

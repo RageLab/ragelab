@@ -33,7 +33,7 @@ Errors use the same schema:
 
 Consumers must key compatibility decisions on `schema` and `schemaVersion`, not on human-readable output.
 
-The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `spatial <file> --json`, `preview <file> --json`, `plan <operation.json> --json`, `apply <operation.json> --json`, `workspace preflight ... --json`, `workspace export ... --json`, `workspace scene ... --json`, and `gta discover --json` use the common response envelope.
+The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `spatial <file> --json`, `preview <file> --json`, `plan <operation.json> --json`, `apply <operation.json> --json`, `workspace preflight ... --json`, `workspace export ... --json`, `workspace scene ... --json`, `gta discover --json`, and `fivem discover --json` use the common response envelope.
 
 ## Agent-first surface
 
@@ -69,6 +69,7 @@ ragelab ytyp ...
 ragelab ymf ...
 ragelab workspace ...
 ragelab gta ...
+ragelab fivem ...
 ```
 
 Examples:
@@ -98,7 +99,15 @@ Native GTA V Legacy installation discovery:
 ragelab gta discover --json
 ```
 
-The GTA discovery command returns the versioned `ragelab.gta.discovery` payload inside the common response envelope. It reports every candidate root, merged provenance, detected edition, filesystem validation checks, Steam metadata when available, and the number of valid Legacy installations. See [DISCOVERY.md](DISCOVERY.md).
+The GTA discovery command returns the versioned `ragelab.gta.discovery` payload inside the common response envelope. It reports every candidate root, merged provenance, detected edition, filesystem validation checks, Steam metadata when available, and the number of valid Legacy installations.
+
+FiveM discovery is available through:
+
+```bash
+ragelab fivem discover --json
+```
+
+It returns the versioned `ragelab.fivem.discovery` payload, including installation/storage evidence and the GTA relationship derived from `FiveM.app/CitizenFX.ini` `IVPath`. The relationship is accepted as Legacy only when the referenced GTA path passes the same Legacy validator used by `gta discover`. See [DISCOVERY.md](DISCOVERY.md).
 
 Global `capabilities --json` exposes:
 

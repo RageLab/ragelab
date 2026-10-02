@@ -417,6 +417,11 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn Error>> {
             let json = parse_json_flag(args, USAGE)?;
             agent::gta_discover(json)?;
         }
+        "fivem.discover" => {
+            const USAGE: &str = "usage: ragelab fivem discover [--json]";
+            let json = parse_json_flag(args, USAGE)?;
+            agent::fivem_discover(json)?;
+        }
         "vanilla-index" => {
             const USAGE: &str =
                 "usage: ragelab vanilla-index <extracted-gta-directory> <output.txt>";
@@ -528,6 +533,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "workspace.scene",
         "gta.discover",
         "gta.vanilla-index",
+        "fivem.discover",
     ];
     const LEGACY_ALIASES: &[&str] = &[
         "meta-info",
@@ -623,6 +629,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "workspace.scene",
         "gta.discover",
         "gta.vanilla-index",
+        "fivem.discover",
     ];
 
     if json_output {
@@ -635,7 +642,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
                 "version": env!("CARGO_PKG_VERSION"),
                 "commands": DISCOVERY_COMMANDS,
                 "canonicalCommands": CANONICAL_COMMANDS,
-                "structuredOutput": ["version", "capabilities", "inspect", "validate", "spatial", "preview", "plan", "apply", "workspace.preflight", "workspace.export", "workspace.scene", "gta.discover"],
+                "structuredOutput": ["version", "capabilities", "inspect", "validate", "spatial", "preview", "plan", "apply", "workspace.preflight", "workspace.export", "workspace.scene", "gta.discover", "fivem.discover"],
                 "legacyAliases": LEGACY_ALIASES,
                 "responseEnvelope": {
                     "schema": agent::RESPONSE_SCHEMA,
@@ -694,6 +701,7 @@ ragelab workspace extract <directory> <file.ymap> <output> [--allow-unresolved] 
 ragelab workspace export <directory> <file.ymap> [more.ymap ...] --output <directory> [--resource-name <name>] [--allow-unresolved] [--overwrite] [catalog options] [--json]\n  \
 ragelab workspace scene <directory> <file.ymap> [--max-nodes <n>] [--json]\n  \
 ragelab gta discover [--json]\n  \
+ragelab fivem discover [--json]\n  \
 ragelab gta vanilla-index <extracted-gta-directory> <output.txt>\n\n\
 Utility commands:\n  \
 ragelab hash <asset-name>\n  \

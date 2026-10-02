@@ -59,6 +59,57 @@ If both Legacy and Enhanced executable markers exist, the candidate is `ambiguou
 
 `ragelab-engine` also exposes `validate_gta_v_installation(path)`. This lets Studio or another native adapter validate a user-selected directory without duplicating filesystem rules.
 
+## FiveM discovery
+
+RageLab also exposes native FiveM environment discovery:
+
+```bash
+ragelab fivem discover --json
+```
+
+The structured response uses the common `ragelab.cli.response` envelope. `data` contains a versioned `ragelab.fivem.discovery` report.
+
+FiveM discovery is evidence-based. RageLab does not infer the GTA installation from folder names or launcher assumptions. The relationship to GTA is established only from the `[Game]` `IVPath` value in `FiveM.app/CitizenFX.ini`, then validated through the same GTA V Legacy validator used by `gta discover`.
+
+Important fields:
+
+- `validInstallations` — FiveM candidates that pass the required local installation checks;
+- `legacyLinkedInstallations` — candidates whose configured `IVPath` resolves to a valid GTA V Legacy installation;
+- `appRoot` — the normalized `FiveM.app` directory;
+- `citizenFxIni` — the configuration file used as relationship evidence;
+- `savedBuildNumber` and `updateChannel` — reported when present in `[Game]`; neither is treated as an asset-format compatibility guarantee;
+- `storagePaths` — known local FiveM storage locations and whether they exist;
+- `gta.status` — explicit relationship state such as `validLegacy`, `invalidLegacy`, `enhanced`, `ambiguous`, `unknown`, `invalidConfiguredPath`, or `missingConfiguration`;
+- `gta.installation` — the complete GTA validation result when an absolute `IVPath` was available.
+
+### FiveM providers
+
+Discovery currently considers:
+
+1. `RAGELAB_FIVEM` — explicit user/automation override; it may point to the FiveM root or directly to `FiveM.app`;
+2. on Windows, `%LOCALAPPDATA%\FiveM` when that directory exists.
+
+Custom FiveM installations outside the default location should use `RAGELAB_FIVEM` or the Rust validation API. Provider absence is not an error.
+
+### FiveM validation
+
+A FiveM candidate is valid when:
+
+- the normalized FiveM root exists;
+- `FiveM.app` exists;
+- `FiveM.app/CitizenFX.ini` exists and is readable.
+
+`FiveM.exe` is reported as an optional check. The following conventional paths are reported as storage evidence, not requirements:
+
+- `FiveM.app/data`;
+- `FiveM.app/data/game-storage`;
+- `FiveM.app/data/cache`;
+- `FiveM.app/citizen`.
+
+An `IVPath` must be absolute before RageLab will validate it as a GTA relationship. Relative or malformed paths fail closed and are never resolved heuristically. If the configured GTA root is Enhanced, ambiguous, incomplete, or unknown, that status is reported without promoting it to Legacy compatibility.
+
+`ragelab-engine` exposes `validate_fivem_installation(path)` for Studio and other native adapters.
+
 ## Catalog boundary
 
 Installation discovery and vanilla asset catalog construction are separate capabilities.

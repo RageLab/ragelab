@@ -156,6 +156,7 @@ fn global_capabilities_preserve_legacy_ids_and_advertise_canonical_ids() {
     assert!(canonical.iter().any(|value| value == "workspace.export"));
     assert!(canonical.iter().any(|value| value == "workspace.scene"));
     assert!(canonical.iter().any(|value| value == "gta.discover"));
+    assert!(canonical.iter().any(|value| value == "fivem.discover"));
     assert_eq!(body["responseEnvelope"]["schema"], "ragelab.cli.response");
     assert!(body["structuredOutput"]
         .as_array()
@@ -197,6 +198,11 @@ fn global_capabilities_preserve_legacy_ids_and_advertise_canonical_ids() {
         .unwrap()
         .iter()
         .any(|value| value == "gta.discover"));
+    assert!(body["structuredOutput"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "fivem.discover"));
 }
 
 #[test]
@@ -1295,4 +1301,75 @@ fn gta_discover_is_structured_and_validates_legacy_override() {
         .all(|check| !check["required"].as_bool().unwrap() || check["passed"] == true));
 
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn fivem_discover_is_structured_and_links_citizenfx_ivpath_to_legacy_gta() {
+    let base = temp_root("fivem-discovery");
+    let gta_root = base.join("gta");
+    let fivem_root = base.join("FiveM");
+    let app_root = fivem_root.join("FiveM.app");
+
+    fs::create_dir_all(gta_root.join("update")).unwrap();
+    for relative in [
+        "GTA5.exe",
+        "PlayGTAV.exe",
+        "common.rpf",
+        "x64a.rpf",
+        "update/update.rpf",
+    ] {
+        fs::write(gta_root.join(relative), []).unwrap();
+    }
+
+    fs::create_dir_all(app_root.join("data").join("game-storage")).unwrap();
+    fs::create_dir_all(app_root.join("citizen")).unwrap();
+    fs::write(fivem_root.join("FiveM.exe"), []).unwrap();
+    fs::write(
+        app_root.join("CitizenFX.ini"),
+        format!(
+            "[Game]\nIVPath={}\nSavedBuildNumber=3095\nUpdateChannel=production\n",
+            gta_root.display()
+        ),
+    )
+    .unwrap();
+
+    let output = binary()
+        .env("RAGELAB_FIVEM", &fivem_root)
+        .args(["fivem", "discover", "--json"])
+        .output()
+        .expect("ragelab fivem discover should run");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let body = stdout_json(&output);
+    assert_eq!(body["command"], "fivem.discover");
+    assert_eq!(body["data"]["schema"], "ragelab.fivem.discovery");
+    assert_eq!(body["data"]["schemaVersion"], 1);
+
+    let candidates = body["data"]["candidates"].as_array().unwrap();
+    let candidate = candidates
+        .iter()
+        .find(|candidate| {
+            candidate["provenance"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|source| source["source"] == "environment")
+        })
+        .expect("environment FiveM candidate should be present");
+
+    assert_eq!(candidate["valid"], true);
+    assert_eq!(candidate["savedBuildNumber"], "3095");
+    assert_eq!(candidate["updateChannel"], "production");
+    assert_eq!(candidate["gta"]["status"], "validLegacy");
+    assert_eq!(candidate["gta"]["installation"]["edition"], "legacy");
+    assert_eq!(candidate["gta"]["installation"]["valid"], true);
+    assert!(candidate["storagePaths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|path| path["id"] == "gameStorage")
+        .is_some_and(|path| path["exists"] == true));
+
+    fs::remove_dir_all(base).unwrap();
 }

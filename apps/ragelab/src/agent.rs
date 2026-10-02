@@ -7,7 +7,7 @@ use std::{
 
 use ragelab_assets::{AssetKind, WorkspaceIndex};
 use ragelab_engine::{
-    apply_operation_document, assemble_ymap_scene, discover_gta_v_legacy,
+    apply_operation_document, assemble_ymap_scene, discover_fivem_legacy, discover_gta_v_legacy,
     isolated_asset_spatial_context, parse_operation_document, plan_operation_document,
     ymap_spatial_context, EngineError, OperationError, SceneAssemblyOptions, SceneAssetSelector,
     SceneCollisionState, SceneManifest, SceneResolutionReasonCode, SceneResolutionState,
@@ -41,6 +41,7 @@ pub fn is_structured_command(command: &str) -> bool {
             | "preflight"
             | "export"
             | "gta.discover"
+            | "fivem.discover"
     )
 }
 
@@ -1358,6 +1359,57 @@ pub fn gta_discover(json_output: bool) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+pub fn fivem_discover(json_output: bool) -> Result<(), Box<dyn Error>> {
+    let report = discover_fivem_legacy();
+
+    if json_output {
+        print_success("fivem.discover", serde_json::to_value(&report)?)?;
+    } else {
+        println!("target: FiveM + GTA V Legacy");
+        println!("platform: {}", report.platform);
+        println!("valid-installations: {}", report.valid_installations);
+        println!(
+            "legacy-linked-installations: {}",
+            report.legacy_linked_installations
+        );
+        println!("candidates: {}", report.candidates.len());
+
+        for candidate in report.candidates {
+            println!(
+                "{} valid={} gta={}",
+                candidate.root.display(),
+                if candidate.valid { "yes" } else { "no" },
+                candidate.gta.status.as_str()
+            );
+            println!("  app-root: {}", candidate.app_root.display());
+            println!("  citizenfx: {}", candidate.citizen_fx_ini.display());
+            if let Some(build) = &candidate.saved_build_number {
+                println!("  saved-build: {build}");
+            }
+            if let Some(channel) = &candidate.update_channel {
+                println!("  update-channel: {channel}");
+            }
+            if let Some(path) = &candidate.gta.configured_path {
+                println!("  gta-path: {}", path.display());
+            }
+            for provenance in candidate.provenance {
+                println!(
+                    "  source: {} ({})",
+                    provenance.source.as_str(),
+                    provenance.reference
+                );
+            }
+            for storage in candidate.storage_paths {
+                if storage.exists {
+                    println!("  storage {}: {}", storage.id, storage.path.display());
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub fn parse_path_json_args(
     args: impl Iterator<Item = String>,
     usage: &str,
@@ -1451,6 +1503,7 @@ pub fn normalize_command_args(args: Vec<String>) -> Vec<String> {
         ("workspace", "scene") => Some("scene"),
         ("gta", "discover") => Some("gta.discover"),
         ("gta", "vanilla-index") => Some("vanilla-index"),
+        ("fivem", "discover") => Some("fivem.discover"),
         _ => None,
     };
 
