@@ -10,9 +10,10 @@ use std::{
 
 use ragelab_assets::WorkspaceIndex;
 use ragelab_engine::{
-    build_vanilla_catalog, export_map_resource, export_maps_resource, parse_durtyfree_object_list,
-    parse_vanilla_file_catalog, preflight_maps_combined, render_vanilla_catalog_paths,
-    summarize_mlo_audit, CatalogRefs, DurtyFreeCatalog, SharedExportOptions, VanillaFileCatalog,
+    build_vanilla_catalog, export_map_resource, parse_durtyfree_object_list,
+    parse_vanilla_file_catalog, render_vanilla_catalog_paths, summarize_mlo_audit,
+    workspace_export_preflight_report, workspace_export_report, CatalogRefs, DurtyFreeCatalog,
+    SharedExportOptions, VanillaFileCatalog,
 };
 use ragelab_hash::{jenkins, joaat};
 use ragelab_meta::MetaDocument;
@@ -2121,111 +2122,45 @@ fn preflight(
     catalog_args: CliCatalogArgs,
     json_output: bool,
 ) -> Result<(), Box<dyn Error>> {
-    let workspace = root.canonicalize()?;
-    let index = WorkspaceIndex::scan(&workspace)?;
     let catalogs = load_cli_catalogs(catalog_args)?;
-    let selected_paths = maps
-        .iter()
-        .map(|map| workspace_map_path(&workspace, map))
-        .collect::<Vec<_>>();
-    let result = preflight_maps_combined(
-        &index,
-        &workspace,
-        &selected_paths,
-        catalogs.durtyfree.as_ref(),
-        catalogs.file_catalog.as_ref(),
+    let report = workspace_export_preflight_report(
+        root,
+        maps,
+        CatalogRefs {
+            durtyfree: catalogs.durtyfree.as_ref(),
+            file_catalog: catalogs.file_catalog.as_ref(),
+        },
     )?;
 
     if json_output {
-        let unknown_groups = result
-            .unknown_groups
-            .iter()
-            .map(|group| {
-                json!({
-                    "kind": group.kind,
-                    "hash": format!("0x{:08X}", group.hash),
-                    "uses": group.uses,
-                    "reasons": group.reasons,
-                    "affectedMaps": group.affected_maps,
-                })
-            })
-            .collect::<Vec<_>>();
-        let mlo_audits = result
-            .mlo_audits
-            .iter()
-            .map(|audit| {
-                let ytyp = audit
-                    .ytyp_path
-                    .strip_prefix(&workspace)
-                    .unwrap_or(&audit.ytyp_path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                json!({
-                    "archetypeHash": format!("0x{:08X}", audit.archetype_hash),
-                    "ytyp": ytyp,
-                    "entities": audit.entities,
-                    "uniqueEntityArchetypes": audit.unique_entity_archetypes,
-                    "rooms": audit.rooms,
-                    "portals": audit.portals,
-                    "localFiles": audit.local_files,
-                    "vanilla": audit.vanilla,
-                    "unknown": audit.unknown,
-                    "risk": audit.risk.as_str(),
-                })
-            })
-            .collect::<Vec<_>>();
-
-        agent::print_success(
-            "preflight",
-            json!({
-                "workspace": root.display().to_string(),
-                "selectedRoots": result.selected_roots,
-                "closureYmaps": result.closure_ymaps,
-                "predictedFiles": result.predicted_files,
-                "unresolved": {
-                    "raw": result.unresolved.raw,
-                    "vanilla": result.unresolved.vanilla,
-                    "unknown": result.unresolved.unknown,
-                    "catalogUsed": result.unresolved.catalog_used,
-                    "durtyfreeUsed": result.unresolved.durtyfree_used,
-                    "fileCatalogUsed": result.unresolved.file_catalog_used,
-                },
-                "exportGate": {
-                    "allowedWithoutOverride": result.unresolved.unknown == 0,
-                    "requiresAllowUnresolved": result.unresolved.unknown > 0,
-                },
-                "unknownGroups": unknown_groups,
-                "mloAudits": mlo_audits,
-                "warnings": result.warnings,
-            }),
-        )?;
+        agent::print_success("preflight", serde_json::to_value(&report)?)?;
         return Ok(());
     }
 
-    println!("workspace: {}", workspace.display());
-    println!("selected-roots: {}", result.selected_roots.len());
-    println!("closure-ymaps: {}", result.closure_ymaps.len());
-    println!("predicted-files: {}", result.predicted_files.len());
-    println!("raw-unresolved: {}", result.unresolved.raw);
-    println!("vanilla: {}", result.unresolved.vanilla);
-    println!("unknown: {}", result.unresolved.unknown);
-    println!("unknown-groups: {}", result.unknown_groups.len());
-    println!("mlo-audits: {}", result.mlo_audits.len());
-    println!("warnings: {}", result.warnings.len());
+    println!("workspace: {}", report.workspace);
+    println!("selected-roots: {}", report.selected_roots.len());
+    println!("closure-ymaps: {}", report.closure_ymaps.len());
+    println!("predicted-files: {}", report.predicted_files.len());
+    println!("raw-unresolved: {}", report.unresolved.raw);
+    println!("vanilla: {}", report.unresolved.vanilla);
+    println!("unknown: {}", report.unresolved.unknown);
+    println!("unknown-groups: {}", report.unknown_groups.len());
+    println!("mlo-audits: {}", report.mlo_audits.len());
+    println!("warnings: {}", report.warnings.len());
 
-    if !result.selected_roots.is_empty() {
+    if !report.selected_roots.is_empty() {
         println!("\nselected roots:");
-        for root in &result.selected_roots {
+        for root in &report.selected_roots {
             println!("  {root}");
         }
     }
-    if !result.mlo_audits.is_empty() {
+    if !report.mlo_audits.is_empty() {
         println!("\nMLO audits:");
-        for audit in &result.mlo_audits {
+        for audit in &report.mlo_audits {
             println!(
-                "  0x{:08X} {} - entities={} unique-archetypes={} rooms={} portals={} local={} vanilla={} unknown={} risk={}",
+                "  {} {} - entities={} unique-archetypes={} rooms={} portals={} local={} vanilla={} unknown={} risk={}",
                 audit.archetype_hash,
-                audit.ytyp_path.display(),
+                audit.ytyp,
                 audit.entities,
                 audit.unique_entity_archetypes,
                 audit.rooms,
@@ -2233,15 +2168,15 @@ fn preflight(
                 audit.local_files,
                 audit.vanilla,
                 audit.unknown,
-                audit.risk.as_str()
+                audit.risk
             );
         }
     }
-    if !result.unknown_groups.is_empty() {
+    if !report.unknown_groups.is_empty() {
         println!("\nUNKNOWN groups (first 25):");
-        for group in result.unknown_groups.iter().take(25) {
+        for group in report.unknown_groups.iter().take(25) {
             println!(
-                "  {} 0x{:08X} uses={} maps={} - {}",
+                "  {} {} uses={} maps={} - {}",
                 group.kind,
                 group.hash,
                 group.uses,
@@ -2253,19 +2188,18 @@ fn preflight(
                     .unwrap_or("<no reason>")
             );
         }
-        if result.unknown_groups.len() > 25 {
-            println!("  ... {} more", result.unknown_groups.len() - 25);
+        if report.unknown_groups.len() > 25 {
+            println!("  ... {} more", report.unknown_groups.len() - 25);
         }
     }
-    if !result.warnings.is_empty() {
+    if !report.warnings.is_empty() {
         println!("\nwarnings:");
-        for warning in &result.warnings {
+        for warning in &report.warnings {
             println!("  {warning}");
         }
     }
     Ok(())
 }
-
 fn mlo_audit(
     root: &Path,
     ymap_arg: &Path,
@@ -2304,15 +2238,7 @@ fn mlo_audit(
 }
 
 fn workspace_export(root: &Path, request: CliExportArgs) -> Result<(), Box<dyn Error>> {
-    let workspace = root.canonicalize()?;
-    let index = WorkspaceIndex::scan(&workspace)?;
     let catalogs = load_cli_catalogs(request.catalogs)?;
-    let selected_paths = request
-        .maps
-        .iter()
-        .map(|map| workspace_map_path(&workspace, map))
-        .collect::<Vec<_>>();
-
     let resource_name = request.resource_name.unwrap_or_else(|| {
         request
             .output
@@ -2321,7 +2247,8 @@ fn workspace_export(root: &Path, request: CliExportArgs) -> Result<(), Box<dyn E
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
             .or_else(|| {
-                selected_paths
+                request
+                    .maps
                     .first()
                     .and_then(|path| path.file_stem())
                     .and_then(|value| value.to_str())
@@ -2330,129 +2257,46 @@ fn workspace_export(root: &Path, request: CliExportArgs) -> Result<(), Box<dyn E
             .unwrap_or_else(|| "ragelab-export".to_string())
     });
 
-    let catalog_refs = CatalogRefs {
-        durtyfree: catalogs.durtyfree.as_ref(),
-        file_catalog: catalogs.file_catalog.as_ref(),
-    };
-    let outcome = if selected_paths.len() == 1 {
-        export_map_resource(
-            &index,
-            &workspace,
-            &selected_paths[0],
-            &request.output,
-            &resource_name,
-            request.options,
-            catalog_refs,
-        )?
-    } else {
-        export_maps_resource(
-            &index,
-            &workspace,
-            &selected_paths,
-            &request.output,
-            &resource_name,
-            request.options,
-            catalog_refs,
-        )?
-    };
-
-    let unresolved = outcome.unresolved;
-    let metadata_path = outcome.metadata_path;
-    let validation = outcome.validation;
-    let result = outcome.result;
+    let report = workspace_export_report(
+        root,
+        &request.maps,
+        &request.output,
+        &resource_name,
+        request.options,
+        CatalogRefs {
+            durtyfree: catalogs.durtyfree.as_ref(),
+            file_catalog: catalogs.file_catalog.as_ref(),
+        },
+    )?;
 
     if request.json_output {
-        let copied_files = result
-            .copied_files
-            .iter()
-            .filter_map(|path| {
-                path.file_name()
-                    .and_then(|value| value.to_str())
-                    .map(str::to_owned)
-            })
-            .collect::<Vec<_>>();
-        agent::print_success(
-            "export",
-            json!({
-                "workspace": root.display().to_string(),
-                "resourceName": resource_name,
-                "selectedRoots": selected_paths
-                    .iter()
-                    .map(|path| path
-                        .strip_prefix(&workspace)
-                        .unwrap_or(path)
-                        .to_string_lossy()
-                        .replace('\\', "/"))
-                    .collect::<Vec<_>>(),
-                "output": {
-                    "resource": result.output_dir.display().to_string(),
-                    "stream": result.stream_dir.display().to_string(),
-                    "manifest": result.manifest_path.display().to_string(),
-                    "metadata": metadata_path.display().to_string(),
-                    "gtxd": result
-                        .gtxd_path
-                        .as_ref()
-                        .map(|path| path.display().to_string()),
-                    "copiedFiles": copied_files,
-                    "manifestMaps": result.manifest.maps.len(),
-                },
-                "unresolved": {
-                    "raw": unresolved.raw,
-                    "vanilla": unresolved.vanilla,
-                    "unknown": unresolved.unknown,
-                    "catalogUsed": unresolved.catalog_used,
-                    "durtyfreeUsed": unresolved.durtyfree_used,
-                    "fileCatalogUsed": unresolved.file_catalog_used,
-                    "allowUnresolved": request.options.allow_unresolved,
-                },
-                "validation": {
-                    "status": validation.status,
-                    "valid": validation.valid,
-                    "metadataPresent": validation.metadata_present,
-                    "manifestValid": validation.manifest_valid,
-                    "fxmanifestPresent": validation.fxmanifest_present,
-                    "selectedRoots": validation.selected_roots,
-                    "closureMaps": validation.closure_maps,
-                    "copiedFiles": validation.copied_files,
-                    "interiorMaps": validation.interior_maps,
-                    "interiorBounds": validation.interior_bounds,
-                    "localMissing": validation.local_missing,
-                    "postExportRawUnresolved": validation.post_export_raw_unresolved,
-                    "postExportVanilla": validation.post_export_vanilla,
-                    "postExportUnknown": validation.post_export_unknown,
-                    "warnings": validation.warnings,
-                    "errors": validation.errors,
-                },
-                "warnings": result.report.warnings,
-            }),
-        )?;
+        agent::print_success("export", serde_json::to_value(&report)?)?;
         return Ok(());
     }
 
-    println!("resource: {}", result.output_dir.display());
-    println!("stream: {}", result.stream_dir.display());
-    println!("selected-roots: {}", selected_paths.len());
-    println!("copied-files: {}", result.copied_files.len());
-    println!("manifest: {}", result.manifest_path.display());
-    println!("metadata: {}", metadata_path.display());
-    if let Some(gtxd) = &result.gtxd_path {
-        println!("gtxd: {}", gtxd.display());
+    println!("resource: {}", report.output.resource);
+    println!("stream: {}", report.output.stream);
+    println!("selected-roots: {}", report.selected_roots.len());
+    println!("copied-files: {}", report.output.copied_files.len());
+    println!("manifest: {}", report.output.manifest);
+    println!("metadata: {}", report.output.metadata);
+    if let Some(gtxd) = &report.output.gtxd {
+        println!("gtxd: {gtxd}");
     }
-    println!("ymaps-in-manifest: {}", result.manifest.maps.len());
-    println!("unresolved: {}", unresolved.unknown);
-    println!("raw-unresolved: {}", unresolved.raw);
-    println!("vanilla: {}", unresolved.vanilla);
-    println!("validation: {}", validation.status);
-    println!("warnings: {}", result.report.warnings.len());
-    for warning in &result.report.warnings {
+    println!("ymaps-in-manifest: {}", report.output.manifest_maps);
+    println!("unresolved: {}", report.unresolved.unknown);
+    println!("raw-unresolved: {}", report.unresolved.raw);
+    println!("vanilla: {}", report.unresolved.vanilla);
+    println!("validation: {}", report.validation.status);
+    println!("warnings: {}", report.warnings.len());
+    for warning in &report.warnings {
         println!("  warning: {warning}");
     }
-    for warning in &validation.warnings {
+    for warning in &report.validation.warnings {
         println!("  validation-warning: {warning}");
     }
     Ok(())
 }
-
 fn extract(
     root: &Path,
     ymap_arg: &Path,

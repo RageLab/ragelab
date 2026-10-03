@@ -418,6 +418,291 @@ pub fn preflight_maps_combined(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceExportPreflightReport {
+    pub workspace: String,
+    pub selected_roots: Vec<String>,
+    pub closure_ymaps: Vec<String>,
+    pub predicted_files: Vec<String>,
+    pub unresolved: UnresolvedSummaryReport,
+    pub export_gate: ExportGateReport,
+    pub unknown_groups: Vec<UnknownDependencyGroupReport>,
+    pub mlo_audits: Vec<MloAuditReport>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnresolvedSummaryReport {
+    pub raw: usize,
+    pub vanilla: usize,
+    pub unknown: usize,
+    pub catalog_used: bool,
+    pub durtyfree_used: bool,
+    pub file_catalog_used: bool,
+}
+
+impl From<UnresolvedSummary> for UnresolvedSummaryReport {
+    fn from(value: UnresolvedSummary) -> Self {
+        Self {
+            raw: value.raw,
+            vanilla: value.vanilla,
+            unknown: value.unknown,
+            catalog_used: value.catalog_used,
+            durtyfree_used: value.durtyfree_used,
+            file_catalog_used: value.file_catalog_used,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportGateReport {
+    pub allowed_without_override: bool,
+    pub requires_allow_unresolved: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnknownDependencyGroupReport {
+    pub kind: String,
+    pub hash: String,
+    pub uses: usize,
+    pub reasons: Vec<String>,
+    pub affected_maps: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MloAuditReport {
+    pub archetype_hash: String,
+    pub ytyp: String,
+    pub entities: usize,
+    pub unique_entity_archetypes: usize,
+    pub rooms: usize,
+    pub portals: usize,
+    pub local_files: usize,
+    pub vanilla: usize,
+    pub unknown: usize,
+    pub risk: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceExportReport {
+    pub workspace: String,
+    pub resource_name: String,
+    pub selected_roots: Vec<String>,
+    pub output: WorkspaceExportOutputReport,
+    pub unresolved: ExportUnresolvedReport,
+    pub validation: ExportValidationReport,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceExportOutputReport {
+    pub resource: String,
+    pub stream: String,
+    pub manifest: String,
+    pub metadata: String,
+    pub gtxd: Option<String>,
+    pub copied_files: Vec<String>,
+    pub manifest_maps: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportUnresolvedReport {
+    pub raw: usize,
+    pub vanilla: usize,
+    pub unknown: usize,
+    pub catalog_used: bool,
+    pub durtyfree_used: bool,
+    pub file_catalog_used: bool,
+    pub allow_unresolved: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportValidationReport {
+    pub status: String,
+    pub valid: bool,
+    pub metadata_present: bool,
+    pub manifest_valid: bool,
+    pub fxmanifest_present: bool,
+    pub selected_roots: usize,
+    pub closure_maps: usize,
+    pub copied_files: usize,
+    pub interior_maps: usize,
+    pub interior_bounds: usize,
+    pub local_missing: Vec<String>,
+    pub post_export_raw_unresolved: usize,
+    pub post_export_vanilla: usize,
+    pub post_export_unknown: usize,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+impl From<&ExportValidation> for ExportValidationReport {
+    fn from(value: &ExportValidation) -> Self {
+        Self {
+            status: value.status.clone(),
+            valid: value.valid,
+            metadata_present: value.metadata_present,
+            manifest_valid: value.manifest_valid,
+            fxmanifest_present: value.fxmanifest_present,
+            selected_roots: value.selected_roots,
+            closure_maps: value.closure_maps,
+            copied_files: value.copied_files,
+            interior_maps: value.interior_maps,
+            interior_bounds: value.interior_bounds,
+            local_missing: value.local_missing.clone(),
+            post_export_raw_unresolved: value.post_export_raw_unresolved,
+            post_export_vanilla: value.post_export_vanilla,
+            post_export_unknown: value.post_export_unknown,
+            warnings: value.warnings.clone(),
+            errors: value.errors.clone(),
+        }
+    }
+}
+
+pub fn workspace_export_preflight_report(
+    workspace: &Path,
+    maps: &[PathBuf],
+    catalogs: CatalogRefs<'_>,
+) -> Result<WorkspaceExportPreflightReport, EngineError> {
+    let canonical_workspace = canonical_workspace_root(workspace)?;
+    let selected_paths = resolve_workspace_maps(&canonical_workspace, maps)?;
+    let index = WorkspaceIndex::scan(&canonical_workspace)?;
+    let combined = preflight_maps_combined(
+        &index,
+        &canonical_workspace,
+        &selected_paths,
+        catalogs.durtyfree,
+        catalogs.file_catalog,
+    )?;
+
+    Ok(preflight_report_from_combined(
+        workspace,
+        &canonical_workspace,
+        combined,
+    ))
+}
+
+fn preflight_report_from_combined(
+    workspace_display: &Path,
+    canonical_workspace: &Path,
+    combined: CombinedPreflight,
+) -> WorkspaceExportPreflightReport {
+    let unresolved = combined.unresolved;
+    WorkspaceExportPreflightReport {
+        workspace: workspace_display.display().to_string(),
+        selected_roots: combined.selected_roots,
+        closure_ymaps: combined.closure_ymaps,
+        predicted_files: combined.predicted_files,
+        unresolved: unresolved.into(),
+        export_gate: ExportGateReport {
+            allowed_without_override: unresolved.unknown == 0,
+            requires_allow_unresolved: unresolved.unknown > 0,
+        },
+        unknown_groups: combined
+            .unknown_groups
+            .into_iter()
+            .map(|group| UnknownDependencyGroupReport {
+                kind: group.kind,
+                hash: format!("0x{:08X}", group.hash),
+                uses: group.uses,
+                reasons: group.reasons,
+                affected_maps: group.affected_maps,
+            })
+            .collect(),
+        mlo_audits: combined
+            .mlo_audits
+            .into_iter()
+            .map(|audit| MloAuditReport {
+                archetype_hash: format!("0x{:08X}", audit.archetype_hash),
+                ytyp: relative_name(canonical_workspace, &audit.ytyp_path),
+                entities: audit.entities,
+                unique_entity_archetypes: audit.unique_entity_archetypes,
+                rooms: audit.rooms,
+                portals: audit.portals,
+                local_files: audit.local_files,
+                vanilla: audit.vanilla,
+                unknown: audit.unknown,
+                risk: audit.risk.as_str().to_string(),
+            })
+            .collect(),
+        warnings: combined.warnings,
+    }
+}
+
+fn canonical_workspace_root(workspace: &Path) -> Result<PathBuf, EngineError> {
+    let canonical = workspace.canonicalize()?;
+    if !canonical.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("not a directory: {}", workspace.display()),
+        )
+        .into());
+    }
+    Ok(canonical)
+}
+
+fn resolve_workspace_maps(
+    canonical_workspace: &Path,
+    maps: &[PathBuf],
+) -> Result<Vec<PathBuf>, EngineError> {
+    if maps.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "at least one YMAP must be selected",
+        )
+        .into());
+    }
+
+    maps.iter()
+        .map(|map| {
+            let candidate = if map.is_absolute() {
+                map.clone()
+            } else {
+                canonical_workspace.join(map)
+            };
+            let canonical = candidate.canonicalize()?;
+            if !canonical.is_file() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("not a file: {}", candidate.display()),
+                )
+                .into());
+            }
+            if !canonical.starts_with(canonical_workspace) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "YMAP must be contained by workspace: {}",
+                        candidate.display()
+                    ),
+                )
+                .into());
+            }
+            if !canonical
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("ymap"))
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("selected map is not a .ymap file: {}", candidate.display()),
+                )
+                .into());
+            }
+            Ok(canonical)
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SharedExportOptions {
     pub allow_unresolved: bool,
@@ -510,6 +795,109 @@ pub fn export_maps_resource(
         validation,
         unresolved,
     })
+}
+
+pub fn workspace_export_report(
+    workspace: &Path,
+    maps: &[PathBuf],
+    output: &Path,
+    resource_name: &str,
+    options: SharedExportOptions,
+    catalogs: CatalogRefs<'_>,
+) -> Result<WorkspaceExportReport, EngineError> {
+    let canonical_workspace = canonical_workspace_root(workspace)?;
+    let selected_paths = resolve_workspace_maps(&canonical_workspace, maps)?;
+    let index = WorkspaceIndex::scan(&canonical_workspace)?;
+
+    let outcome = if selected_paths.len() == 1 {
+        export_map_resource(
+            &index,
+            &canonical_workspace,
+            &selected_paths[0],
+            output,
+            resource_name,
+            options,
+            catalogs,
+        )?
+    } else {
+        export_maps_resource(
+            &index,
+            &canonical_workspace,
+            &selected_paths,
+            output,
+            resource_name,
+            options,
+            catalogs,
+        )?
+    };
+
+    Ok(export_report_from_outcome(
+        workspace,
+        &canonical_workspace,
+        &selected_paths,
+        resource_name,
+        options.allow_unresolved,
+        outcome,
+    ))
+}
+
+fn export_report_from_outcome(
+    workspace_display: &Path,
+    canonical_workspace: &Path,
+    selected_paths: &[PathBuf],
+    resource_name: &str,
+    allow_unresolved: bool,
+    outcome: ExportOutcome,
+) -> WorkspaceExportReport {
+    let ExportOutcome {
+        result,
+        metadata_path,
+        validation,
+        unresolved,
+    } = outcome;
+
+    let copied_files = result
+        .copied_files
+        .iter()
+        .filter_map(|path| {
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    let warnings = result.report.warnings.clone();
+
+    WorkspaceExportReport {
+        workspace: workspace_display.display().to_string(),
+        resource_name: resource_name.to_string(),
+        selected_roots: selected_paths
+            .iter()
+            .map(|path| relative_name(canonical_workspace, path))
+            .collect(),
+        output: WorkspaceExportOutputReport {
+            resource: result.output_dir.display().to_string(),
+            stream: result.stream_dir.display().to_string(),
+            manifest: result.manifest_path.display().to_string(),
+            metadata: metadata_path.display().to_string(),
+            gtxd: result
+                .gtxd_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            copied_files,
+            manifest_maps: result.manifest.maps.len(),
+        },
+        unresolved: ExportUnresolvedReport {
+            raw: unresolved.raw,
+            vanilla: unresolved.vanilla,
+            unknown: unresolved.unknown,
+            catalog_used: unresolved.catalog_used,
+            durtyfree_used: unresolved.durtyfree_used,
+            file_catalog_used: unresolved.file_catalog_used,
+            allow_unresolved,
+        },
+        validation: ExportValidationReport::from(&validation),
+        warnings,
+    }
 }
 
 fn enforce_export_gate(
@@ -862,6 +1250,100 @@ mod tests {
         assert_eq!(preflight.unresolved.raw, preflight.unresolved.unknown);
         assert!(!preflight.unresolved.catalog_used);
         assert!(preflight.mlo_audits.is_empty());
+    }
+
+    #[test]
+    fn workspace_export_preflight_report_preserves_public_contract() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/synthetic/stream")
+            .canonicalize()
+            .expect("synthetic workspace");
+        let report = workspace_export_preflight_report(
+            &workspace,
+            &[PathBuf::from("simple.ymap")],
+            CatalogRefs::default(),
+        )
+        .expect("workspace preflight report");
+
+        assert_eq!(report.selected_roots, vec!["simple.ymap"]);
+        assert!(report
+            .closure_ymaps
+            .iter()
+            .any(|name| name == "simple.ymap"));
+        assert_eq!(
+            report.export_gate.allowed_without_override,
+            report.unresolved.unknown == 0
+        );
+        assert_eq!(
+            report.export_gate.requires_allow_unresolved,
+            report.unresolved.unknown > 0
+        );
+
+        let value = serde_json::to_value(report).expect("serialize preflight report");
+        assert!(value["workspace"].is_string());
+        assert_eq!(value["selectedRoots"][0], "simple.ymap");
+        assert!(value["unresolved"]["catalogUsed"].is_boolean());
+        assert!(value["exportGate"]["allowedWithoutOverride"].is_boolean());
+        assert!(value["unknownGroups"].is_array());
+        assert!(value["mloAudits"].is_array());
+    }
+
+    #[test]
+    fn workspace_export_preflight_rejects_map_outside_workspace() {
+        let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/synthetic")
+            .canonicalize()
+            .expect("synthetic fixture root");
+        let workspace = fixture_root.join("stream");
+        let outside_map = fixture_root.join("simple.ymap");
+
+        let error =
+            workspace_export_preflight_report(&workspace, &[outside_map], CatalogRefs::default())
+                .unwrap_err();
+
+        assert!(error.to_string().contains("contained by workspace"));
+    }
+
+    #[test]
+    fn workspace_export_report_owns_path_resolution_and_serialization() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/synthetic/stream")
+            .canonicalize()
+            .expect("synthetic workspace");
+        let output = std::env::temp_dir().join(format!(
+            "ragelab-engine-workspace-export-{}-{}",
+            std::process::id(),
+            unix_timestamp()
+        ));
+        let _ = fs::remove_dir_all(&output);
+
+        let report = workspace_export_report(
+            &workspace,
+            &[PathBuf::from("simple.ymap")],
+            &output,
+            "simple",
+            SharedExportOptions {
+                allow_unresolved: true,
+                overwrite: false,
+            },
+            CatalogRefs::default(),
+        )
+        .expect("workspace export report");
+
+        assert_eq!(report.resource_name, "simple");
+        assert_eq!(report.selected_roots, vec!["simple.ymap"]);
+        assert_eq!(report.output.resource, output.display().to_string());
+        assert!(report.validation.valid, "{:?}", report.validation.errors);
+        assert!(Path::new(&report.output.metadata).is_file());
+        assert!(Path::new(&report.output.manifest).is_file());
+
+        let value = serde_json::to_value(&report).expect("serialize export report");
+        assert_eq!(value["resourceName"], "simple");
+        assert_eq!(value["selectedRoots"][0], "simple.ymap");
+        assert!(value["output"]["copiedFiles"].is_array());
+        assert!(value["validation"]["metadataPresent"].as_bool().unwrap());
+
+        fs::remove_dir_all(output).expect("clean synthetic workspace export");
     }
 
     #[test]
