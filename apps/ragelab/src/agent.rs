@@ -4,13 +4,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ragelab_assets::{AssetKind, WorkspaceIndex};
+use ragelab_assets::AssetKind;
 use ragelab_engine::{
-    apply_operation_document, assemble_ymap_scene, asset_capabilities, build_vanilla_catalog,
-    discover_fivem_legacy, discover_gta_v_legacy, inspect_asset, isolated_asset_spatial_context,
-    parse_operation_document, plan_operation_document, preview_asset, render_vanilla_catalog_paths,
-    validate_asset, ymap_spatial_context, EngineError, OperationError, PreviewOptions,
-    SceneAssemblyOptions, SceneManifestReport, SpatialContext, SpatialProvenance,
+    apply_operation_document, asset_capabilities, build_vanilla_catalog, discover_fivem_legacy,
+    discover_gta_v_legacy, inspect_asset, isolated_asset_spatial_context, parse_operation_document,
+    plan_operation_document, preview_asset, render_vanilla_catalog_paths, validate_asset,
+    workspace_scene_report, ymap_spatial_context, EngineError, OperationError, PreviewOptions,
+    SceneAssemblyOptions, SpatialContext, SpatialProvenance,
 };
 use ragelab_ybn::YbnCollision;
 use ragelab_ydd::YddDictionary;
@@ -427,46 +427,23 @@ pub fn scene(
     options: SceneAssemblyOptions,
     json_output: bool,
 ) -> Result<(), Box<dyn Error>> {
-    if !workspace.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("not a directory: {}", workspace.display()),
-        )
-        .into());
-    }
-
-    let workspace = workspace.to_path_buf();
-    let ymap_path = if ymap_arg.is_absolute() {
-        ymap_arg.to_path_buf()
-    } else {
-        workspace.join(ymap_arg)
-    };
-    let ymap = Ymap::from_bytes(&fs::read(&ymap_path)?).map_err(validation_error)?;
-    let index = WorkspaceIndex::scan(&workspace)?;
-    let manifest = assemble_ymap_scene(&index, &ymap_path, &ymap, options);
+    let report = workspace_scene_report(workspace, ymap_arg, options)?;
 
     if json_output {
-        print_success(
-            "scene",
-            serde_json::to_value(SceneManifestReport::from(&manifest))?,
-        )?;
+        print_success("scene", serde_json::to_value(&report)?)?;
     } else {
         println!("workspace: {}", workspace.display());
-        println!("ymap: {}", ymap_path.display());
-        println!("entities: {}", manifest.summary.total_entities);
-        println!("nodes: {}", manifest.summary.emitted_nodes);
-        println!("resolved: {}", manifest.summary.resolved_nodes);
-        println!("unresolved: {}", manifest.summary.unresolved_nodes);
-        println!("assets: {}", manifest.summary.asset_references);
+        println!("ymap: {}", report.root.path);
+        println!("entities: {}", report.summary.total_entities);
+        println!("nodes: {}", report.summary.emitted_nodes);
+        println!("resolved: {}", report.summary.resolved_nodes);
+        println!("unresolved: {}", report.summary.unresolved_nodes);
+        println!("assets: {}", report.summary.asset_references);
         println!(
             "truncated: {}",
-            if manifest.limits.truncated {
-                "yes"
-            } else {
-                "no"
-            }
+            if report.limits.truncated { "yes" } else { "no" }
         );
-        println!("warnings: {}", manifest.warnings.len());
+        println!("warnings: {}", report.warnings.len());
     }
 
     Ok(())

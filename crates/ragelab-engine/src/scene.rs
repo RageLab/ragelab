@@ -5,6 +5,7 @@
 
 use std::{
     collections::BTreeMap,
+    fs, io,
     path::{Path, PathBuf},
 };
 
@@ -384,6 +385,32 @@ pub fn assemble_ymap_scene(
     })
 }
 
+pub fn workspace_scene_report(
+    workspace: &Path,
+    ymap_path: &Path,
+    options: SceneAssemblyOptions,
+) -> Result<SceneManifestReport, io::Error> {
+    if !workspace.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("not a directory: {}", workspace.display()),
+        ));
+    }
+
+    let resolved_ymap = if ymap_path.is_absolute() {
+        ymap_path.to_path_buf()
+    } else {
+        workspace.join(ymap_path)
+    };
+    let bytes = fs::read(&resolved_ymap)?;
+    let ymap = Ymap::from_bytes(&bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    let index =
+        WorkspaceIndex::scan(workspace).map_err(|error| io::Error::other(error.to_string()))?;
+    let manifest = assemble_ymap_scene(&index, &resolved_ymap, &ymap, options);
+    Ok(SceneManifestReport::from(&manifest))
+}
+
 fn assemble_ymap_scene_with_lookup<F>(
     ymap_path: &Path,
     ymap: &Ymap,
@@ -723,6 +750,38 @@ mod tests {
             .is_some_and(|hash| hash.starts_with("0x")));
         assert_eq!(value["limits"]["maxNodes"], 100);
         assert_eq!(value["limits"]["truncated"], false);
+    }
+
+    #[test]
+    fn workspace_scene_report_owns_relative_path_scan_parse_and_limits() {
+        let workspace = synthetic_workspace();
+        let report = workspace_scene_report(
+            &workspace,
+            Path::new("simple.ymap"),
+            SceneAssemblyOptions::new(1),
+        )
+        .expect("assemble workspace scene report");
+
+        assert!(report.root.path.ends_with("simple.ymap"));
+        assert_eq!(report.summary.total_entities, 1);
+        assert_eq!(report.summary.emitted_nodes, 1);
+        assert_eq!(report.summary.resolved_nodes, 1);
+        assert_eq!(report.nodes[0].resolution, "resolved");
+        assert_eq!(report.limits.max_nodes, 1);
+        assert!(!report.limits.truncated);
+    }
+
+    #[test]
+    fn workspace_scene_report_rejects_missing_workspace() {
+        let workspace = std::env::temp_dir().join("ragelab-scene-missing-workspace");
+        let error = workspace_scene_report(
+            &workspace,
+            Path::new("simple.ymap"),
+            SceneAssemblyOptions::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
