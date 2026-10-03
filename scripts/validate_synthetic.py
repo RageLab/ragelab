@@ -54,6 +54,8 @@ def validate_ymap() -> None:
     payload = rsc7_payload(FIXTURES / "simple.ymap")
     assert struct.unpack_from("<I", payload, 0x500 + 8)[0] == joaat("simple_map")
     assert struct.unpack_from("<I", payload, 0x720 + 8)[0] == joaat("test_archetype")
+    assert struct.unpack_from("<f", payload, 0x720 + 64)[0] == 1.25
+    assert struct.unpack_from("<f", payload, 0x720 + 68)[0] == 0.75
     assert struct.unpack_from("<I", payload, 0x7A0)[0] == joaat("test_collision")
     assert struct.pack("<I", jenkins("CMapData")) in payload
     assert struct.pack("<I", jenkins("CEntityDef")) in payload

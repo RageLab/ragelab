@@ -106,6 +106,8 @@ def main() -> None:
             ("flags", 12, 0x15),
             ("position", 32, 0x33),
             ("rotation", 48, 0x34),
+            ("scaleXY", 64, 0x21),
+            ("scaleZ", 68, 0x21),
             ("parentIndex", 72, 0x14),
         ],
     )
@@ -121,6 +123,7 @@ def main() -> None:
     struct.pack_into("<II", entity, 8, joaat("test_archetype"), 0x55AA55AA)
     struct.pack_into("<fff", entity, 32, 1.0, 2.0, 3.0)
     struct.pack_into("<ffff", entity, 48, 0.0, 0.0, 0.0, 1.0)
+    struct.pack_into("<ff", entity, 64, 1.25, 0.75)
     struct.pack_into("<i", entity, 72, -1)
 
     physics = struct.pack("<I", joaat("test_collision"))

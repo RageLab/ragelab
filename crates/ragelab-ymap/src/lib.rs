@@ -29,6 +29,8 @@ pub struct YmapEntity {
     pub archetype_name: MetaHash,
     pub position: Vec3,
     pub rotation: Quat,
+    pub scale_xy: Option<f32>,
+    pub scale_z: Option<f32>,
     pub flags: u32,
     /// `None` corresponds to the common on-disk sentinel `-1`.
     pub parent_index: Option<i32>,
@@ -157,6 +159,8 @@ fn parse_entity(structure: &MetaStructureInfo, bytes: &[u8]) -> Result<YmapEntit
             z: read_f32(bytes, rotation_offset + 8)?,
             w: read_f32(bytes, rotation_offset + 12)?,
         },
+        scale_xy: read_optional_f32_field(structure, bytes, "scaleXY")?,
+        scale_z: read_optional_f32_field(structure, bytes, "scaleZ")?,
     })
 }
 
@@ -209,6 +213,18 @@ fn read_array_field(
     MetaArrayRef::parse(bytes, field_offset(structure, name)?)
 }
 
+fn read_optional_f32_field(
+    structure: &MetaStructureInfo,
+    bytes: &[u8],
+    name: &str,
+) -> Result<Option<f32>, ResourceError> {
+    let hash = MetaHash(jenkins(name));
+    let Some(field) = structure.field(hash) else {
+        return Ok(None);
+    };
+    Ok(Some(read_f32(bytes, field.data_offset)?))
+}
+
 fn read_optional_vec3_field(
     structure: &MetaStructureInfo,
     bytes: &[u8],
@@ -228,11 +244,21 @@ fn read_optional_vec3_field(
 
 #[cfg(test)]
 mod tests {
-    use super::nonzero_hash;
+    use super::{nonzero_hash, Ymap};
+
+    const SIMPLE_YMAP: &[u8] = include_bytes!("../../../fixtures/synthetic/simple.ymap");
 
     #[test]
     fn zero_hash_is_none() {
         assert_eq!(nonzero_hash(0), None);
         assert!(nonzero_hash(1).is_some());
+    }
+
+    #[test]
+    fn synthetic_entity_exposes_legacy_scale_fields() {
+        let ymap = Ymap::from_bytes(SIMPLE_YMAP).expect("synthetic YMAP should parse");
+        let entity = &ymap.entities[0];
+        assert_eq!(entity.scale_xy, Some(1.25));
+        assert_eq!(entity.scale_z, Some(0.75));
     }
 }

@@ -704,7 +704,7 @@ mod tests {
         assert_eq!(node.resolution, SceneResolutionState::Resolved);
         assert_eq!(node.asset_kind, Some(AssetKind::Ydr));
         let transform = node.transform.expect("entity transform");
-        assert_eq!(transform.scale, None);
+        assert_eq!(transform.scale, Some([1.25, 1.25, 0.75]));
         assert_eq!(transform.translation, [1.0, 2.0, 3.0]);
 
         let collision = node
@@ -744,6 +744,10 @@ mod tests {
         assert_eq!(value["summary"]["resolvedNodes"], 1);
         assert_eq!(value["nodes"][0]["assetKind"], "YDR");
         assert_eq!(value["nodes"][0]["resolution"], "resolved");
+        assert_eq!(
+            value["nodes"][0]["transform"]["scale"],
+            serde_json::json!([1.25, 1.25, 0.75])
+        );
         assert_eq!(value["nodes"][0]["collision"]["state"], "localOnly");
         assert!(value["nodes"][0]["archetypeHash"]
             .as_str()

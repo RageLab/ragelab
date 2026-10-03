@@ -342,7 +342,25 @@ pub fn ymap_entity_spatial_context(
         entity.rotation.z,
         entity.rotation.w,
     ];
-    let Some(world_transform) = SpatialTransform::new(translation, rotation, None) else {
+    let scale = match (entity.scale_xy, entity.scale_z) {
+        (Some(scale_xy), Some(scale_z)) => Some([scale_xy, scale_xy, scale_z]),
+        (None, None) => None,
+        _ => {
+            return SpatialContext {
+                classification: SpatialClassification::Unresolved,
+                world_transform: None,
+                world_center: None,
+                world_bounds: None,
+                provenance,
+                context_asset: Some(context_asset),
+                reason: Some(SpatialReason {
+                    code: SpatialReasonCode::InvalidWorldTransform,
+                    message: "YMAP entity placement exposes incomplete scaleXY/scaleZ data and cannot be located safely".into(),
+                }),
+            };
+        }
+    };
+    let Some(world_transform) = SpatialTransform::new(translation, rotation, scale) else {
         return SpatialContext {
             classification: SpatialClassification::Unresolved,
             world_transform: None,
@@ -484,7 +502,7 @@ mod tests {
             Some(SpatialTransform {
                 translation: [100.0, 200.0, 30.0],
                 rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: None,
+                scale: Some([1.25, 1.25, 0.75]),
             })
         );
         assert_eq!(
@@ -493,6 +511,20 @@ mod tests {
                 entity_index: 7,
                 archetype_hash: 0xEF3D_BDA5,
             }
+        );
+    }
+
+    #[test]
+    fn incomplete_entity_scale_is_explicitly_unresolved() {
+        let mut entity = entity([1.0, 2.0, 3.0]);
+        entity.scale_z = None;
+
+        let context = ymap_entity_spatial_context(PathBuf::from("stream/map.ymap"), 0, &entity);
+        assert_eq!(context.classification, SpatialClassification::Unresolved);
+        assert!(context.world_transform.is_none());
+        assert_eq!(
+            context.reason.as_ref().map(|reason| reason.code),
+            Some(SpatialReasonCode::InvalidWorldTransform)
         );
     }
 

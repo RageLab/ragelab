@@ -40,6 +40,8 @@ Legacy YBN preview reports renderer-neutral collision data:
 
 YBN preview is always `localOnly`. The normalized coordinates already include the transforms encoded inside the collision resource, but RageLab does not infer any placement of an isolated YBN in world space.
 
+When a preview is placed through an engine-owned YMAP `SceneManifest`, world placement comes only from the parsed entity transform. Legacy `CEntityDef.scaleXY` and `scaleZ` are decoded and propagated as `[scaleXY, scaleXY, scaleZ]`. If only one scale component is present, RageLab marks that entity placement unresolved rather than inferring the missing value.
+
 The mesh position array is all-or-nothing. If the complete global position array exceeds `--max-vertices`, positions are omitted and all mesh indices are also omitted. This prevents emitted indices from referring to vertices that are absent from the response.
 
 The `--max-primitives` budget is shared by mesh primitive groups and shape primitives. Mesh groups consume the budget first, followed by shape primitives.

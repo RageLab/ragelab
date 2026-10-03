@@ -57,7 +57,7 @@ It does not own presentation or transport concerns.
 
 This includes declarative operation parsing, planning, write eligibility orchestration, non-destructive output policy, post-write semantic verification, the public asset service used for type detection/inspection/validation/capability discovery, the bounded renderer-neutral preview service for Legacy YDR/YDD/YBN, and YMAP scene assembly plus its serialized `SceneManifestReport`. These services return serializable Rust reports so CLI, Studio, and future MCP adapters consume the same domain policy without reparsing assets, duplicating scene resolution vocabulary, or reimplementing truncation rules independently.
 
-Format crates remain authoritative for binary-layout safety and writer capability decisions. `ragelab-engine` composes those typed decisions into transport-neutral product reports and operations.
+Format crates remain authoritative for binary-layout safety and writer capability decisions. `ragelab-engine` composes those typed decisions into transport-neutral product reports and operations. For Legacy YMAP placement, `ragelab-ymap` also exposes parsed `scaleXY`/`scaleZ`; the engine propagates those values into `SpatialTransform` and fails closed on incomplete scale evidence.
 
 If a rule must behave identically in the CLI, an MCP server, and RageLab Studio, it belongs at or below this layer.
 
