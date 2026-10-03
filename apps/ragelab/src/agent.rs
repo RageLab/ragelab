@@ -9,8 +9,8 @@ use ragelab_engine::{
     apply_operation_document, asset_capabilities, build_vanilla_catalog, discover_fivem_legacy,
     discover_gta_v_legacy, inspect_asset, isolated_asset_spatial_context, parse_operation_document,
     plan_operation_document, preview_asset, render_vanilla_catalog_paths, validate_asset,
-    workspace_scene_report, ymap_spatial_context, EngineError, OperationError, PreviewOptions,
-    SceneAssemblyOptions, SpatialContext, SpatialProvenance,
+    workspace_scene_report_with_fallbacks, ymap_spatial_context, EngineError, OperationError,
+    PreviewOptions, SceneAssemblyOptions, SpatialContext, SpatialProvenance,
 };
 use ragelab_ybn::YbnCollision;
 use ragelab_ydd::YddDictionary;
@@ -424,10 +424,12 @@ pub fn spatial(path: &Path, json_output: bool) -> Result<(), Box<dyn Error>> {
 pub fn scene(
     workspace: &Path,
     ymap_arg: &Path,
+    fallback_roots: &[PathBuf],
     options: SceneAssemblyOptions,
     json_output: bool,
 ) -> Result<(), Box<dyn Error>> {
-    let report = workspace_scene_report(workspace, ymap_arg, options)?;
+    let report =
+        workspace_scene_report_with_fallbacks(workspace, ymap_arg, fallback_roots, options)?;
 
     if json_output {
         print_success("scene", serde_json::to_value(&report)?)?;
@@ -452,7 +454,7 @@ pub fn scene(
 pub fn parse_scene_args(
     args: impl Iterator<Item = String>,
     usage: &str,
-) -> Result<(PathBuf, PathBuf, SceneAssemblyOptions, bool), io::Error> {
+) -> Result<(PathBuf, PathBuf, Vec<PathBuf>, SceneAssemblyOptions, bool), io::Error> {
     let mut args = args;
     let workspace = args
         .next()
@@ -466,10 +468,17 @@ pub fn parse_scene_args(
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
 
     let mut json_output = false;
+    let mut fallback_roots = Vec::new();
     let mut max_nodes = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--json" if !json_output => json_output = true,
+            "--fallback-root" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+                fallback_roots.push(PathBuf::from(value));
+            }
             "--max-nodes" if max_nodes.is_none() => {
                 let value = args
                     .next()
@@ -500,6 +509,7 @@ pub fn parse_scene_args(
     Ok((
         workspace,
         ymap,
+        fallback_roots,
         max_nodes.map(SceneAssemblyOptions::new).unwrap_or_default(),
         json_output,
     ))

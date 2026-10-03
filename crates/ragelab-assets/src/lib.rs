@@ -604,6 +604,63 @@ impl WorkspaceIndex {
         Ok(index)
     }
 
+    /// Scan a primary workspace plus ordered read-only fallback roots.
+    ///
+    /// The primary workspace always wins for an indexed identity. A fallback
+    /// contributes a file, archetype provider, or metadata record only when
+    /// no higher-priority root already defines that identity. Ambiguity inside
+    /// one root is preserved so the existing fail-closed resolver contract
+    /// still applies.
+    pub fn scan_with_fallbacks(
+        root: impl AsRef<Path>,
+        fallback_roots: impl IntoIterator<Item = impl AsRef<Path>>,
+    ) -> Result<Self, WorkspaceError> {
+        let mut index = Self::scan(root)?;
+        for fallback_root in fallback_roots {
+            let fallback = Self::scan(fallback_root)?;
+            index.merge_fallback(fallback);
+        }
+        Ok(index)
+    }
+
+    fn merge_fallback(&mut self, fallback: Self) {
+        let fallback_root = fallback.root.clone();
+
+        for (key, paths) in fallback.files {
+            self.files.entry(key).or_insert(paths);
+        }
+        for (hash, providers) in fallback.archetype_providers {
+            self.archetype_providers.entry(hash).or_insert(providers);
+        }
+        for (hash, records) in fallback.ytyp_records {
+            self.ytyp_records.entry(hash).or_insert(records);
+        }
+        for (hash, record) in fallback.source_map_dependencies {
+            self.source_map_dependencies.entry(hash).or_insert(record);
+        }
+        for (hash, record) in fallback.source_ytyp_dependencies {
+            self.source_ytyp_dependencies.entry(hash).or_insert(record);
+        }
+        for (hash, bounds) in fallback.source_interior_bounds {
+            self.source_interior_bounds.entry(hash).or_insert(bounds);
+        }
+        for (parent_hash, children) in fallback.ymap_children {
+            let target = self.ymap_children.entry(parent_hash).or_default();
+            for (child_hash, paths) in children {
+                target.entry(child_hash).or_insert(paths);
+            }
+        }
+        for (child_hash, records) in fallback.texture_parents {
+            self.texture_parents.entry(child_hash).or_insert(records);
+        }
+        self.warnings.extend(
+            fallback
+                .warnings
+                .into_iter()
+                .map(|warning| format!("fallback {}: {warning}", fallback_root.display())),
+        );
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }

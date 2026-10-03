@@ -408,6 +408,43 @@ fn workspace_scene_json_exposes_resolved_assets_and_local_collision() {
 }
 
 #[test]
+fn workspace_scene_accepts_read_only_fallback_root() {
+    let root = temp_root("scene-fallback");
+    let primary = root.join("primary");
+    let fallback = root.join("fallback");
+    fs::create_dir_all(&primary).unwrap();
+    fs::create_dir_all(&fallback).unwrap();
+
+    fs::copy(fixture("stream/simple.ymap"), primary.join("simple.ymap")).unwrap();
+    for name in ["simple.ytyp", "test_drawable.ydr", "test_collision.ybn"] {
+        fs::copy(fixture(&format!("stream/{name}")), fallback.join(name)).unwrap();
+    }
+
+    let output = binary()
+        .args([
+            "workspace",
+            "scene",
+            primary.to_str().unwrap(),
+            "simple.ymap",
+            "--fallback-root",
+            fallback.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("ragelab workspace scene with fallback should run");
+
+    assert!(output.status.success());
+    let body = stdout_json(&output);
+    assert_eq!(body["data"]["summary"]["resolvedNodes"], 1);
+    let asset_path = body["data"]["assets"][0]["path"]
+        .as_str()
+        .expect("resolved asset path");
+    assert!(PathBuf::from(asset_path).starts_with(&fallback));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn namespaced_structured_errors_use_canonical_command_id() {
     let output = binary()
         .args([

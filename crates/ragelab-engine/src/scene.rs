@@ -390,11 +390,31 @@ pub fn workspace_scene_report(
     ymap_path: &Path,
     options: SceneAssemblyOptions,
 ) -> Result<SceneManifestReport, io::Error> {
+    workspace_scene_report_with_fallbacks(workspace, ymap_path, &[], options)
+}
+
+pub fn workspace_scene_report_with_fallbacks(
+    workspace: &Path,
+    ymap_path: &Path,
+    fallback_roots: &[PathBuf],
+    options: SceneAssemblyOptions,
+) -> Result<SceneManifestReport, io::Error> {
     if !workspace.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("not a directory: {}", workspace.display()),
         ));
+    }
+    for fallback_root in fallback_roots {
+        if !fallback_root.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "fallback root is not a directory: {}",
+                    fallback_root.display()
+                ),
+            ));
+        }
     }
 
     let resolved_ymap = if ymap_path.is_absolute() {
@@ -405,8 +425,8 @@ pub fn workspace_scene_report(
     let bytes = fs::read(&resolved_ymap)?;
     let ymap = Ymap::from_bytes(&bytes)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-    let index =
-        WorkspaceIndex::scan(workspace).map_err(|error| io::Error::other(error.to_string()))?;
+    let index = WorkspaceIndex::scan_with_fallbacks(workspace, fallback_roots)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let manifest = assemble_ymap_scene(&index, &resolved_ymap, &ymap, options);
     Ok(SceneManifestReport::from(&manifest))
 }
@@ -773,6 +793,58 @@ mod tests {
         assert_eq!(report.nodes[0].resolution, "resolved");
         assert_eq!(report.limits.max_nodes, 1);
         assert!(!report.limits.truncated);
+    }
+
+    #[test]
+    fn workspace_scene_report_uses_fallbacks_and_preserves_primary_precedence() {
+        let source = synthetic_workspace();
+        let temporary =
+            std::env::temp_dir().join(format!("ragelab-scene-fallback-{}", std::process::id()));
+        let primary = temporary.join("primary");
+        let fallback = temporary.join("fallback");
+        let _ = fs::remove_dir_all(&temporary);
+        fs::create_dir_all(&primary).expect("create primary workspace");
+        fs::create_dir_all(&fallback).expect("create fallback workspace");
+
+        fs::copy(source.join("simple.ymap"), primary.join("simple.ymap"))
+            .expect("copy YMAP to primary");
+        for name in ["simple.ytyp", "test_drawable.ydr", "test_collision.ybn"] {
+            fs::copy(source.join(name), fallback.join(name)).expect("copy fallback asset");
+        }
+
+        let fallback_roots = vec![fallback.clone()];
+        let report = workspace_scene_report_with_fallbacks(
+            &primary,
+            Path::new("simple.ymap"),
+            &fallback_roots,
+            SceneAssemblyOptions::default(),
+        )
+        .expect("assemble scene from fallback");
+
+        assert_eq!(report.summary.resolved_nodes, 1);
+        assert!(
+            Path::new(&report.assets[0].path).starts_with(&fallback),
+            "fallback should supply the drawable while primary is missing it"
+        );
+
+        for name in ["simple.ytyp", "test_drawable.ydr", "test_collision.ybn"] {
+            fs::copy(source.join(name), primary.join(name)).expect("copy primary asset");
+        }
+        let report = workspace_scene_report_with_fallbacks(
+            &primary,
+            Path::new("simple.ymap"),
+            &fallback_roots,
+            SceneAssemblyOptions::default(),
+        )
+        .expect("assemble scene with primary override");
+
+        assert_eq!(report.summary.resolved_nodes, 1);
+        assert!(
+            Path::new(&report.assets[0].path).starts_with(&primary),
+            "primary workspace must override the fallback for the same identity"
+        );
+
+        fs::remove_dir_all(&temporary).expect("remove fallback fixture");
     }
 
     #[test]

@@ -92,9 +92,10 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn Error>> {
         }
         "scene" => {
             const USAGE: &str =
-                "usage: ragelab workspace scene <directory> <file.ymap> [--max-nodes <n>] [--json]";
-            let (workspace, ymap, options, json) = agent::parse_scene_args(args, USAGE)?;
-            agent::scene(&workspace, &ymap, options, json)?;
+                "usage: ragelab workspace scene <directory> <file.ymap> [--fallback-root <directory>]... [--max-nodes <n>] [--json]";
+            let (workspace, ymap, fallback_roots, options, json) =
+                agent::parse_scene_args(args, USAGE)?;
+            agent::scene(&workspace, &ymap, &fallback_roots, options, json)?;
         }
         "plan" => {
             let (path, json) =
@@ -708,7 +709,7 @@ ragelab workspace preflight <directory> <file.ymap> [more.ymap ...] [catalog opt
 ragelab workspace mlo-audit <directory> <file.ymap> [catalog options]\n  \
 ragelab workspace extract <directory> <file.ymap> <output> [--allow-unresolved] [--overwrite]\n  \
 ragelab workspace export <directory> <file.ymap> [more.ymap ...] --output <directory> [--resource-name <name>] [--allow-unresolved] [--overwrite] [catalog options] [--json]\n  \
-ragelab workspace scene <directory> <file.ymap> [--max-nodes <n>] [--json]\n  \
+ragelab workspace scene <directory> <file.ymap> [--fallback-root <directory>]... [--max-nodes <n>] [--json]\n  \
 ragelab gta discover [--json]\n  \
 ragelab fivem discover [--json]\n  \
 ragelab gta catalog <directory> --output <paths.txt> [--overwrite] [--json]\n  \
