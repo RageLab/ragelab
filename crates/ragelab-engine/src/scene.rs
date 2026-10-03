@@ -13,6 +13,7 @@ use ragelab_assets::{
     SceneCollisionLookup, SceneCollisionLookupErrorCode, SceneResolvedAsset, WorkspaceIndex,
 };
 use ragelab_ymap::Ymap;
+use serde::Serialize;
 
 use crate::{ymap_entity_spatial_context, SpatialTransform};
 
@@ -80,6 +81,15 @@ pub enum SceneResolutionState {
     Unresolved,
 }
 
+impl SceneResolutionState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Resolved => "resolved",
+            Self::Unresolved => "unresolved",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SceneResolutionReason {
     pub code: SceneResolutionReasonCode,
@@ -98,6 +108,23 @@ pub enum SceneResolutionReasonCode {
     DictionaryEntryMissing,
     UnsupportedAssetRelation,
     InvalidWorldTransform,
+}
+
+impl SceneResolutionReasonCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProviderMissing => "providerMissing",
+            Self::ProviderAmbiguous => "providerAmbiguous",
+            Self::AssetNameMissing => "assetNameMissing",
+            Self::DrawableDictionaryMissing => "drawableDictionaryMissing",
+            Self::AssetMissing => "assetMissing",
+            Self::AssetAmbiguous => "assetAmbiguous",
+            Self::DictionaryUnreadable => "dictionaryUnreadable",
+            Self::DictionaryEntryMissing => "dictionaryEntryMissing",
+            Self::UnsupportedAssetRelation => "unsupportedAssetRelation",
+            Self::InvalidWorldTransform => "invalidWorldTransform",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +159,15 @@ pub enum SceneCollisionState {
     Unresolved,
 }
 
+impl SceneCollisionState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalOnly => "localOnly",
+            Self::Unresolved => "unresolved",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SceneSummary {
     pub total_entities: usize,
@@ -146,6 +182,187 @@ pub struct SceneLimits {
     pub max_nodes: usize,
     pub truncated: bool,
     pub omitted_entities: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneManifestReport {
+    pub schema_version: u32,
+    pub root: SceneRootReport,
+    pub nodes: Vec<SceneNodeReport>,
+    pub assets: Vec<SceneAssetReferenceReport>,
+    pub summary: SceneSummaryReport,
+    pub warnings: Vec<String>,
+    pub limits: SceneLimitsReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneRootReport {
+    pub path: String,
+    pub name_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneNodeReport {
+    pub index: usize,
+    pub source_ymap: String,
+    pub entity_index: usize,
+    pub archetype_hash: String,
+    pub provider_path: Option<String>,
+    pub asset_ref: Option<usize>,
+    pub asset_kind: Option<String>,
+    pub transform: Option<SceneTransformReport>,
+    pub resolution: String,
+    pub reason: Option<SceneResolutionReasonReport>,
+    pub collision: Option<SceneCollisionRelationshipReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneTransformReport {
+    pub translation: [f32; 3],
+    pub rotation: [f32; 4],
+    pub scale: Option<[f32; 3]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneResolutionReasonReport {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneCollisionRelationshipReport {
+    pub hash: String,
+    pub asset_ref: Option<usize>,
+    pub state: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneAssetReferenceReport {
+    pub id: usize,
+    pub kind: String,
+    pub hash: String,
+    pub path: String,
+    pub selector: Option<SceneAssetSelectorReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneAssetSelectorReport {
+    #[serde(rename = "type")]
+    pub selector_type: String,
+    pub index: usize,
+    pub name_hash: String,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneSummaryReport {
+    pub total_entities: usize,
+    pub emitted_nodes: usize,
+    pub resolved_nodes: usize,
+    pub unresolved_nodes: usize,
+    pub asset_references: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneLimitsReport {
+    pub max_nodes: usize,
+    pub truncated: bool,
+    pub omitted_entities: usize,
+}
+
+impl From<&SceneManifest> for SceneManifestReport {
+    fn from(manifest: &SceneManifest) -> Self {
+        Self {
+            schema_version: manifest.schema_version,
+            root: SceneRootReport {
+                path: manifest.root.path.display().to_string(),
+                name_hash: manifest.root.name_hash.map(|hash| format!("0x{hash:08X}")),
+            },
+            nodes: manifest
+                .nodes
+                .iter()
+                .map(|node| SceneNodeReport {
+                    index: node.index,
+                    source_ymap: node.source_ymap.display().to_string(),
+                    entity_index: node.entity_index,
+                    archetype_hash: format!("0x{:08X}", node.archetype_hash),
+                    provider_path: node
+                        .provider_path
+                        .as_ref()
+                        .map(|path| path.display().to_string()),
+                    asset_ref: node.asset_ref,
+                    asset_kind: node.asset_kind.map(|kind| kind.to_string()),
+                    transform: node.transform.map(|transform| SceneTransformReport {
+                        translation: transform.translation,
+                        rotation: transform.rotation,
+                        scale: transform.scale,
+                    }),
+                    resolution: node.resolution.as_str().to_string(),
+                    reason: node
+                        .reason
+                        .as_ref()
+                        .map(|reason| SceneResolutionReasonReport {
+                            code: reason.code.as_str().to_string(),
+                            message: reason.message.clone(),
+                        }),
+                    collision: node.collision.as_ref().map(|collision| {
+                        SceneCollisionRelationshipReport {
+                            hash: format!("0x{:08X}", collision.hash),
+                            asset_ref: collision.asset_ref,
+                            state: collision.state.as_str().to_string(),
+                            reason: collision.reason.clone(),
+                        }
+                    }),
+                })
+                .collect(),
+            assets: manifest
+                .assets
+                .iter()
+                .map(|asset| SceneAssetReferenceReport {
+                    id: asset.id,
+                    kind: asset.kind.to_string(),
+                    hash: format!("0x{:08X}", asset.hash),
+                    path: asset.path.display().to_string(),
+                    selector: asset.selector.as_ref().map(|selector| match selector {
+                        SceneAssetSelector::YddDrawable {
+                            index,
+                            name_hash,
+                            name,
+                        } => SceneAssetSelectorReport {
+                            selector_type: "yddDrawable".into(),
+                            index: *index,
+                            name_hash: format!("0x{name_hash:08X}"),
+                            name: name.clone(),
+                        },
+                    }),
+                })
+                .collect(),
+            summary: SceneSummaryReport {
+                total_entities: manifest.summary.total_entities,
+                emitted_nodes: manifest.summary.emitted_nodes,
+                resolved_nodes: manifest.summary.resolved_nodes,
+                unresolved_nodes: manifest.summary.unresolved_nodes,
+                asset_references: manifest.summary.asset_references,
+            },
+            warnings: manifest.warnings.clone(),
+            limits: SceneLimitsReport {
+                max_nodes: manifest.limits.max_nodes,
+                truncated: manifest.limits.truncated,
+                omitted_entities: manifest.limits.omitted_entities,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -475,6 +692,37 @@ mod tests {
             "collision must not become a world node"
         );
         assert_eq!(manifest.assets.len(), 2, "YDR + dependency-only YBN");
+    }
+
+    #[test]
+    fn serialized_manifest_report_preserves_cli_scene_contract() {
+        let workspace = synthetic_workspace();
+        let index = WorkspaceIndex::scan(&workspace).expect("scan synthetic workspace");
+        let ymap = parsed_map();
+        let manifest = assemble_ymap_scene(
+            &index,
+            &workspace.join("simple.ymap"),
+            &ymap,
+            SceneAssemblyOptions::new(100),
+        );
+
+        let report = SceneManifestReport::from(&manifest);
+        let value = serde_json::to_value(report).expect("serialize scene report");
+
+        assert_eq!(value["schemaVersion"], 1);
+        assert!(value["root"]["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("simple.ymap")));
+        assert_eq!(value["summary"]["totalEntities"], 1);
+        assert_eq!(value["summary"]["resolvedNodes"], 1);
+        assert_eq!(value["nodes"][0]["assetKind"], "YDR");
+        assert_eq!(value["nodes"][0]["resolution"], "resolved");
+        assert_eq!(value["nodes"][0]["collision"]["state"], "localOnly");
+        assert!(value["nodes"][0]["archetypeHash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("0x")));
+        assert_eq!(value["limits"]["maxNodes"], 100);
+        assert_eq!(value["limits"]["truncated"], false);
     }
 
     #[test]

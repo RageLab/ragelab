@@ -55,7 +55,7 @@ It does not own presentation or transport concerns.
 
 `ragelab-engine` owns transport-neutral product operations and policies shared by every adapter.
 
-This includes declarative operation parsing, planning, write eligibility orchestration, non-destructive output policy, post-write semantic verification, the public asset service used for type detection/inspection/validation/capability discovery, and the bounded renderer-neutral preview service for Legacy YDR/YDD/YBN. These services return serializable Rust reports so CLI, Studio, and future MCP adapters consume the same domain policy without reparsing assets or reimplementing truncation rules independently.
+This includes declarative operation parsing, planning, write eligibility orchestration, non-destructive output policy, post-write semantic verification, the public asset service used for type detection/inspection/validation/capability discovery, the bounded renderer-neutral preview service for Legacy YDR/YDD/YBN, and YMAP scene assembly plus its serialized `SceneManifestReport`. These services return serializable Rust reports so CLI, Studio, and future MCP adapters consume the same domain policy without reparsing assets, duplicating scene resolution vocabulary, or reimplementing truncation rules independently.
 
 Format crates remain authoritative for binary-layout safety and writer capability decisions. `ragelab-engine` composes those typed decisions into transport-neutral product reports and operations.
 

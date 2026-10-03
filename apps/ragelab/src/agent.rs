@@ -10,8 +10,7 @@ use ragelab_engine::{
     discover_fivem_legacy, discover_gta_v_legacy, inspect_asset, isolated_asset_spatial_context,
     parse_operation_document, plan_operation_document, preview_asset, render_vanilla_catalog_paths,
     validate_asset, ymap_spatial_context, EngineError, OperationError, PreviewOptions,
-    SceneAssemblyOptions, SceneAssetSelector, SceneCollisionState, SceneManifest,
-    SceneResolutionReasonCode, SceneResolutionState, SpatialContext, SpatialProvenance,
+    SceneAssemblyOptions, SceneManifestReport, SpatialContext, SpatialProvenance,
 };
 use ragelab_ybn::YbnCollision;
 use ragelab_ydd::YddDictionary;
@@ -447,7 +446,10 @@ pub fn scene(
     let manifest = assemble_ymap_scene(&index, &ymap_path, &ymap, options);
 
     if json_output {
-        print_success("scene", scene_manifest_json(&manifest))?;
+        print_success(
+            "scene",
+            serde_json::to_value(SceneManifestReport::from(&manifest))?,
+        )?;
     } else {
         println!("workspace: {}", workspace.display());
         println!("ymap: {}", ymap_path.display());
@@ -576,135 +578,6 @@ fn spatial_provenance_json(provenance: &SpatialProvenance) -> Value {
             "archetypeHash": format!("0x{archetype_hash:08X}"),
         }),
         _ => json!({ "kind": provenance.as_str() }),
-    }
-}
-
-fn scene_manifest_json(manifest: &SceneManifest) -> Value {
-    let nodes = manifest
-        .nodes
-        .iter()
-        .map(|node| {
-            let transform = node.transform.map(|transform| {
-                json!({
-                    "translation": transform.translation,
-                    "rotation": transform.rotation,
-                    "scale": transform.scale,
-                })
-            });
-            let reason = node.reason.as_ref().map(|reason| {
-                json!({
-                    "code": scene_reason_code(reason.code),
-                    "message": reason.message,
-                })
-            });
-            let collision = node.collision.as_ref().map(|collision| {
-                json!({
-                    "hash": format!("0x{:08X}", collision.hash),
-                    "assetRef": collision.asset_ref,
-                    "state": scene_collision_state(collision.state),
-                    "reason": collision.reason,
-                })
-            });
-
-            json!({
-                "index": node.index,
-                "sourceYmap": node.source_ymap.display().to_string(),
-                "entityIndex": node.entity_index,
-                "archetypeHash": format!("0x{:08X}", node.archetype_hash),
-                "providerPath": node
-                    .provider_path
-                    .as_ref()
-                    .map(|path| path.display().to_string()),
-                "assetRef": node.asset_ref,
-                "assetKind": node.asset_kind.map(|kind| kind.to_string()),
-                "transform": transform,
-                "resolution": scene_resolution_state(node.resolution),
-                "reason": reason,
-                "collision": collision,
-            })
-        })
-        .collect::<Vec<_>>();
-
-    let assets = manifest
-        .assets
-        .iter()
-        .map(|asset| {
-            let selector = asset.selector.as_ref().map(|selector| match selector {
-                SceneAssetSelector::YddDrawable {
-                    index,
-                    name_hash,
-                    name,
-                } => json!({
-                    "type": "yddDrawable",
-                    "index": index,
-                    "nameHash": format!("0x{name_hash:08X}"),
-                    "name": name,
-                }),
-            });
-
-            json!({
-                "id": asset.id,
-                "kind": asset.kind.to_string(),
-                "hash": format!("0x{:08X}", asset.hash),
-                "path": asset.path.display().to_string(),
-                "selector": selector,
-            })
-        })
-        .collect::<Vec<_>>();
-
-    json!({
-        "schemaVersion": manifest.schema_version,
-        "root": {
-            "path": manifest.root.path.display().to_string(),
-            "nameHash": manifest
-                .root
-                .name_hash
-                .map(|hash| format!("0x{hash:08X}")),
-        },
-        "nodes": nodes,
-        "assets": assets,
-        "summary": {
-            "totalEntities": manifest.summary.total_entities,
-            "emittedNodes": manifest.summary.emitted_nodes,
-            "resolvedNodes": manifest.summary.resolved_nodes,
-            "unresolvedNodes": manifest.summary.unresolved_nodes,
-            "assetReferences": manifest.summary.asset_references,
-        },
-        "warnings": manifest.warnings,
-        "limits": {
-            "maxNodes": manifest.limits.max_nodes,
-            "truncated": manifest.limits.truncated,
-            "omittedEntities": manifest.limits.omitted_entities,
-        },
-    })
-}
-
-fn scene_resolution_state(state: SceneResolutionState) -> &'static str {
-    match state {
-        SceneResolutionState::Resolved => "resolved",
-        SceneResolutionState::Unresolved => "unresolved",
-    }
-}
-
-fn scene_collision_state(state: SceneCollisionState) -> &'static str {
-    match state {
-        SceneCollisionState::LocalOnly => "localOnly",
-        SceneCollisionState::Unresolved => "unresolved",
-    }
-}
-
-fn scene_reason_code(code: SceneResolutionReasonCode) -> &'static str {
-    match code {
-        SceneResolutionReasonCode::ProviderMissing => "providerMissing",
-        SceneResolutionReasonCode::ProviderAmbiguous => "providerAmbiguous",
-        SceneResolutionReasonCode::AssetNameMissing => "assetNameMissing",
-        SceneResolutionReasonCode::DrawableDictionaryMissing => "drawableDictionaryMissing",
-        SceneResolutionReasonCode::AssetMissing => "assetMissing",
-        SceneResolutionReasonCode::AssetAmbiguous => "assetAmbiguous",
-        SceneResolutionReasonCode::DictionaryUnreadable => "dictionaryUnreadable",
-        SceneResolutionReasonCode::DictionaryEntryMissing => "dictionaryEntryMissing",
-        SceneResolutionReasonCode::UnsupportedAssetRelation => "unsupportedAssetRelation",
-        SceneResolutionReasonCode::InvalidWorldTransform => "invalidWorldTransform",
     }
 }
 
