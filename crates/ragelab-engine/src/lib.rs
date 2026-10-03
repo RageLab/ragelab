@@ -18,11 +18,13 @@ use ragelab_hash::joaat;
 use ragelab_ymf::{ManifestFlags, Ymf};
 use serde::{Deserialize, Serialize};
 
+mod asset;
 mod catalog;
 mod discovery;
 mod operations;
 mod scene;
 mod spatial;
+pub use asset::*;
 pub use catalog::*;
 pub use discovery::*;
 pub use operations::*;

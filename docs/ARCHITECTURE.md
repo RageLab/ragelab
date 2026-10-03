@@ -55,7 +55,9 @@ It does not own presentation or transport concerns.
 
 `ragelab-engine` owns transport-neutral product operations and policies shared by every adapter.
 
-This includes declarative operation parsing, planning, write eligibility orchestration, non-destructive output policy, and post-write semantic verification. Format crates remain authoritative for binary-layout safety and writer capability decisions.
+This includes declarative operation parsing, planning, write eligibility orchestration, non-destructive output policy, post-write semantic verification, and the public asset service used for type detection, inspection summaries, validation dispatch, and evidence-backed capability discovery. The asset service returns serializable Rust reports so CLI, Studio, and future MCP adapters consume the same domain policy without reparsing assets independently.
+
+Format crates remain authoritative for binary-layout safety and writer capability decisions. `ragelab-engine` composes those typed decisions into transport-neutral product reports and operations.
 
 If a rule must behave identically in the CLI, an MCP server, and RageLab Studio, it belongs at or below this layer.
 
