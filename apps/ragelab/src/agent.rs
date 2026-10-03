@@ -6,16 +6,16 @@ use std::{
 
 use ragelab_assets::{AssetKind, WorkspaceIndex};
 use ragelab_engine::{
-    apply_operation_document, assemble_ymap_scene, asset_capabilities, asset_type_name,
-    build_vanilla_catalog, discover_fivem_legacy, discover_gta_v_legacy, inspect_asset,
-    isolated_asset_spatial_context, parse_operation_document, plan_operation_document,
-    render_vanilla_catalog_paths, validate_asset, ymap_spatial_context, EngineError,
-    OperationError, SceneAssemblyOptions, SceneAssetSelector, SceneCollisionState, SceneManifest,
+    apply_operation_document, assemble_ymap_scene, asset_capabilities, build_vanilla_catalog,
+    discover_fivem_legacy, discover_gta_v_legacy, inspect_asset, isolated_asset_spatial_context,
+    parse_operation_document, plan_operation_document, preview_asset, render_vanilla_catalog_paths,
+    validate_asset, ymap_spatial_context, EngineError, OperationError, PreviewOptions,
+    SceneAssemblyOptions, SceneAssetSelector, SceneCollisionState, SceneManifest,
     SceneResolutionReasonCode, SceneResolutionState, SpatialContext, SpatialProvenance,
 };
-use ragelab_ybn::{CollisionShape, YbnCollision};
+use ragelab_ybn::YbnCollision;
 use ragelab_ydd::YddDictionary;
-use ragelab_ydr::{YdrDocument, YdrModel};
+use ragelab_ydr::YdrDocument;
 use ragelab_ymap::Ymap;
 use ragelab_ytd::Ytd;
 use ragelab_ytyp::Ytyp;
@@ -222,49 +222,6 @@ pub fn capabilities(path: &Path, json_output: bool) -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-const DEFAULT_PREVIEW_MAX_PRIMITIVES: usize = 64;
-const DEFAULT_PREVIEW_MAX_VERTICES: usize = 10_000;
-const DEFAULT_PREVIEW_MAX_INDICES: usize = 30_000;
-const DEFAULT_PREVIEW_MAX_SHADERS: usize = 128;
-const DEFAULT_PREVIEW_MAX_TEXTURE_REFERENCES: usize = 512;
-const DEFAULT_PREVIEW_MAX_CHILDREN: usize = 256;
-const DEFAULT_PREVIEW_MAX_MATERIALS: usize = 512;
-
-const HARD_PREVIEW_MAX_PRIMITIVES: usize = 512;
-const HARD_PREVIEW_MAX_VERTICES: usize = 100_000;
-const HARD_PREVIEW_MAX_INDICES: usize = 300_000;
-const HARD_PREVIEW_MAX_SHADERS: usize = 1_024;
-const HARD_PREVIEW_MAX_TEXTURE_REFERENCES: usize = 4_096;
-const HARD_PREVIEW_MAX_CHILDREN: usize = 4_096;
-const HARD_PREVIEW_MAX_MATERIALS: usize = 8_192;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PreviewOptions {
-    pub drawable_index: Option<usize>,
-    pub max_primitives: usize,
-    pub max_vertices: usize,
-    pub max_indices: usize,
-    pub max_shaders: usize,
-    pub max_texture_references: usize,
-    pub max_children: usize,
-    pub max_materials: usize,
-}
-
-impl Default for PreviewOptions {
-    fn default() -> Self {
-        Self {
-            drawable_index: None,
-            max_primitives: DEFAULT_PREVIEW_MAX_PRIMITIVES,
-            max_vertices: DEFAULT_PREVIEW_MAX_VERTICES,
-            max_indices: DEFAULT_PREVIEW_MAX_INDICES,
-            max_shaders: DEFAULT_PREVIEW_MAX_SHADERS,
-            max_texture_references: DEFAULT_PREVIEW_MAX_TEXTURE_REFERENCES,
-            max_children: DEFAULT_PREVIEW_MAX_CHILDREN,
-            max_materials: DEFAULT_PREVIEW_MAX_MATERIALS,
-        }
-    }
-}
-
 pub fn parse_preview_args(
     args: impl Iterator<Item = String>,
     usage: &str,
@@ -285,60 +242,27 @@ pub fn parse_preview_args(
                 options.drawable_index = Some(parse_preview_index(args.next(), usage)?);
             }
             "--max-primitives" => {
-                options.max_primitives = parse_preview_limit(
-                    args.next(),
-                    "--max-primitives",
-                    HARD_PREVIEW_MAX_PRIMITIVES,
-                    usage,
-                )?;
+                options.max_primitives =
+                    parse_preview_limit(args.next(), "--max-primitives", usage)?;
             }
             "--max-vertices" => {
-                options.max_vertices = parse_preview_limit(
-                    args.next(),
-                    "--max-vertices",
-                    HARD_PREVIEW_MAX_VERTICES,
-                    usage,
-                )?;
+                options.max_vertices = parse_preview_limit(args.next(), "--max-vertices", usage)?;
             }
             "--max-indices" => {
-                options.max_indices = parse_preview_limit(
-                    args.next(),
-                    "--max-indices",
-                    HARD_PREVIEW_MAX_INDICES,
-                    usage,
-                )?;
+                options.max_indices = parse_preview_limit(args.next(), "--max-indices", usage)?;
             }
             "--max-shaders" => {
-                options.max_shaders = parse_preview_limit(
-                    args.next(),
-                    "--max-shaders",
-                    HARD_PREVIEW_MAX_SHADERS,
-                    usage,
-                )?;
+                options.max_shaders = parse_preview_limit(args.next(), "--max-shaders", usage)?;
             }
             "--max-texture-references" => {
-                options.max_texture_references = parse_preview_limit(
-                    args.next(),
-                    "--max-texture-references",
-                    HARD_PREVIEW_MAX_TEXTURE_REFERENCES,
-                    usage,
-                )?;
+                options.max_texture_references =
+                    parse_preview_limit(args.next(), "--max-texture-references", usage)?;
             }
             "--max-children" => {
-                options.max_children = parse_preview_limit(
-                    args.next(),
-                    "--max-children",
-                    HARD_PREVIEW_MAX_CHILDREN,
-                    usage,
-                )?;
+                options.max_children = parse_preview_limit(args.next(), "--max-children", usage)?;
             }
             "--max-materials" => {
-                options.max_materials = parse_preview_limit(
-                    args.next(),
-                    "--max-materials",
-                    HARD_PREVIEW_MAX_MATERIALS,
-                    usage,
-                )?;
+                options.max_materials = parse_preview_limit(args.next(), "--max-materials", usage)?;
             }
             _ => {
                 return Err(io::Error::new(
@@ -349,7 +273,7 @@ pub fn parse_preview_args(
         }
     }
 
-    Ok((path, options, json_output))
+    Ok((path, options.validate()?, json_output))
 }
 
 fn parse_preview_index(value: Option<String>, usage: &str) -> Result<usize, io::Error> {
@@ -365,7 +289,6 @@ fn parse_preview_index(value: Option<String>, usage: &str) -> Result<usize, io::
 fn parse_preview_limit(
     value: Option<String>,
     label: &str,
-    hard_max: usize,
     usage: &str,
 ) -> Result<usize, io::Error> {
     let value = value.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
@@ -381,12 +304,6 @@ fn parse_preview_limit(
             format!("{label} must be greater than zero"),
         ));
     }
-    if hard_max != usize::MAX && parsed > hard_max {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{label} exceeds hard limit {hard_max}"),
-        ));
-    }
     Ok(parsed)
 }
 
@@ -395,472 +312,48 @@ pub fn preview(
     options: PreviewOptions,
     json_output: bool,
 ) -> Result<(), Box<dyn Error>> {
-    let bytes = fs::read(path)?;
-    let asset_type = asset_type_name(path);
-
-    if asset_type == "YBN" {
-        if options.drawable_index.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "--drawable-index is only valid for YDD preview",
-            )
-            .into());
-        }
-
-        let collision = YbnCollision::from_bytes(&bytes).map_err(validation_error)?;
-        let data = collision_preview_json(&collision, options);
-
-        if json_output {
-            print_success(
-                "preview",
-                json!({
-                    "path": path.display().to_string(),
-                    "type": asset_type,
-                    "spatial": {
-                        "classification": "localOnly",
-                        "coordinateConvention": collision.coordinate_convention,
-                    },
-                    "preview": data,
-                }),
-            )?;
-        } else {
-            println!("file: {}", path.display());
-            println!("type: {asset_type}");
-            println!("children: {}", collision.children.len());
-            println!("materials: {}", collision.materials.len());
-            println!("mesh-primitives: {}", collision.primitives.len());
-            println!("shape-primitives: {}", collision.shape_primitives.len());
-            println!("vertices: {}", collision.vertex_count());
-            println!("indices: {}", collision.index_count());
-            println!("triangles: {}", collision.triangle_count());
-            println!("spatial: localOnly");
-        }
-
-        return Ok(());
-    }
-
-    let (model, selector) = match asset_type {
-        "YDR" => {
-            if options.drawable_index.is_some() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "--drawable-index is only valid for YDD preview",
-                )
-                .into());
-            }
-            let document = YdrDocument::from_bytes(&bytes).map_err(validation_error)?;
-            (document.model, Value::Null)
-        }
-        "YDD" => {
-            let drawable_index = options.drawable_index.ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "YDD preview requires --drawable-index <n>",
-                )
-            })?;
-            let dictionary = YddDictionary::from_bytes(&bytes).map_err(validation_error)?;
-            let entry = dictionary.entries().get(drawable_index).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "drawable index {drawable_index} exceeds dictionary size {}",
-                        dictionary.entries().len()
-                    ),
-                )
-            })?;
-            let document = dictionary
-                .document(drawable_index)
-                .map_err(validation_error)?;
-            (
-                document.model,
-                json!({
-                    "drawableIndex": entry.index,
-                    "nameHash": format!("0x{:08X}", entry.name_hash),
-                    "name": entry.name,
-                }),
-            )
-        }
-        _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!("headless model preview is unavailable for {asset_type}"),
-            )
-            .into())
-        }
-    };
-
-    let data = model_preview_json(&model, options, selector);
+    let report = preview_asset(path, options)?;
 
     if json_output {
-        print_success(
-            "preview",
-            json!({
-                "path": path.display().to_string(),
-                "type": asset_type,
-                "spatial": {
-                    "classification": "localOnly",
-                    "coordinateConvention": model.coordinate_convention.as_str(),
-                },
-                "preview": data,
-            }),
-        )?;
+        print_success("preview", serde_json::to_value(&report)?)?;
     } else {
-        println!("file: {}", path.display());
-        println!("type: {asset_type}");
-        if let Some(index) = options.drawable_index {
-            println!("drawable-index: {index}");
+        println!("file: {}", report.path);
+        println!("type: {}", report.asset_type);
+
+        if report.asset_type == "YBN" {
+            let counts = &report.preview["counts"];
+            println!("children: {}", counts["children"].as_u64().unwrap_or(0));
+            println!("materials: {}", counts["materials"].as_u64().unwrap_or(0));
+            println!(
+                "mesh-primitives: {}",
+                counts["meshPrimitives"].as_u64().unwrap_or(0)
+            );
+            println!(
+                "shape-primitives: {}",
+                counts["shapePrimitives"].as_u64().unwrap_or(0)
+            );
+            println!("vertices: {}", counts["vertices"].as_u64().unwrap_or(0));
+            println!("indices: {}", counts["indices"].as_u64().unwrap_or(0));
+            println!("triangles: {}", counts["triangles"].as_u64().unwrap_or(0));
+        } else {
+            if let Some(index) = options.drawable_index {
+                println!("drawable-index: {index}");
+            }
+            println!(
+                "lod: {}",
+                report.preview["lod"].as_str().unwrap_or("unknown")
+            );
+            let counts = &report.preview["counts"];
+            println!("primitives: {}", counts["primitives"].as_u64().unwrap_or(0));
+            println!("vertices: {}", counts["vertices"].as_u64().unwrap_or(0));
+            println!("indices: {}", counts["indices"].as_u64().unwrap_or(0));
+            println!("triangles: {}", counts["triangles"].as_u64().unwrap_or(0));
         }
-        println!("lod: {}", model.lod.as_str());
-        println!("primitives: {}", model.primitives.len());
-        println!("vertices: {}", model.vertex_count());
-        println!("indices: {}", model.index_count());
-        println!("triangles: {}", model.triangle_count());
-        println!("spatial: localOnly");
+
+        println!("spatial: {}", report.spatial.classification);
     }
 
     Ok(())
-}
-
-fn model_preview_json(model: &YdrModel, options: PreviewOptions, selector: Value) -> Value {
-    let mut remaining_vertices = options.max_vertices;
-    let mut remaining_indices = options.max_indices;
-    let mut emitted_vertices = 0_usize;
-    let mut emitted_indices = 0_usize;
-    let mut geometry_omitted = 0_usize;
-
-    let primitives = model
-        .primitives
-        .iter()
-        .take(options.max_primitives)
-        .map(|primitive| {
-            let fits_geometry = primitive.positions.len() <= remaining_vertices
-                && primitive.indices.len() <= remaining_indices;
-
-            let geometry = if fits_geometry {
-                remaining_vertices -= primitive.positions.len();
-                remaining_indices -= primitive.indices.len();
-                emitted_vertices += primitive.positions.len();
-                emitted_indices += primitive.indices.len();
-                json!({
-                    "positions": primitive.positions,
-                    "normals": primitive.normals,
-                    "uv0": primitive.uv0,
-                    "indices": primitive.indices,
-                })
-            } else {
-                geometry_omitted += 1;
-                Value::Null
-            };
-
-            let winding = primitive.winding_summary().map(|summary| {
-                json!({
-                    "aligned": summary.aligned,
-                    "opposed": summary.opposed,
-                    "degenerate": summary.degenerate,
-                })
-            });
-
-            json!({
-                "modelIndex": primitive.model_index,
-                "geometryIndex": primitive.geometry_index,
-                "shaderIndex": primitive.shader_index,
-                "topology": primitive.topology.as_str(),
-                "counts": {
-                    "vertices": primitive.positions.len(),
-                    "indices": primitive.indices.len(),
-                    "triangles": primitive.triangle_count(),
-                },
-                "declaration": {
-                    "flags": format!("0x{:08X}", primitive.declaration.flags),
-                    "stride": primitive.declaration.stride,
-                    "componentCount": primitive.declaration.component_count,
-                    "types": format!("0x{:016X}", primitive.declaration.types),
-                },
-                "winding": winding,
-                "geometryIncluded": fits_geometry,
-                "geometryOmittedReason": if fits_geometry {
-                    Value::Null
-                } else {
-                    Value::String("preview limits".into())
-                },
-                "geometry": geometry,
-            })
-        })
-        .collect::<Vec<_>>();
-
-    let mut remaining_texture_references = options.max_texture_references;
-    let mut emitted_texture_references = 0_usize;
-    let shaders = model
-        .shaders
-        .iter()
-        .take(options.max_shaders)
-        .enumerate()
-        .map(|(index, shader)| {
-            let take = shader
-                .texture_references
-                .len()
-                .min(remaining_texture_references);
-            remaining_texture_references -= take;
-            emitted_texture_references += take;
-            let texture_references = shader
-                .texture_references
-                .iter()
-                .take(take)
-                .map(|reference| {
-                    json!({
-                        "parameterHash": format!("0x{:08X}", reference.parameter_hash),
-                        "textureName": reference.texture_name,
-                    })
-                })
-                .collect::<Vec<_>>();
-
-            json!({
-                "index": index,
-                "nameHash": format!("0x{:08X}", shader.name_hash),
-                "fileHash": format!("0x{:08X}", shader.file_hash),
-                "textureReferenceCount": shader.texture_references.len(),
-                "textureReferences": texture_references,
-                "textureReferencesTruncated": take < shader.texture_references.len(),
-            })
-        })
-        .collect::<Vec<_>>();
-
-    json!({
-        "selector": selector,
-        "name": model.name,
-        "lod": model.lod.as_str(),
-        "coordinateConvention": model.coordinate_convention.as_str(),
-        "bounds": {
-            "center": model.bounds.center,
-            "radius": model.bounds.radius,
-            "min": model.bounds.min,
-            "max": model.bounds.max,
-        },
-        "counts": {
-            "shaders": model.shaders.len(),
-            "primitives": model.primitives.len(),
-            "vertices": model.vertex_count(),
-            "indices": model.index_count(),
-            "triangles": model.triangle_count(),
-        },
-        "shaders": shaders,
-        "primitives": primitives,
-        "limits": {
-            "maxShaders": options.max_shaders,
-            "maxTextureReferences": options.max_texture_references,
-            "maxPrimitives": options.max_primitives,
-            "maxVertices": options.max_vertices,
-            "maxIndices": options.max_indices,
-        },
-        "emitted": {
-            "shaders": model.shaders.len().min(options.max_shaders),
-            "textureReferences": emitted_texture_references,
-            "primitives": model.primitives.len().min(options.max_primitives),
-            "vertices": emitted_vertices,
-            "indices": emitted_indices,
-        },
-        "truncated": {
-            "shaders": model.shaders.len() > options.max_shaders,
-            "textureReferences": model
-                .shaders
-                .iter()
-                .map(|shader| shader.texture_references.len())
-                .sum::<usize>()
-                > options.max_texture_references,
-            "primitives": model.primitives.len() > options.max_primitives,
-            "geometryOmittedPrimitives": geometry_omitted,
-        },
-    })
-}
-
-fn collision_preview_json(collision: &YbnCollision, options: PreviewOptions) -> Value {
-    let positions_included = collision.positions.len() <= options.max_vertices;
-    let positions = if positions_included {
-        json!(collision.positions)
-    } else {
-        Value::Null
-    };
-
-    let mut remaining_indices = options.max_indices;
-    let mut remaining_primitives = options.max_primitives;
-    let mut emitted_indices = 0_usize;
-    let mut mesh_primitives = Vec::new();
-
-    for primitive in &collision.primitives {
-        if remaining_primitives == 0 {
-            break;
-        }
-        remaining_primitives -= 1;
-
-        let indices_included = positions_included && primitive.indices.len() <= remaining_indices;
-        let indices = if indices_included {
-            remaining_indices -= primitive.indices.len();
-            emitted_indices += primitive.indices.len();
-            json!(primitive.indices)
-        } else {
-            Value::Null
-        };
-
-        mesh_primitives.push(json!({
-            "childIndex": primitive.child_index,
-            "materialIndex": primitive.material_index,
-            "indexCount": primitive.indices.len(),
-            "triangleCount": primitive.indices.len() / 3,
-            "indicesIncluded": indices_included,
-            "indicesOmittedReason": if indices_included {
-                Value::Null
-            } else if !positions_included {
-                Value::String("vertex preview limits".into())
-            } else {
-                Value::String("index preview limits".into())
-            },
-            "indices": indices,
-        }));
-    }
-
-    let emitted_mesh_primitives = mesh_primitives.len();
-    let mut shape_primitives = Vec::new();
-    for primitive in &collision.shape_primitives {
-        if remaining_primitives == 0 {
-            break;
-        }
-        remaining_primitives -= 1;
-
-        shape_primitives.push(json!({
-            "childIndex": primitive.child_index,
-            "materialIndex": primitive.material_index,
-            "polygonIndex": primitive.polygon_index,
-            "shape": collision_shape_json(&primitive.shape),
-        }));
-    }
-    let emitted_shape_primitives = shape_primitives.len();
-
-    let children = collision
-        .children
-        .iter()
-        .take(options.max_children)
-        .map(|child| {
-            json!({
-                "index": child.index,
-                "boundsType": child.bounds_type.as_str(),
-                "bounds": {
-                    "min": child.bounds.min,
-                    "max": child.bounds.max,
-                    "center": child.bounds.center,
-                    "sphereCenter": child.bounds.sphere_center,
-                    "sphereRadius": child.bounds.sphere_radius,
-                },
-                "vertices": child.vertices,
-                "triangles": child.triangles,
-                "shapePrimitives": child.shape_primitives,
-            })
-        })
-        .collect::<Vec<_>>();
-
-    let materials = collision
-        .materials
-        .iter()
-        .take(options.max_materials)
-        .map(|material| {
-            json!({
-                "index": material.index,
-                "childIndex": material.child_index,
-                "localIndex": material.local_index,
-                "materialType": material.material_type,
-                "proceduralId": material.procedural_id,
-                "flags": format!("0x{:04X}", material.flags),
-                "colorIndex": material.color_index,
-            })
-        })
-        .collect::<Vec<_>>();
-
-    json!({
-        "kind": "collision",
-        "coordinateConvention": collision.coordinate_convention,
-        "bounds": {
-            "min": collision.bounds.min,
-            "max": collision.bounds.max,
-            "center": collision.bounds.center,
-            "sphereCenter": collision.bounds.sphere_center,
-            "sphereRadius": collision.bounds.sphere_radius,
-        },
-        "counts": {
-            "children": collision.children.len(),
-            "materials": collision.materials.len(),
-            "meshPrimitives": collision.primitives.len(),
-            "shapePrimitives": collision.shape_primitives.len(),
-            "vertices": collision.vertex_count(),
-            "indices": collision.index_count(),
-            "triangles": collision.triangle_count(),
-        },
-        "children": children,
-        "materials": materials,
-        "mesh": {
-            "positionsIncluded": positions_included,
-            "positionsOmittedReason": if positions_included {
-                Value::Null
-            } else {
-                Value::String("vertex preview limits".into())
-            },
-            "positions": positions,
-            "primitives": mesh_primitives,
-        },
-        "shapePrimitives": shape_primitives,
-        "limits": {
-            "maxPrimitives": options.max_primitives,
-            "maxVertices": options.max_vertices,
-            "maxIndices": options.max_indices,
-            "maxChildren": options.max_children,
-            "maxMaterials": options.max_materials,
-        },
-        "emitted": {
-            "children": collision.children.len().min(options.max_children),
-            "materials": collision.materials.len().min(options.max_materials),
-            "meshPrimitives": emitted_mesh_primitives,
-            "shapePrimitives": emitted_shape_primitives,
-            "vertices": if positions_included {
-                collision.positions.len()
-            } else {
-                0
-            },
-            "indices": emitted_indices,
-        },
-        "truncated": {
-            "children": collision.children.len() > options.max_children,
-            "materials": collision.materials.len() > options.max_materials,
-            "primitives": collision.primitives.len() + collision.shape_primitives.len()
-                > options.max_primitives,
-            "vertices": !positions_included,
-            "indices": emitted_indices < collision.index_count(),
-        },
-    })
-}
-
-fn collision_shape_json(shape: &CollisionShape) -> Value {
-    match shape {
-        CollisionShape::Sphere { center, radius } => json!({
-            "kind": "sphere",
-            "center": center,
-            "radius": radius,
-        }),
-        CollisionShape::Capsule { start, end, radius } => json!({
-            "kind": "capsule",
-            "start": start,
-            "end": end,
-            "radius": radius,
-        }),
-        CollisionShape::Box { corner, edges } => json!({
-            "kind": "box",
-            "corner": corner,
-            "edges": edges,
-        }),
-        CollisionShape::Cylinder { start, end, radius } => json!({
-            "kind": "cylinder",
-            "start": start,
-            "end": end,
-            "radius": radius,
-        }),
-    }
 }
 
 pub fn spatial(path: &Path, json_output: bool) -> Result<(), Box<dyn Error>> {

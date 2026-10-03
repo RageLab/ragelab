@@ -2,6 +2,8 @@
 
 RageLab exposes renderer-neutral Legacy/Gen8 preview data for software agents and non-graphical consumers. The preview contract serializes normalized Rust domain models; it does not expose Three.js objects or browser rendering state.
 
+Preview construction and limit policy are owned by `ragelab-engine`. CLI, Studio, and future MCP adapters consume the same `PreviewOptions` and `AssetPreviewReport` contracts rather than implementing format-specific preview logic independently.
+
 ## Command
 
 ```bash
@@ -82,7 +84,7 @@ Override them with:
 --max-materials <n>
 ```
 
-All limits must be positive. Requests above the hard maximum fail with `invalid_input` rather than generating an unbounded JSON response.
+All limits must be positive. Hard maxima are validated by `ragelab-engine`, so every adapter receives the same bounded behavior. Requests above the hard maximum fail with `invalid_input` rather than generating an unbounded JSON response.
 
 ## Compatibility
 

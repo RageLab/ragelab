@@ -22,12 +22,14 @@ mod asset;
 mod catalog;
 mod discovery;
 mod operations;
+mod preview;
 mod scene;
 mod spatial;
 pub use asset::*;
 pub use catalog::*;
 pub use discovery::*;
 pub use operations::*;
+pub use preview::*;
 pub use scene::*;
 pub use spatial::*;
 
