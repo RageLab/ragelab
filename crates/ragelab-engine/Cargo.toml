@@ -9,6 +9,7 @@ rust-version.workspace = true
 ragelab-assets = { path = "../ragelab-assets" }
 ragelab-hash = { path = "../ragelab-hash" }
 ragelab-resource = { path = "../ragelab-resource" }
+ragelab-rpf = { path = "../ragelab-rpf" }
 ragelab-ymap = { path = "../ragelab-ymap" }
 ragelab-ymf = { path = "../ragelab-ymf" }
 ragelab-ybn = { path = "../ragelab-ybn" }

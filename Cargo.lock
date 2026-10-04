@@ -218,6 +218,7 @@ dependencies = [
  "ragelab-assets",
  "ragelab-hash",
  "ragelab-resource",
+ "ragelab-rpf",
  "ragelab-ybn",
  "ragelab-ydd",
  "ragelab-ydr",
@@ -262,6 +263,7 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "rage-rpf",
+ "sha1",
 ]
 
 [[package]]

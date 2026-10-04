@@ -39,6 +39,7 @@ pub fn is_structured_command(command: &str) -> bool {
             | "export"
             | "gta.discover"
             | "gta.catalog"
+            | "rpf.keys"
             | "rpf.info"
             | "rpf.list"
             | "rpf.extract"
@@ -919,6 +920,7 @@ pub fn normalize_command_args(args: Vec<String>) -> Vec<String> {
         ("gta", "discover") => Some("gta.discover"),
         ("gta", "catalog") => Some("gta.catalog"),
         ("gta", "vanilla-index") => Some("vanilla-index"),
+        ("rpf", "keys") => Some("rpf.keys"),
         ("rpf", "info") => Some("rpf.info"),
         ("rpf", "list") => Some("rpf.list"),
         ("rpf", "extract") => Some("rpf.extract"),

@@ -437,6 +437,12 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn Error>> {
             let (root, output, overwrite, json) = agent::parse_gta_catalog_args(args, USAGE)?;
             agent::gta_catalog(&root, &output, overwrite, json)?;
         }
+        "rpf.keys" => {
+            const USAGE: &str =
+                "usage: ragelab rpf keys <GTA5.exe> --cache-root <directory> [--json]";
+            let (exe, cache_root, json) = rpf_cmd::parse_key_options(args, USAGE)?;
+            rpf_cmd::keys(&exe, &cache_root, json)?;
+        }
         "rpf.info" => {
             const USAGE: &str =
                 "usage: ragelab rpf info <archive.rpf> [--keys <directory>] [--nested <entry.rpf>]... [--json]";
@@ -567,6 +573,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "gta.discover",
         "gta.catalog",
         "gta.vanilla-index",
+        "rpf.keys",
         "rpf.info",
         "rpf.list",
         "rpf.extract",
@@ -667,6 +674,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "gta.discover",
         "gta.catalog",
         "gta.vanilla-index",
+        "rpf.keys",
         "rpf.info",
         "rpf.list",
         "rpf.extract",
@@ -683,7 +691,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
                 "version": env!("CARGO_PKG_VERSION"),
                 "commands": DISCOVERY_COMMANDS,
                 "canonicalCommands": CANONICAL_COMMANDS,
-                "structuredOutput": ["version", "capabilities", "inspect", "validate", "spatial", "preview", "plan", "apply", "workspace.preflight", "workspace.export", "workspace.scene", "gta.discover", "gta.catalog", "rpf.info", "rpf.list", "rpf.extract", "fivem.discover"],
+                "structuredOutput": ["version", "capabilities", "inspect", "validate", "spatial", "preview", "plan", "apply", "workspace.preflight", "workspace.export", "workspace.scene", "gta.discover", "gta.catalog", "rpf.keys", "rpf.info", "rpf.list", "rpf.extract", "fivem.discover"],
                 "legacyAliases": LEGACY_ALIASES,
                 "responseEnvelope": {
                     "schema": agent::RESPONSE_SCHEMA,
@@ -746,6 +754,7 @@ ragelab fivem discover [--json]\n  \
 ragelab gta catalog <directory> --output <paths.txt> [--overwrite] [--json]\n  \
 ragelab gta vanilla-index <extracted-gta-directory> <output.txt>\n\n\
 RPF commands:\n  \
+ragelab rpf keys <GTA5.exe> --cache-root <directory> [--json]\n  \
 ragelab rpf info <archive.rpf> [--keys <directory>] [--nested <entry.rpf>]... [--json]\n  \
 ragelab rpf list <archive.rpf> [--keys <directory>] [--nested <entry.rpf>]... [--contains <text>] [--json]\n  \
 ragelab rpf extract <archive.rpf> [--keys <directory>] [--nested <entry.rpf>]... --entry <path> --output <file> [--overwrite] [--json]\n\n\

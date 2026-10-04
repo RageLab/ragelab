@@ -383,6 +383,53 @@ fn spatial_json_preserves_fail_closed_world_semantics() {
 }
 
 #[test]
+fn rpf_keys_reuses_seeded_cache_with_structured_report() {
+    let root = temp_root("rpf-keys");
+    let exe = root.join("GTA5.exe");
+    let cache_root = root.join("cache");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&exe, b"synthetic-executable").unwrap();
+
+    let metadata = fs::metadata(&exe).unwrap();
+    let modified = metadata
+        .modified()
+        .unwrap()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let cache_dir = cache_root.join(format!("{}-{modified}", metadata.len()));
+    fs::create_dir_all(&cache_dir).unwrap();
+    fs::write(cache_dir.join("gtav_aes_key.dat"), vec![0x11_u8; 32]).unwrap();
+    fs::write(cache_dir.join("gtav_ng_key.dat"), vec![0x22_u8; 101 * 272]).unwrap();
+    fs::write(
+        cache_dir.join("gtav_ng_decrypt_tables.dat"),
+        vec![0x33_u8; 17 * 16 * 256 * 4],
+    )
+    .unwrap();
+
+    let output = binary()
+        .args([
+            "rpf",
+            "keys",
+            exe.to_str().unwrap(),
+            "--cache-root",
+            cache_root.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("ragelab rpf keys should run");
+
+    assert!(output.status.success());
+    let body = stdout_json(&output);
+    assert_eq!(body["schema"], "ragelab.gta.rpf-keys");
+    assert_eq!(body["schemaVersion"], 1);
+    assert_eq!(body["cacheHit"], true);
+    assert_eq!(body["cache"], cache_dir.display().to_string());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn workspace_scene_json_exposes_resolved_assets_and_local_collision() {
     let output = binary()
         .args([

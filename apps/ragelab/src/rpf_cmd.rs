@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ragelab_engine::prepare_gta_rpf_keys;
 use ragelab_rpf::{GtaKeyStore, Rpf7Archive};
 use serde_json::json;
 
@@ -16,6 +17,58 @@ pub struct RpfCommandOptions {
     pub output: Option<PathBuf>,
     pub overwrite: bool,
     pub json: bool,
+}
+
+pub fn parse_key_options(
+    args: impl Iterator<Item = String>,
+    usage: &str,
+) -> Result<(PathBuf, PathBuf, bool), io::Error> {
+    let mut exe = None;
+    let mut cache_root = None;
+    let mut json_output = false;
+    let mut args = args.peekable();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--cache-root" if cache_root.is_none() => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+                cache_root = Some(PathBuf::from(value));
+            }
+            "--json" if !json_output => json_output = true,
+            _ if arg.starts_with('-') => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{usage}; unknown option: {arg}"),
+                ))
+            }
+            _ if exe.is_none() => exe = Some(PathBuf::from(arg)),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    usage.to_string(),
+                ))
+            }
+        }
+    }
+
+    let exe = exe.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+    let cache_root =
+        cache_root.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+    Ok((exe, cache_root, json_output))
+}
+
+pub fn keys(exe_path: &Path, cache_root: &Path, json_output: bool) -> Result<(), Box<dyn Error>> {
+    let report = prepare_gta_rpf_keys(exe_path, cache_root)?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("executable: {}", report.executable);
+        println!("cache: {}", report.cache);
+        println!("cache hit: {}", report.cache_hit);
+    }
+    Ok(())
 }
 
 pub fn parse_options(

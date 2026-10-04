@@ -11,6 +11,7 @@ use std::{
 
 use flate2::read::{DeflateDecoder, ZlibDecoder};
 pub use rage_rpf::{GtaKeys, RpfEncryption};
+use sha1::{Digest, Sha1};
 
 use rage_rpf::{
     crypto::{decrypt_aes, decrypt_ng},
@@ -22,6 +23,21 @@ const RPF7_HEADER_SIZE: usize = 16;
 const RPF7_ENTRY_SIZE: usize = 16;
 const RPF7_BLOCK_SIZE: u64 = 512;
 const MAX_TOC_BYTES: usize = 256 * 1024 * 1024;
+const NG_KEY_SIZE: usize = 272;
+const NG_KEY_COUNT: usize = 101;
+const NG_KEY_BYTES: usize = NG_KEY_SIZE * NG_KEY_COUNT;
+const NG_TABLE_GROUPS: usize = 17;
+const NG_TABLES_PER_GROUP: usize = 16;
+const NG_TABLE_VALUES: usize = 256;
+const NG_TABLE_BYTES: usize =
+    NG_TABLE_GROUPS * NG_TABLES_PER_GROUP * NG_TABLE_VALUES * std::mem::size_of::<u32>();
+// Encrypted/masked NG bootstrap data sourced from rpf-archive-rs v0.10
+// (Unlicense). No decrypted user key material is embedded in RageLab.
+const EMBEDDED_MAGIC: &[u8] = include_bytes!("../resources/magic.dat");
+const PC_AES_KEY_HASH: [u8; 20] = [
+    0xA0, 0x79, 0x61, 0x28, 0xA7, 0x75, 0x72, 0x0A, 0xC2, 0x04, 0xD9, 0x81, 0x9F, 0x68, 0xC1, 0x72,
+    0xE3, 0x95, 0x2C, 0x6D,
+];
 
 #[derive(Debug)]
 pub enum RpfError {
@@ -571,10 +587,26 @@ impl GtaKeyStore {
         load_gta_keys(path.as_ref())
     }
 
-    pub fn load_cached_for_exe(
+    pub fn extract_from_exe(exe_path: impl AsRef<Path>) -> Result<GtaKeys, RpfError> {
+        let exe_path = exe_path.as_ref();
+        let exe_data = std::fs::read(exe_path)?;
+        let aes_bytes = search_hash(&exe_data, &PC_AES_KEY_HASH, 32).ok_or_else(|| {
+            RpfError::Crypto(format!(
+                "AES key not found in {}; expected a GTA V Legacy PC executable",
+                exe_path.display()
+            ))
+        })?;
+        let aes_key: [u8; 32] = aes_bytes
+            .try_into()
+            .map_err(|_| RpfError::Crypto("invalid AES key length".into()))?;
+
+        keys_from_aes_key(aes_key)
+    }
+
+    pub fn load_or_extract_cached(
         exe_path: impl AsRef<Path>,
         cache_root: impl AsRef<Path>,
-    ) -> Result<(GtaKeys, PathBuf), RpfError> {
+    ) -> Result<(GtaKeys, bool, PathBuf), RpfError> {
         let exe_path = exe_path.as_ref();
         let cache_root = cache_root.as_ref();
         let metadata = std::fs::metadata(exe_path)?;
@@ -584,19 +616,18 @@ impl GtaKeyStore {
             .map_err(|error| RpfError::Invalid(error.to_string()))?
             .as_secs();
         let cache_dir = cache_root.join(format!("{}-{modified}", metadata.len()));
-        let keys = load_gta_keys(&cache_dir)?;
-        Ok((keys, cache_dir))
+
+        if let Ok(keys) = load_gta_keys(&cache_dir) {
+            return Ok((keys, true, cache_dir));
+        }
+
+        let keys = Self::extract_from_exe(exe_path)?;
+        save_gta_keys(&cache_dir, &keys)?;
+        Ok((keys, false, cache_dir))
     }
 }
 
 fn load_gta_keys(path: &Path) -> Result<GtaKeys, RpfError> {
-    const NG_KEY_SIZE: usize = 272;
-    const NG_KEY_COUNT: usize = 101;
-    const TABLE_GROUPS: usize = 17;
-    const TABLES_PER_GROUP: usize = 16;
-    const TABLE_VALUES: usize = 256;
-    const TABLE_BYTES: usize = TABLE_GROUPS * TABLES_PER_GROUP * TABLE_VALUES * 4;
-
     let aes_bytes = std::fs::read(path.join("gtav_aes_key.dat"))?;
     let aes_key: [u8; 32] = aes_bytes.try_into().map_err(|bytes: Vec<u8>| {
         RpfError::Invalid(format!(
@@ -606,35 +637,84 @@ fn load_gta_keys(path: &Path) -> Result<GtaKeys, RpfError> {
     })?;
 
     let ng_key_bytes = std::fs::read(path.join("gtav_ng_key.dat"))?;
-    let expected_ng_bytes = NG_KEY_SIZE * NG_KEY_COUNT;
-    if ng_key_bytes.len() < expected_ng_bytes {
-        return Err(RpfError::Invalid(format!(
-            "gtav_ng_key.dat has {} bytes, expected at least {expected_ng_bytes}",
-            ng_key_bytes.len()
-        )));
-    }
-    let ng_keys = (0..NG_KEY_COUNT)
-        .map(|index| {
-            let start = index * NG_KEY_SIZE;
-            ng_key_bytes[start..start + NG_KEY_SIZE].to_vec()
-        })
-        .collect();
+    let ng_keys = read_ng_keys(&ng_key_bytes)?;
 
     let table_bytes = std::fs::read(path.join("gtav_ng_decrypt_tables.dat"))?;
-    if table_bytes.len() < TABLE_BYTES {
-        return Err(RpfError::Invalid(format!(
-            "gtav_ng_decrypt_tables.dat has {} bytes, expected at least {TABLE_BYTES}",
-            table_bytes.len()
+    let ng_decrypt_tables = read_ng_tables(&table_bytes)?;
+
+    Ok(GtaKeys {
+        aes_key,
+        ng_keys,
+        ng_decrypt_tables,
+    })
+}
+
+fn save_gta_keys(path: &Path, keys: &GtaKeys) -> Result<(), RpfError> {
+    std::fs::create_dir_all(path)?;
+    std::fs::write(path.join("gtav_aes_key.dat"), keys.aes_key)?;
+    std::fs::write(
+        path.join("gtav_ng_key.dat"),
+        keys.ng_keys.iter().flatten().copied().collect::<Vec<_>>(),
+    )?;
+    std::fs::write(
+        path.join("gtav_ng_decrypt_tables.dat"),
+        write_ng_tables(&keys.ng_decrypt_tables),
+    )?;
+    Ok(())
+}
+
+fn keys_from_aes_key(aes_key: [u8; 32]) -> Result<GtaKeys, RpfError> {
+    let magic = unwrap_magic(EMBEDDED_MAGIC, &aes_key)?;
+    if magic.len() < NG_KEY_BYTES + NG_TABLE_BYTES {
+        return Err(RpfError::Crypto(format!(
+            "decrypted GTA key bootstrap has {} bytes, expected at least {}",
+            magic.len(),
+            NG_KEY_BYTES + NG_TABLE_BYTES
         )));
     }
 
-    let mut tables = vec![[[0_u32; TABLE_VALUES]; TABLES_PER_GROUP]; TABLE_GROUPS];
+    let ng_keys = read_ng_keys(&magic[..NG_KEY_BYTES])?;
+    let ng_decrypt_tables = read_ng_tables(&magic[NG_KEY_BYTES..NG_KEY_BYTES + NG_TABLE_BYTES])?;
+
+    Ok(GtaKeys {
+        aes_key,
+        ng_keys,
+        ng_decrypt_tables,
+    })
+}
+
+fn read_ng_keys(data: &[u8]) -> Result<Vec<Vec<u8>>, RpfError> {
+    if data.len() < NG_KEY_BYTES {
+        return Err(RpfError::Invalid(format!(
+            "NG key data has {} bytes, expected at least {NG_KEY_BYTES}",
+            data.len()
+        )));
+    }
+    Ok((0..NG_KEY_COUNT)
+        .map(|index| {
+            let start = index * NG_KEY_SIZE;
+            data[start..start + NG_KEY_SIZE].to_vec()
+        })
+        .collect())
+}
+
+fn read_ng_tables(
+    data: &[u8],
+) -> Result<Box<[[[u32; NG_TABLE_VALUES]; NG_TABLES_PER_GROUP]; NG_TABLE_GROUPS]>, RpfError> {
+    if data.len() < NG_TABLE_BYTES {
+        return Err(RpfError::Invalid(format!(
+            "NG table data has {} bytes, expected at least {NG_TABLE_BYTES}",
+            data.len()
+        )));
+    }
+
+    let mut tables = vec![[[0_u32; NG_TABLE_VALUES]; NG_TABLES_PER_GROUP]; NG_TABLE_GROUPS];
     let mut offset = 0_usize;
     for group in &mut tables {
         for table in group {
             for value in table {
                 *value = u32::from_le_bytes(
-                    table_bytes[offset..offset + 4]
+                    data[offset..offset + 4]
                         .try_into()
                         .expect("four-byte NG table value"),
                 );
@@ -642,17 +722,168 @@ fn load_gta_keys(path: &Path) -> Result<GtaKeys, RpfError> {
             }
         }
     }
-    let boxed_slice = tables.into_boxed_slice();
-    let ng_decrypt_tables: Box<[[[u32; TABLE_VALUES]; TABLES_PER_GROUP]; TABLE_GROUPS]> =
-        boxed_slice
-            .try_into()
-            .map_err(|_| RpfError::Invalid("failed to materialize GTA NG decrypt tables".into()))?;
 
-    Ok(GtaKeys {
-        aes_key,
-        ng_keys,
-        ng_decrypt_tables,
-    })
+    tables
+        .into_boxed_slice()
+        .try_into()
+        .map_err(|_| RpfError::Invalid("failed to materialize GTA NG decrypt tables".into()))
+}
+
+fn write_ng_tables(
+    tables: &[[[u32; NG_TABLE_VALUES]; NG_TABLES_PER_GROUP]; NG_TABLE_GROUPS],
+) -> Vec<u8> {
+    let mut output = Vec::with_capacity(NG_TABLE_BYTES);
+    for group in tables {
+        for table in group {
+            for value in table {
+                output.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+    output
+}
+
+fn search_hash(data: &[u8], expected_sha1: &[u8; 20], length: usize) -> Option<Vec<u8>> {
+    if data.len() < length {
+        return None;
+    }
+
+    for offset in 0..=data.len() - length {
+        let candidate = &data[offset..offset + length];
+        let mut hasher = Sha1::new();
+        hasher.update(candidate);
+        let hash: [u8; 20] = hasher.finalize().into();
+        if &hash == expected_sha1 {
+            return Some(candidate.to_vec());
+        }
+    }
+    None
+}
+
+fn unwrap_magic(magic: &[u8], aes_key: &[u8; 32]) -> Result<Vec<u8>, RpfError> {
+    let len = magic.len();
+    let mut mask = vec![0_u8; len * 4];
+    DotNetRandom::new(jenkins_hash_bytes(aes_key) as i32).next_bytes(&mut mask);
+
+    let mut data = magic.to_vec();
+    for (index, byte) in data.iter_mut().enumerate() {
+        for pass in 0..4 {
+            *byte = byte.wrapping_sub(mask[pass * len + index]);
+        }
+    }
+
+    let decrypted = decrypt_aes(&data, aes_key);
+    let mut output = Vec::new();
+    DeflateDecoder::new(decrypted.as_slice())
+        .read_to_end(&mut output)
+        .map_err(|error| {
+            RpfError::Crypto(format!(
+                "failed to inflate GTA key bootstrap; AES key does not match: {error}"
+            ))
+        })?;
+
+    let expected = NG_KEY_BYTES + NG_TABLE_BYTES;
+    if output.len() < expected {
+        return Err(RpfError::Crypto(format!(
+            "GTA key bootstrap has {} bytes, expected at least {expected}",
+            output.len()
+        )));
+    }
+    output.truncate(expected);
+    Ok(output)
+}
+
+fn jenkins_hash_bytes(data: &[u8]) -> u32 {
+    let mut hash = 0_u32;
+    for byte in data {
+        hash = hash.wrapping_add(u32::from(*byte));
+        hash = hash.wrapping_add(hash << 10);
+        hash ^= hash >> 6;
+    }
+    hash = hash.wrapping_add(hash << 3);
+    hash ^= hash >> 11;
+    hash.wrapping_add(hash << 15)
+}
+
+struct DotNetRandom {
+    seed_array: [i32; 56],
+    inext: usize,
+    inextp: usize,
+}
+
+impl DotNetRandom {
+    const MBIG: i32 = i32::MAX;
+    const MSEED: i32 = 161_803_398;
+
+    fn new(seed: i32) -> Self {
+        let subtraction = if seed == i32::MIN {
+            i32::MAX
+        } else {
+            seed.abs()
+        };
+        let mut seed_array = [0_i32; 56];
+
+        let mut mj = Self::MSEED.wrapping_sub(subtraction);
+        seed_array[55] = mj;
+        let mut mk = 1_i32;
+
+        for index in 1..55 {
+            let slot = (21 * index) % 55;
+            seed_array[slot] = mk;
+            mk = mj.wrapping_sub(mk);
+            if mk < 0 {
+                mk = mk.wrapping_add(Self::MBIG);
+            }
+            mj = seed_array[slot];
+        }
+
+        for _ in 1..5 {
+            for index in 1..56 {
+                seed_array[index] =
+                    seed_array[index].wrapping_sub(seed_array[1 + (index + 30) % 55]);
+                if seed_array[index] < 0 {
+                    seed_array[index] = seed_array[index].wrapping_add(Self::MBIG);
+                }
+            }
+        }
+
+        Self {
+            seed_array,
+            inext: 0,
+            inextp: 21,
+        }
+    }
+
+    fn internal_sample(&mut self) -> i32 {
+        let mut inext = self.inext + 1;
+        if inext >= 56 {
+            inext = 1;
+        }
+
+        let mut inextp = self.inextp + 1;
+        if inextp >= 56 {
+            inextp = 1;
+        }
+
+        let mut value = self.seed_array[inext].wrapping_sub(self.seed_array[inextp]);
+        if value == Self::MBIG {
+            value -= 1;
+        }
+        if value < 0 {
+            value = value.wrapping_add(Self::MBIG);
+        }
+
+        self.seed_array[inext] = value;
+        self.inext = inext;
+        self.inextp = inextp;
+        value
+    }
+
+    fn next_bytes(&mut self, buffer: &mut [u8]) {
+        for byte in buffer {
+            *byte = (self.internal_sample() % 256) as u8;
+        }
+    }
 }
 
 fn parse_entries(
@@ -1023,5 +1254,84 @@ mod tests {
                 .expect("read nested entry"),
             b"nested-value"
         );
+    }
+
+    #[test]
+    fn sha1_key_search_finds_unaligned_candidate() {
+        let candidate = (0_u8..32).collect::<Vec<_>>();
+        let mut data = vec![0xEE_u8; 17];
+        data.extend_from_slice(&candidate);
+        data.extend_from_slice(&[0xAA_u8; 19]);
+
+        let mut hasher = Sha1::new();
+        hasher.update(&candidate);
+        let expected: [u8; 20] = hasher.finalize().into();
+
+        assert_eq!(search_hash(&data, &expected, 32), Some(candidate));
+    }
+
+    #[test]
+    fn key_store_round_trip_preserves_heap_backed_ng_material() {
+        let root = std::env::temp_dir().join(format!("ragelab-rpf-keys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let table_bytes = vec![0x2A_u8; NG_TABLE_BYTES];
+        let keys = GtaKeys {
+            aes_key: [0x11_u8; 32],
+            ng_keys: (0..NG_KEY_COUNT)
+                .map(|index| vec![index as u8; NG_KEY_SIZE])
+                .collect(),
+            ng_decrypt_tables: read_ng_tables(&table_bytes).expect("build synthetic tables"),
+        };
+
+        save_gta_keys(&root, &keys).expect("save synthetic keys");
+        let loaded = load_gta_keys(&root).expect("reload synthetic keys");
+
+        assert_eq!(loaded.aes_key, keys.aes_key);
+        assert_eq!(loaded.ng_keys, keys.ng_keys);
+        assert_eq!(loaded.ng_decrypt_tables, keys.ng_decrypt_tables);
+
+        std::fs::remove_dir_all(root).expect("remove synthetic key store");
+    }
+
+    #[test]
+    fn cached_key_store_is_reused_without_scanning_executable() {
+        let root =
+            std::env::temp_dir().join(format!("ragelab-rpf-key-cache-{}", std::process::id()));
+        let exe = root.join("GTA5.exe");
+        let cache_root = root.join("cache");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create cache fixture");
+        std::fs::write(&exe, b"not-a-real-executable").expect("write fake executable");
+
+        let metadata = std::fs::metadata(&exe).expect("fake exe metadata");
+        let modified = metadata
+            .modified()
+            .expect("fake exe modified")
+            .duration_since(UNIX_EPOCH)
+            .expect("fake exe timestamp")
+            .as_secs();
+        let cache_dir = cache_root.join(format!("{}-{modified}", metadata.len()));
+
+        let table_bytes = vec![0x35_u8; NG_TABLE_BYTES];
+        let expected = GtaKeys {
+            aes_key: [0x22_u8; 32],
+            ng_keys: (0..NG_KEY_COUNT)
+                .map(|index| vec![(index as u8).wrapping_add(1); NG_KEY_SIZE])
+                .collect(),
+            ng_decrypt_tables: read_ng_tables(&table_bytes).expect("build cached tables"),
+        };
+        save_gta_keys(&cache_dir, &expected).expect("seed key cache");
+
+        let (loaded, cache_hit, resolved_dir) =
+            GtaKeyStore::load_or_extract_cached(&exe, &cache_root).expect("load cached keys");
+
+        assert!(cache_hit);
+        assert_eq!(resolved_dir, cache_dir);
+        assert_eq!(loaded.aes_key, expected.aes_key);
+        assert_eq!(loaded.ng_keys, expected.ng_keys);
+        assert_eq!(loaded.ng_decrypt_tables, expected.ng_decrypt_tables);
+
+        std::fs::remove_dir_all(root).expect("remove key cache fixture");
     }
 }
