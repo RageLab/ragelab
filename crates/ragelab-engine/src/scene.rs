@@ -12,14 +12,16 @@ use std::{
 use ragelab_assets::{
     AssetKind, SceneArchetypeResolution, SceneAssetLocator, SceneAssetLookupError,
     SceneAssetLookupErrorCode, SceneCollisionLookup, SceneCollisionLookupErrorCode,
-    SceneResolvedAsset, WorkspaceIndex,
+    SceneResolvedAsset, SceneTextureDictionaryLookup, WorkspaceIndex,
 };
 use ragelab_ymap::Ymap;
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::{
-    preview_asset_bytes_as, ymap_entity_spatial_context, AssetPreviewReport, GtaRpfAssetIndex,
-    PreviewOptions, SpatialTransform,
+    preview_asset_bytes_as_with_texture_dictionaries, ymap_entity_spatial_context,
+    AssetPreviewReport, GtaRpfAssetIndex, PreviewOptions, PreviewTextureDictionarySource,
+    SpatialTransform,
 };
 
 pub const DEFAULT_SCENE_NODE_LIMIT: usize = 10_000;
@@ -177,6 +179,7 @@ pub struct SceneAssetReference {
     pub hash: u32,
     pub path: SceneAssetLocator,
     pub selector: Option<SceneAssetSelector>,
+    pub texture_dictionary: SceneTextureDictionaryLookup,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -294,6 +297,31 @@ pub struct SceneAssetReferenceReport {
     pub hash: String,
     pub path: String,
     pub selector: Option<SceneAssetSelectorReport>,
+    pub texture_dictionary: Option<SceneTextureDictionaryReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneTextureDictionaryReport {
+    pub state: String,
+    pub hash: String,
+    pub sources: Vec<SceneTextureDictionarySourceReport>,
+    pub missing: Vec<String>,
+    pub ambiguous: Vec<SceneTextureDictionaryAmbiguityReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneTextureDictionarySourceReport {
+    pub hash: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneTextureDictionaryAmbiguityReport {
+    pub hash: String,
+    pub candidates: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -386,6 +414,7 @@ impl From<&SceneManifest> for SceneManifestReport {
                             name: name.clone(),
                         },
                     }),
+                    texture_dictionary: texture_dictionary_report(&asset.texture_dictionary),
                 })
                 .collect(),
             summary: SceneSummaryReport {
@@ -405,12 +434,54 @@ impl From<&SceneManifest> for SceneManifestReport {
     }
 }
 
+fn texture_dictionary_report(
+    lookup: &SceneTextureDictionaryLookup,
+) -> Option<SceneTextureDictionaryReport> {
+    match lookup {
+        SceneTextureDictionaryLookup::None => None,
+        SceneTextureDictionaryLookup::Chain {
+            hash,
+            sources,
+            missing,
+            ambiguous,
+        } => {
+            let state = if !ambiguous.is_empty() {
+                "ambiguous"
+            } else if sources.is_empty() {
+                "missing"
+            } else {
+                "resolved"
+            };
+            Some(SceneTextureDictionaryReport {
+                state: state.into(),
+                hash: format!("0x{hash:08X}"),
+                sources: sources
+                    .iter()
+                    .map(|source| SceneTextureDictionarySourceReport {
+                        hash: format!("0x{:08X}", source.hash),
+                        path: source.locator.provenance(),
+                    })
+                    .collect(),
+                missing: missing.iter().map(|hash| format!("0x{hash:08X}")).collect(),
+                ambiguous: ambiguous
+                    .iter()
+                    .map(|item| SceneTextureDictionaryAmbiguityReport {
+                        hash: format!("0x{:08X}", item.hash),
+                        candidates: item.candidates,
+                    })
+                    .collect(),
+            })
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct SceneAssetKey {
     kind: AssetKind,
     hash: u32,
     path: SceneAssetLocator,
     selector: Option<SceneAssetSelector>,
+    texture_dictionary: SceneTextureDictionaryLookup,
 }
 
 pub fn assemble_ymap_scene(
@@ -557,7 +628,62 @@ pub fn workspace_scene_asset_preview_with_game_index(
     };
 
     let bytes = asset.path.read_bytes().map_err(io::Error::other)?;
-    preview_asset_bytes_as(&asset.path.provenance(), asset_type, &bytes, options)
+    let mut external_texture_dictionaries = Vec::<(String, Vec<u8>, &'static str)>::new();
+    let mut external_texture_errors = Vec::new();
+
+    if let SceneTextureDictionaryLookup::Chain { hash, sources, .. } = &asset.texture_dictionary {
+        for source in sources {
+            let provenance = source.locator.provenance();
+            match source.locator.read_bytes() {
+                Ok(texture_bytes) => {
+                    external_texture_dictionaries.push((
+                        provenance,
+                        texture_bytes,
+                        if source.hash == *hash {
+                            "archetypeYtd"
+                        } else {
+                            "parentYtd"
+                        },
+                    ));
+                }
+                Err(error) => {
+                    external_texture_errors.push(format!("{provenance}: {error}"));
+                }
+            }
+        }
+    }
+
+    let external = external_texture_dictionaries
+        .iter()
+        .map(|(path, bytes, source)| PreviewTextureDictionarySource {
+            path,
+            bytes,
+            source,
+        })
+        .collect::<Vec<_>>();
+
+    let mut report = preview_asset_bytes_as_with_texture_dictionaries(
+        &asset.path.provenance(),
+        asset_type,
+        &bytes,
+        options,
+        &external,
+    )?;
+
+    if !external_texture_errors.is_empty() {
+        if let Some(resolution) = report
+            .preview
+            .get_mut("diffuseTextureResolution")
+            .and_then(Value::as_object_mut)
+        {
+            resolution.insert(
+                "externalTextureDictionaryReadErrors".into(),
+                serde_json::to_value(external_texture_errors).unwrap_or(Value::Null),
+            );
+        }
+    }
+
+    Ok(report)
 }
 
 fn workspace_scene_manifest_with_sources(
@@ -671,8 +797,17 @@ fn mount_game_index_for_ymap(
             .map_err(|error| io::Error::other(error.to_string()))?;
     }
 
+    for parent in &plan.texture_parents {
+        workspace_index.mount_scene_texture_parent(parent.relationship());
+    }
+
     let mut selected_entries = BTreeSet::new();
-    for locator in plan.asset_entries.iter().chain(&plan.collision_entries) {
+    for locator in plan
+        .asset_entries
+        .iter()
+        .chain(&plan.texture_entries)
+        .chain(&plan.collision_entries)
+    {
         selected_entries.insert(locator.materialize(&source.game_root, &source.keys));
     }
     workspace_index
@@ -702,6 +837,18 @@ fn mount_game_index_for_ymap(
         warnings.push(format!(
             "game index has same-rank ambiguity for {} requested asset key(s)",
             plan.ambiguous_assets.len()
+        ));
+    }
+    if !plan.ambiguous_texture_parents.is_empty() {
+        warnings.push(format!(
+            "game index has same-rank GTXD parent ambiguity for {} texture dictionary key(s)",
+            plan.ambiguous_texture_parents.len()
+        ));
+    }
+    if !plan.texture_parent_cycles.is_empty() {
+        warnings.push(format!(
+            "game index detected {} GTXD parent cycle(s)",
+            plan.texture_parent_cycles.len()
         ));
     }
 
@@ -750,8 +897,12 @@ where
         let (provider_path, asset_ref, asset_kind, collision, lookup_reason) = match scene_lookup {
             Ok(resolution) => {
                 let asset_kind = resolution.asset.kind();
-                let asset_ref =
-                    insert_primary_asset(&resolution.asset, &mut assets, &mut asset_ids);
+                let asset_ref = insert_primary_asset(
+                    &resolution.asset,
+                    &resolution.texture_dictionary,
+                    &mut assets,
+                    &mut asset_ids,
+                );
                 let collision =
                     collision_relationship(resolution.collision, &mut assets, &mut asset_ids);
                 (
@@ -841,16 +992,29 @@ where
 
 fn insert_primary_asset(
     asset: &SceneResolvedAsset,
+    texture_dictionary: &SceneTextureDictionaryLookup,
     assets: &mut Vec<SceneAssetReference>,
     ids: &mut BTreeMap<SceneAssetKey, usize>,
 ) -> usize {
     match asset {
-        SceneResolvedAsset::Drawable { hash, locator } => {
-            insert_asset(AssetKind::Ydr, *hash, locator.clone(), None, assets, ids)
-        }
-        SceneResolvedAsset::Fragment { hash, locator } => {
-            insert_asset(AssetKind::Yft, *hash, locator.clone(), None, assets, ids)
-        }
+        SceneResolvedAsset::Drawable { hash, locator } => insert_asset(
+            AssetKind::Ydr,
+            *hash,
+            locator.clone(),
+            None,
+            texture_dictionary.clone(),
+            assets,
+            ids,
+        ),
+        SceneResolvedAsset::Fragment { hash, locator } => insert_asset(
+            AssetKind::Yft,
+            *hash,
+            locator.clone(),
+            None,
+            texture_dictionary.clone(),
+            assets,
+            ids,
+        ),
         SceneResolvedAsset::DrawableDictionary {
             dictionary_hash,
             locator,
@@ -864,6 +1028,7 @@ fn insert_primary_asset(
                 name_hash: entry.name_hash,
                 name: entry.name.clone(),
             }),
+            texture_dictionary.clone(),
             assets,
             ids,
         ),
@@ -878,7 +1043,15 @@ fn collision_relationship(
     match collision {
         SceneCollisionLookup::None => None,
         SceneCollisionLookup::LocalOnly { hash, locator } => {
-            let asset_ref = insert_asset(AssetKind::Ybn, hash, locator, None, assets, ids);
+            let asset_ref = insert_asset(
+                AssetKind::Ybn,
+                hash,
+                locator,
+                None,
+                SceneTextureDictionaryLookup::None,
+                assets,
+                ids,
+            );
             Some(SceneCollisionRelationship {
                 hash,
                 asset_ref: Some(asset_ref),
@@ -909,6 +1082,7 @@ fn insert_asset(
     hash: u32,
     path: SceneAssetLocator,
     selector: Option<SceneAssetSelector>,
+    texture_dictionary: SceneTextureDictionaryLookup,
     assets: &mut Vec<SceneAssetReference>,
     ids: &mut BTreeMap<SceneAssetKey, usize>,
 ) -> usize {
@@ -917,6 +1091,7 @@ fn insert_asset(
         hash,
         path: path.clone(),
         selector: selector.clone(),
+        texture_dictionary: texture_dictionary.clone(),
     };
     if let Some(id) = ids.get(&key) {
         return *id;
@@ -929,6 +1104,7 @@ fn insert_asset(
         hash,
         path,
         selector,
+        texture_dictionary,
     });
     ids.insert(key, id);
     id

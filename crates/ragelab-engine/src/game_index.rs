@@ -5,6 +5,7 @@ use std::{
     time::UNIX_EPOCH,
 };
 
+use ragelab_assets::{parse_gtxd_rbf, TextureParentRelationship};
 use ragelab_hash::joaat;
 use ragelab_rpf::{GtaKeyStore, GtaKeys, Rpf7Archive, RpfEntryLocator};
 use ragelab_ytyp::{AssetType, Ytyp};
@@ -12,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::gta_rpf_archive_order;
 
-const GTA_RPF_INDEX_SCHEMA_VERSION: u32 = 1;
+const GTA_RPF_INDEX_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,7 +104,27 @@ pub struct GtaRpfArchetypeRecord {
     pub asset_kind: Option<GtaRpfAssetKind>,
     pub asset_name_hash: Option<u32>,
     pub drawable_dictionary_hash: Option<u32>,
+    pub texture_dictionary_hash: Option<u32>,
     pub physics_dictionary_hash: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GtaRpfTextureParentRecord {
+    pub child: String,
+    pub child_hash: u32,
+    pub parent: String,
+    pub parent_hash: u32,
+    pub source: GtaRpfIndexLocator,
+}
+
+impl GtaRpfTextureParentRecord {
+    pub fn relationship(&self) -> TextureParentRelationship {
+        TextureParentRelationship {
+            parent: self.parent.clone(),
+            child: self.child.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +174,7 @@ pub struct GtaRpfAssetIndex {
     fingerprint: GtaRpfInstallationFingerprint,
     files: BTreeMap<(GtaRpfAssetKind, u32), WinnerSet<GtaRpfIndexLocator>>,
     archetypes: BTreeMap<u32, WinnerSet<GtaRpfArchetypeRecord>>,
+    texture_parents: BTreeMap<u32, WinnerSet<GtaRpfTextureParentRecord>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -166,8 +188,10 @@ pub struct GtaRpfIndexBuildReport {
     pub nested_archives: usize,
     pub indexed_files: usize,
     pub parsed_ytyps: usize,
+    pub parsed_gtxd_files: usize,
     pub archetypes: usize,
     pub file_keys: usize,
+    pub texture_parent_keys: usize,
     pub warnings: Vec<String>,
     pub platform_packs: Vec<String>,
 }
@@ -203,11 +227,15 @@ pub struct GtaRpfIndexPlan {
     pub provider_entries: Vec<GtaRpfIndexLocator>,
     pub provider_selections: Vec<GtaRpfProviderSelection>,
     pub asset_entries: Vec<GtaRpfIndexLocator>,
+    pub texture_entries: Vec<GtaRpfIndexLocator>,
+    pub texture_parents: Vec<GtaRpfTextureParentRecord>,
     pub collision_entries: Vec<GtaRpfIndexLocator>,
     pub unresolved_archetypes: Vec<u32>,
     pub ambiguous_archetypes: Vec<u32>,
     pub unresolved_assets: Vec<(GtaRpfAssetKind, u32)>,
     pub ambiguous_assets: Vec<(GtaRpfAssetKind, u32)>,
+    pub ambiguous_texture_parents: Vec<u32>,
+    pub texture_parent_cycles: Vec<u32>,
 }
 
 pub fn prepare_gta_rpf_index(
@@ -264,6 +292,14 @@ pub fn prepare_gta_rpf_index(
     })
 }
 
+#[derive(Default)]
+struct TextureDictionaryPlanState {
+    entries: BTreeSet<GtaRpfIndexLocator>,
+    parents: BTreeSet<GtaRpfTextureParentRecord>,
+    ambiguous_parents: BTreeSet<u32>,
+    parent_cycles: BTreeSet<u32>,
+}
+
 impl GtaRpfAssetIndex {
     pub fn build(game_root: &Path, keys_path: &Path) -> Result<GtaRpfIndexBuild, io::Error> {
         let fingerprint = GtaRpfInstallationFingerprint::read(game_root)?;
@@ -276,6 +312,7 @@ impl GtaRpfAssetIndex {
             fingerprint,
             files: BTreeMap::new(),
             archetypes: BTreeMap::new(),
+            texture_parents: BTreeMap::new(),
         };
         let mut scan = ScanCounters::default();
         let mut warnings = order.warnings.clone();
@@ -316,8 +353,10 @@ impl GtaRpfAssetIndex {
                 nested_archives: scan.nested_archives,
                 indexed_files: scan.indexed_files,
                 parsed_ytyps: scan.parsed_ytyps,
+                parsed_gtxd_files: scan.parsed_gtxd_files,
                 archetypes: index.archetypes.len(),
                 file_keys: index.files.len(),
+                texture_parent_keys: index.texture_parents.len(),
                 warnings,
                 platform_packs: order.platform_packs,
             },
@@ -377,11 +416,19 @@ impl GtaRpfAssetIndex {
             .unwrap_or(&[])
     }
 
+    pub fn texture_parent_candidates(&self, child_hash: u32) -> &[GtaRpfTextureParentRecord] {
+        self.texture_parents
+            .get(&child_hash)
+            .map(|winner| winner.candidates.as_slice())
+            .unwrap_or(&[])
+    }
+
     pub fn plan_for_archetypes(&self, hashes: impl IntoIterator<Item = u32>) -> GtaRpfIndexPlan {
         let requested = hashes.into_iter().collect::<BTreeSet<_>>();
         let mut provider_entries = BTreeSet::new();
         let mut provider_hashes = BTreeMap::<GtaRpfIndexLocator, BTreeSet<u32>>::new();
         let mut asset_entries = BTreeSet::new();
+        let mut texture_plan = TextureDictionaryPlanState::default();
         let mut collision_entries = BTreeSet::new();
         let mut unresolved_archetypes = Vec::new();
         let mut ambiguous_archetypes = Vec::new();
@@ -421,6 +468,15 @@ impl GtaRpfAssetIndex {
                 }
             }
 
+            if let Some(hash) = provider.texture_dictionary_hash {
+                self.collect_texture_dictionary_chain(
+                    hash,
+                    &mut texture_plan,
+                    &mut unresolved_assets,
+                    &mut ambiguous_assets,
+                );
+            }
+
             if let Some(hash) = provider.physics_dictionary_hash {
                 match self.file_candidates(GtaRpfAssetKind::Ybn, hash) {
                     [] => {}
@@ -445,11 +501,62 @@ impl GtaRpfAssetIndex {
                 })
                 .collect(),
             asset_entries: asset_entries.into_iter().collect(),
+            texture_entries: texture_plan.entries.into_iter().collect(),
+            texture_parents: texture_plan.parents.into_iter().collect(),
             collision_entries: collision_entries.into_iter().collect(),
             unresolved_archetypes,
             ambiguous_archetypes,
             unresolved_assets: unresolved_assets.into_iter().collect(),
             ambiguous_assets: ambiguous_assets.into_iter().collect(),
+            ambiguous_texture_parents: texture_plan.ambiguous_parents.into_iter().collect(),
+            texture_parent_cycles: texture_plan.parent_cycles.into_iter().collect(),
+        }
+    }
+
+    fn collect_texture_dictionary_chain(
+        &self,
+        requested_hash: u32,
+        texture_plan: &mut TextureDictionaryPlanState,
+        unresolved_assets: &mut BTreeSet<(GtaRpfAssetKind, u32)>,
+        ambiguous_assets: &mut BTreeSet<(GtaRpfAssetKind, u32)>,
+    ) {
+        let mut visited = BTreeSet::new();
+        let mut current = requested_hash;
+
+        loop {
+            if !visited.insert(current) {
+                texture_plan.parent_cycles.insert(current);
+                return;
+            }
+
+            let mut file_missing = false;
+            match self.file_candidates(GtaRpfAssetKind::Ytd, current) {
+                [] => file_missing = true,
+                [locator] => {
+                    texture_plan.entries.insert(locator.clone());
+                }
+                _ => {
+                    ambiguous_assets.insert((GtaRpfAssetKind::Ytd, current));
+                    return;
+                }
+            }
+
+            match self.texture_parent_candidates(current) {
+                [] => {
+                    if file_missing {
+                        unresolved_assets.insert((GtaRpfAssetKind::Ytd, current));
+                    }
+                    return;
+                }
+                [parent] => {
+                    texture_plan.parents.insert(parent.clone());
+                    current = parent.parent_hash;
+                }
+                _ => {
+                    texture_plan.ambiguous_parents.insert(current);
+                    return;
+                }
+            }
         }
     }
 }
@@ -460,6 +567,7 @@ struct ScanCounters {
     nested_archives: usize,
     indexed_files: usize,
     parsed_ytyps: usize,
+    parsed_gtxd_files: usize,
 }
 
 struct ScanArchiveContext {
@@ -507,6 +615,47 @@ fn scan_archive(
                     context.archive_relative,
                     nested_suffix(nested),
                     path = file.path
+                )),
+            }
+            continue;
+        }
+
+        if path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("gtxd.ymt"))
+        {
+            let source = GtaRpfIndexLocator {
+                archive_relative: context.archive_relative.clone(),
+                nested: nested.to_vec(),
+                entry: file.path.clone(),
+                load_rank: context.load_rank,
+            };
+            match archive.read_file(&file.path, Some(keys)) {
+                Ok(bytes) => match parse_gtxd_rbf(&bytes) {
+                    Ok(relationships) => {
+                        counters.parsed_gtxd_files += 1;
+                        for relationship in relationships {
+                            insert_texture_parent_winner(
+                                index,
+                                GtaRpfTextureParentRecord {
+                                    child_hash: joaat(&relationship.child),
+                                    parent_hash: joaat(&relationship.parent),
+                                    child: relationship.child,
+                                    parent: relationship.parent,
+                                    source: source.clone(),
+                                },
+                            );
+                        }
+                    }
+                    Err(error) => warnings.push(format!(
+                        "{}: GTXD parse failed: {error}",
+                        provenance(&source)
+                    )),
+                },
+                Err(error) => warnings.push(format!(
+                    "{}: GTXD read failed: {error}",
+                    provenance(&source)
                 )),
             }
             continue;
@@ -567,6 +716,7 @@ fn scan_archive(
                 asset_kind,
                 asset_name_hash: archetype.asset_name.map(|hash| hash.0),
                 drawable_dictionary_hash: archetype.drawable_dictionary.map(|hash| hash.0),
+                texture_dictionary_hash: archetype.texture_dictionary.map(|hash| hash.0),
                 physics_dictionary_hash: archetype.physics_dictionary.map(|hash| hash.0),
             };
             insert_archetype_winner(index, archetype.name.0, record);
@@ -602,6 +752,23 @@ fn insert_archetype_winner(index: &mut GtaRpfAssetIndex, hash: u32, record: GtaR
                 hash,
                 WinnerSet {
                     load_rank: record.provider.load_rank,
+                    candidates: vec![record],
+                },
+            );
+        }
+    }
+}
+
+fn insert_texture_parent_winner(index: &mut GtaRpfAssetIndex, record: GtaRpfTextureParentRecord) {
+    let child_hash = record.child_hash;
+    let load_rank = record.source.load_rank;
+    match index.texture_parents.get_mut(&child_hash) {
+        Some(winner) => winner.insert(load_rank, record),
+        None => {
+            index.texture_parents.insert(
+                child_hash,
+                WinnerSet {
+                    load_rank,
                     candidates: vec![record],
                 },
             );
@@ -726,6 +893,7 @@ mod tests {
             },
             files: BTreeMap::new(),
             archetypes: BTreeMap::new(),
+            texture_parents: BTreeMap::new(),
         }
     }
 
@@ -753,6 +921,7 @@ mod tests {
             fingerprint: fingerprint.clone(),
             files: BTreeMap::new(),
             archetypes: BTreeMap::new(),
+            texture_parents: BTreeMap::new(),
         };
         index.save(&index_path, true).expect("seed cached index");
 
@@ -788,6 +957,87 @@ mod tests {
     }
 
     #[test]
+    fn plan_includes_unique_texture_dictionary_winner() {
+        let mut index = empty_index();
+        let provider = GtaRpfArchetypeRecord {
+            provider: locator(10, "provider.ytyp"),
+            provider_ytyp_hash: None,
+            asset_kind: Some(GtaRpfAssetKind::Ydr),
+            asset_name_hash: Some(0x1111),
+            drawable_dictionary_hash: None,
+            texture_dictionary_hash: Some(0x3333),
+            physics_dictionary_hash: None,
+        };
+        insert_archetype_winner(&mut index, 0xAAAA, provider);
+        insert_file_winner(
+            &mut index,
+            GtaRpfAssetKind::Ydr,
+            0x1111,
+            locator(10, "model.ydr"),
+        );
+        insert_file_winner(
+            &mut index,
+            GtaRpfAssetKind::Ytd,
+            0x3333,
+            locator(10, "textures.ytd"),
+        );
+
+        let plan = index.plan_for_archetypes([0xAAAA]);
+        assert!(plan.unresolved_assets.is_empty());
+        assert!(plan.ambiguous_assets.is_empty());
+        assert_eq!(plan.texture_entries.len(), 1);
+        assert_eq!(plan.texture_entries[0].entry, "textures.ytd");
+    }
+
+    #[test]
+    fn plan_follows_gtxd_parent_when_child_ytd_is_absent() {
+        let mut index = empty_index();
+        let provider = GtaRpfArchetypeRecord {
+            provider: locator(10, "provider.ytyp"),
+            provider_ytyp_hash: None,
+            asset_kind: Some(GtaRpfAssetKind::Ydr),
+            asset_name_hash: Some(0x1111),
+            drawable_dictionary_hash: None,
+            texture_dictionary_hash: Some(0x3333),
+            physics_dictionary_hash: None,
+        };
+        insert_archetype_winner(&mut index, 0xAAAA, provider);
+        insert_file_winner(
+            &mut index,
+            GtaRpfAssetKind::Ydr,
+            0x1111,
+            locator(10, "model.ydr"),
+        );
+        insert_file_winner(
+            &mut index,
+            GtaRpfAssetKind::Ytd,
+            0x4444,
+            locator(10, "parent.ytd"),
+        );
+        insert_texture_parent_winner(
+            &mut index,
+            GtaRpfTextureParentRecord {
+                child: "child".into(),
+                child_hash: 0x3333,
+                parent: "parent".into(),
+                parent_hash: 0x4444,
+                source: locator(10, "gtxd.ymt"),
+            },
+        );
+
+        let plan = index.plan_for_archetypes([0xAAAA]);
+        assert_eq!(plan.texture_entries.len(), 1);
+        assert_eq!(plan.texture_entries[0].entry, "parent.ytd");
+        assert_eq!(plan.texture_parents.len(), 1);
+        assert_eq!(plan.texture_parents[0].child_hash, 0x3333);
+        assert!(!plan
+            .unresolved_assets
+            .contains(&(GtaRpfAssetKind::Ytd, 0x3333)));
+        assert!(plan.ambiguous_texture_parents.is_empty());
+        assert!(plan.texture_parent_cycles.is_empty());
+    }
+
+    #[test]
     fn plan_uses_dictionary_hash_for_ydd_primary_asset() {
         let mut index = empty_index();
         let provider = GtaRpfArchetypeRecord {
@@ -796,6 +1046,7 @@ mod tests {
             asset_kind: Some(GtaRpfAssetKind::Ydd),
             asset_name_hash: Some(0x1111),
             drawable_dictionary_hash: Some(0x2222),
+            texture_dictionary_hash: None,
             physics_dictionary_hash: None,
         };
         insert_archetype_winner(&mut index, 0xAAAA, provider);

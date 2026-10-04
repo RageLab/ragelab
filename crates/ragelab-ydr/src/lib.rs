@@ -21,6 +21,11 @@ const MAX_INDICES_PER_GEOMETRY: usize = 6_000_000;
 const MAX_VERTEX_BYTES: usize = 256 * 1024 * 1024;
 const MAX_NAME_LENGTH: usize = 1_024;
 
+/// rage_joaat("diffusesampler"): the primary GTA V albedo texture parameter.
+pub const DIFFUSE_SAMPLER_PARAMETER_HASH: u32 = 0xF1FE_2B71;
+/// rage_joaat("texturesampler"): legacy albedo fallback when DiffuseSampler is absent.
+pub const TEXTURE_SAMPLER_PARAMETER_HASH: u32 = 0x2B51_70FD;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DrawableReadLayout {
     pub resource_version: u32,
@@ -121,6 +126,22 @@ pub struct ShaderInfo {
     pub name_hash: u32,
     pub file_hash: u32,
     pub texture_references: Vec<ShaderTextureReference>,
+}
+
+impl ShaderInfo {
+    pub fn diffuse_texture_name(&self) -> Option<&str> {
+        self.texture_name_for_parameter(DIFFUSE_SAMPLER_PARAMETER_HASH)
+            .or_else(|| self.texture_name_for_parameter(TEXTURE_SAMPLER_PARAMETER_HASH))
+    }
+
+    pub fn texture_name_for_parameter(&self, parameter_hash: u32) -> Option<&str> {
+        self.texture_references.iter().find_map(|reference| {
+            (reference.parameter_hash == parameter_hash)
+                .then_some(reference.texture_name.as_deref())
+                .flatten()
+                .filter(|name| !name.is_empty())
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2060,7 +2081,8 @@ mod tests {
 
     use super::{
         CoordinateConvention, GeometryKey, LodLevel, PrimitiveTopology, ShaderBindingKey,
-        TextureBindingKey, YdrDocument, YdrEditSession, YdrError, YdrModel,
+        ShaderInfo, ShaderTextureReference, TextureBindingKey, YdrDocument, YdrEditSession,
+        YdrError, YdrModel, DIFFUSE_SAMPLER_PARAMETER_HASH, TEXTURE_SAMPLER_PARAMETER_HASH,
     };
 
     const SYSTEM_SIZE: usize = 2048;
@@ -2455,6 +2477,35 @@ mod tests {
             .structural_audit_error()
             .is_some_and(|message| message.contains("component type 15")));
         assert_eq!(session.texture_bindings().len(), 2);
+    }
+
+    #[test]
+    fn resolves_diffuse_sampler_before_legacy_texture_sampler() {
+        let shader = ShaderInfo {
+            name_hash: 0,
+            file_hash: 0,
+            texture_references: vec![
+                ShaderTextureReference {
+                    parameter_hash: TEXTURE_SAMPLER_PARAMETER_HASH,
+                    texture_name: Some("legacy_albedo".into()),
+                },
+                ShaderTextureReference {
+                    parameter_hash: DIFFUSE_SAMPLER_PARAMETER_HASH,
+                    texture_name: Some("primary_albedo".into()),
+                },
+            ],
+        };
+        assert_eq!(shader.diffuse_texture_name(), Some("primary_albedo"));
+
+        let fallback = ShaderInfo {
+            name_hash: 0,
+            file_hash: 0,
+            texture_references: vec![ShaderTextureReference {
+                parameter_hash: TEXTURE_SAMPLER_PARAMETER_HASH,
+                texture_name: Some("legacy_albedo".into()),
+            }],
+        };
+        assert_eq!(fallback.diffuse_texture_name(), Some("legacy_albedo"));
     }
 
     #[test]

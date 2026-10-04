@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+base64 = "0.22"
 bincode = "1.3"
 ragelab-assets = { path = "../ragelab-assets" }
 ragelab-hash = { path = "../ragelab-hash" }

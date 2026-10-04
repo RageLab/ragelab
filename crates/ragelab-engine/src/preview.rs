@@ -1,9 +1,12 @@
-use std::{fs, io, path::Path};
+use std::{collections::BTreeMap, fs, io, path::Path};
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use ragelab_hash::joaat;
 use ragelab_ybn::{CollisionShape, YbnCollision};
 use ragelab_ydd::YddDictionary;
 use ragelab_ydr::{YdrDocument, YdrModel};
 use ragelab_yft::YftDocument;
+use ragelab_ytd::{DecodedTexture, YtdDictionary};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -24,6 +27,9 @@ pub const HARD_PREVIEW_MAX_SHADERS: usize = 1_024;
 pub const HARD_PREVIEW_MAX_TEXTURE_REFERENCES: usize = 4_096;
 pub const HARD_PREVIEW_MAX_CHILDREN: usize = 4_096;
 pub const HARD_PREVIEW_MAX_MATERIALS: usize = 8_192;
+
+const MODEL_DIFFUSE_TEXTURE_LIMIT: usize = 32;
+const MODEL_DIFFUSE_TEXTURE_MAX_DIMENSION: u16 = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -126,6 +132,49 @@ pub fn preview_asset_bytes_as(
     bytes: &[u8],
     options: PreviewOptions,
 ) -> Result<AssetPreviewReport, io::Error> {
+    preview_asset_bytes_as_with_texture_dictionary(path_label, asset_type, bytes, options, None)
+}
+
+pub struct PreviewTextureDictionarySource<'a> {
+    pub path: &'a str,
+    pub bytes: &'a [u8],
+    pub source: &'a str,
+}
+
+pub fn preview_asset_bytes_as_with_texture_dictionary(
+    path_label: &str,
+    asset_type: &str,
+    bytes: &[u8],
+    options: PreviewOptions,
+    external_texture_dictionary: Option<(&str, &[u8])>,
+) -> Result<AssetPreviewReport, io::Error> {
+    let external =
+        external_texture_dictionary.map(|(path, bytes)| PreviewTextureDictionarySource {
+            path,
+            bytes,
+            source: "archetypeYtd",
+        });
+    let external = external.as_ref().into_iter().collect::<Vec<_>>();
+    let sources = external
+        .iter()
+        .map(|source| PreviewTextureDictionarySource {
+            path: source.path,
+            bytes: source.bytes,
+            source: source.source,
+        })
+        .collect::<Vec<_>>();
+    preview_asset_bytes_as_with_texture_dictionaries(
+        path_label, asset_type, bytes, options, &sources,
+    )
+}
+
+pub fn preview_asset_bytes_as_with_texture_dictionaries(
+    path_label: &str,
+    asset_type: &str,
+    bytes: &[u8],
+    options: PreviewOptions,
+    external_texture_dictionaries: &[PreviewTextureDictionarySource<'_>],
+) -> Result<AssetPreviewReport, io::Error> {
     let options = options.validate()?;
 
     if asset_type == "YBN" {
@@ -148,7 +197,7 @@ pub fn preview_asset_bytes_as(
         });
     }
 
-    let (model, selector) = match asset_type {
+    let (model, embedded_textures, selector) = match asset_type {
         "YDR" => {
             if options.drawable_index.is_some() {
                 return Err(io::Error::new(
@@ -157,7 +206,7 @@ pub fn preview_asset_bytes_as(
                 ));
             }
             let document = YdrDocument::from_bytes(bytes).map_err(validation_error)?;
-            (document.model, Value::Null)
+            (document.model, document.embedded_textures, Value::Null)
         }
         "YFT" => {
             if options.drawable_index.is_some() {
@@ -175,6 +224,7 @@ pub fn preview_asset_bytes_as(
             })?;
             (
                 drawable.model,
+                drawable.embedded_textures,
                 json!({
                     "fragmentRole": "mainDrawable",
                     "fragmentName": fragment.name,
@@ -203,6 +253,7 @@ pub fn preview_asset_bytes_as(
                 .map_err(validation_error)?;
             (
                 document.model,
+                document.embedded_textures,
                 json!({
                     "drawableIndex": entry.index,
                     "nameHash": format!("0x{:08X}", entry.name_hash),
@@ -219,6 +270,16 @@ pub fn preview_asset_bytes_as(
     };
 
     let coordinate_convention = model.coordinate_convention.as_str().to_string();
+    let mut preview = model_preview_json(&model, options, selector);
+    append_diffuse_texture_preview(
+        &mut preview,
+        &model,
+        embedded_textures.as_ref(),
+        path_label,
+        external_texture_dictionaries,
+        options,
+    );
+
     Ok(AssetPreviewReport {
         path: path_label.to_string(),
         asset_type: asset_type.to_string(),
@@ -226,8 +287,208 @@ pub fn preview_asset_bytes_as(
             classification: "localOnly",
             coordinate_convention,
         },
-        preview: model_preview_json(&model, options, selector),
+        preview,
     })
+}
+
+fn append_diffuse_texture_preview(
+    preview: &mut Value,
+    model: &YdrModel,
+    embedded_textures: Option<&YtdDictionary>,
+    embedded_source_path: &str,
+    external_texture_dictionaries: &[PreviewTextureDictionarySource<'_>],
+    options: PreviewOptions,
+) {
+    let Some(object) = preview.as_object_mut() else {
+        return;
+    };
+
+    let mut requested = BTreeMap::<u32, String>::new();
+    for shader in model.shaders.iter().take(options.max_shaders) {
+        if let Some(name) = shader.diffuse_texture_name() {
+            requested
+                .entry(joaat(name))
+                .or_insert_with(|| name.to_string());
+        }
+    }
+
+    let requested_count = requested.len();
+    let truncated = requested_count > MODEL_DIFFUSE_TEXTURE_LIMIT;
+    let external = external_texture_dictionaries
+        .iter()
+        .map(|source| (source, YtdDictionary::from_bytes(source.bytes)))
+        .collect::<Vec<_>>();
+    let external_dictionary_errors = external
+        .iter()
+        .filter_map(|(source, dictionary)| {
+            dictionary.as_ref().err().map(|error| {
+                json!({
+                    "source": source.source,
+                    "sourcePath": source.path,
+                    "message": error.to_string(),
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut resolved = Vec::new();
+    let mut unresolved = Vec::new();
+
+    for (name_hash, name) in requested.into_iter().take(MODEL_DIFFUSE_TEXTURE_LIMIT) {
+        let embedded_index = embedded_textures.and_then(|dictionary| {
+            dictionary
+                .texture_by_name(&name)
+                .or_else(|| dictionary.texture_by_hash(name_hash))
+                .map(|texture| texture.index)
+        });
+
+        if let (Some(dictionary), Some(index)) = (embedded_textures, embedded_index) {
+            match dictionary.decode_top_mip(index) {
+                Ok(texture) => {
+                    resolved.push(diffuse_texture_json(
+                        &name,
+                        name_hash,
+                        texture,
+                        "embedded",
+                        embedded_source_path,
+                    ));
+                }
+                Err(error) => unresolved.push(json!({
+                    "name": name,
+                    "nameHash": format!("0x{name_hash:08X}"),
+                    "reason": "embeddedTextureDecodeFailed",
+                    "sourcePath": embedded_source_path,
+                    "message": error.to_string(),
+                })),
+            }
+            continue;
+        }
+
+        let mut matched = false;
+        let mut searched_sources = Vec::new();
+        for (source, dictionary) in &external {
+            searched_sources.push(source.path);
+            let Ok(dictionary) = dictionary else {
+                continue;
+            };
+            let Some(index) = dictionary
+                .texture_by_name(&name)
+                .or_else(|| dictionary.texture_by_hash(name_hash))
+                .map(|texture| texture.index)
+            else {
+                continue;
+            };
+
+            matched = true;
+            match dictionary.decode_top_mip(index) {
+                Ok(texture) => resolved.push(diffuse_texture_json(
+                    &name,
+                    name_hash,
+                    texture,
+                    source.source,
+                    source.path,
+                )),
+                Err(error) => unresolved.push(json!({
+                    "name": name,
+                    "nameHash": format!("0x{name_hash:08X}"),
+                    "reason": "externalTextureDecodeFailed",
+                    "source": source.source,
+                    "sourcePath": source.path,
+                    "message": error.to_string(),
+                })),
+            }
+            break;
+        }
+
+        if !matched {
+            unresolved.push(json!({
+                "name": name,
+                "nameHash": format!("0x{name_hash:08X}"),
+                "reason": "textureNotFound",
+                "searchedSources": searched_sources,
+            }));
+        }
+    }
+
+    object.insert("diffuseTextures".into(), Value::Array(resolved.clone()));
+    object.insert(
+        "diffuseTextureResolution".into(),
+        json!({
+            "requested": requested_count,
+            "resolved": resolved.len(),
+            "unresolved": unresolved,
+            "externalDictionaryErrors": external_dictionary_errors,
+            "truncated": truncated,
+            "limits": {
+                "maxTextures": MODEL_DIFFUSE_TEXTURE_LIMIT,
+                "maxDimension": MODEL_DIFFUSE_TEXTURE_MAX_DIMENSION,
+            }
+        }),
+    );
+}
+
+fn diffuse_texture_json(
+    name: &str,
+    name_hash: u32,
+    texture: DecodedTexture,
+    source: &str,
+    source_path: &str,
+) -> Value {
+    let original_width = texture.width;
+    let original_height = texture.height;
+    let bounded = bound_decoded_texture(texture, MODEL_DIFFUSE_TEXTURE_MAX_DIMENSION);
+
+    json!({
+        "name": name,
+        "nameHash": format!("0x{name_hash:08X}"),
+        "source": source,
+        "sourcePath": source_path,
+        "originalWidth": original_width,
+        "originalHeight": original_height,
+        "width": bounded.width,
+        "height": bounded.height,
+        "downscaled": bounded.width != original_width || bounded.height != original_height,
+        "rgbaEncoding": "base64-rgba8",
+        "rgbaBase64": BASE64_STANDARD.encode(&bounded.rgba),
+    })
+}
+
+fn bound_decoded_texture(texture: DecodedTexture, max_dimension: u16) -> DecodedTexture {
+    let width = u32::from(texture.width);
+    let height = u32::from(texture.height);
+    let max_dimension = u32::from(max_dimension);
+
+    if width == 0
+        || height == 0
+        || (width <= max_dimension && height <= max_dimension)
+        || texture.rgba.len() != (width as usize) * (height as usize) * 4
+    {
+        return texture;
+    }
+
+    let (target_width, target_height) = if width >= height {
+        (max_dimension, ((height * max_dimension) / width).max(1))
+    } else {
+        (((width * max_dimension) / height).max(1), max_dimension)
+    };
+
+    let mut rgba = vec![0_u8; (target_width * target_height * 4) as usize];
+    for target_y in 0..target_height {
+        let source_y = (target_y * height / target_height).min(height - 1);
+        for target_x in 0..target_width {
+            let source_x = (target_x * width / target_width).min(width - 1);
+            let source_offset = ((source_y * width + source_x) * 4) as usize;
+            let target_offset = ((target_y * target_width + target_x) * 4) as usize;
+            rgba[target_offset..target_offset + 4]
+                .copy_from_slice(&texture.rgba[source_offset..source_offset + 4]);
+        }
+    }
+
+    DecodedTexture {
+        width: target_width as u16,
+        height: target_height as u16,
+        rgba,
+    }
 }
 
 fn validate_limit(value: usize, label: &str, hard_max: usize) -> Result<(), io::Error> {
@@ -344,6 +605,7 @@ fn model_preview_json(model: &YdrModel, options: PreviewOptions, selector: Value
                 "nameHash": format!("0x{:08X}", shader.name_hash),
                 "fileHash": format!("0x{:08X}", shader.file_hash),
                 "textureReferenceCount": shader.texture_references.len(),
+                "diffuseTextureName": shader.diffuse_texture_name(),
                 "textureReferences": texture_references,
                 "textureReferencesTruncated": take < shader.texture_references.len(),
             })
@@ -601,6 +863,45 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures/synthetic")
             .join(relative)
+    }
+
+    #[test]
+    fn diffuse_texture_preview_downscales_rgba_deterministically() {
+        let texture = DecodedTexture {
+            width: 4,
+            height: 2,
+            rgba: vec![
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+                24, 25, 26, 27, 28, 29, 30, 31, 32,
+            ],
+        };
+        let bounded = bound_decoded_texture(texture, 2);
+        assert_eq!(bounded.width, 2);
+        assert_eq!(bounded.height, 1);
+        assert_eq!(bounded.rgba, vec![1, 2, 3, 4, 9, 10, 11, 12]);
+    }
+
+    #[test]
+    fn diffuse_texture_json_is_bounded_base64_rgba_with_provenance() {
+        let value = diffuse_texture_json(
+            "test_diffuse",
+            0x1234_5678,
+            DecodedTexture {
+                width: 1,
+                height: 1,
+                rgba: vec![255, 0, 128, 64],
+            },
+            "archetypeYtd",
+            "rpf://fixture!/textures.ytd",
+        );
+        assert_eq!(value["name"], "test_diffuse");
+        assert_eq!(value["nameHash"], "0x12345678");
+        assert_eq!(value["source"], "archetypeYtd");
+        assert_eq!(value["sourcePath"], "rpf://fixture!/textures.ytd");
+        assert_eq!(value["width"], 1);
+        assert_eq!(value["height"], 1);
+        assert_eq!(value["rgbaEncoding"], "base64-rgba8");
+        assert_eq!(value["rgbaBase64"], "/wCAQA==");
     }
 
     #[test]

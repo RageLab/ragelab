@@ -260,7 +260,31 @@ pub struct SceneArchetypeResolution {
     pub provider: SceneAssetLocator,
     pub provider_ytyp_hash: Option<u32>,
     pub asset: SceneResolvedAsset,
+    pub texture_dictionary: SceneTextureDictionaryLookup,
     pub collision: SceneCollisionLookup,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SceneTextureDictionarySource {
+    pub hash: u32,
+    pub locator: SceneAssetLocator,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SceneTextureDictionaryAmbiguity {
+    pub hash: u32,
+    pub candidates: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SceneTextureDictionaryLookup {
+    None,
+    Chain {
+        hash: u32,
+        sources: Vec<SceneTextureDictionarySource>,
+        missing: Vec<u32>,
+        ambiguous: Vec<SceneTextureDictionaryAmbiguity>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -432,6 +456,7 @@ pub struct WorkspaceIndex {
     source_interior_bounds: BTreeMap<u32, BTreeSet<u32>>,
     ymap_children: BTreeMap<u32, BTreeMap<u32, Vec<PathBuf>>>,
     texture_parents: BTreeMap<u32, Vec<TextureParentRecord>>,
+    scene_rpf_texture_parents: BTreeMap<u32, Vec<TextureParentRelationship>>,
     pub warnings: Vec<String>,
 }
 
@@ -461,6 +486,7 @@ impl WorkspaceIndex {
             source_interior_bounds: BTreeMap::new(),
             ymap_children: BTreeMap::new(),
             texture_parents: BTreeMap::new(),
+            scene_rpf_texture_parents: BTreeMap::new(),
             warnings: Vec::new(),
         };
 
@@ -721,12 +747,29 @@ impl WorkspaceIndex {
         for (child_hash, records) in fallback.texture_parents {
             self.texture_parents.entry(child_hash).or_insert(records);
         }
+        for (child_hash, relationships) in fallback.scene_rpf_texture_parents {
+            self.scene_rpf_texture_parents
+                .entry(child_hash)
+                .or_insert(relationships);
+        }
         self.warnings.extend(
             fallback
                 .warnings
                 .into_iter()
                 .map(|warning| format!("fallback {}: {warning}", fallback_root.display())),
         );
+    }
+
+    pub fn mount_scene_texture_parent(&mut self, relationship: TextureParentRelationship) {
+        let child_hash = joaat(&relationship.child);
+        let relationships = self
+            .scene_rpf_texture_parents
+            .entry(child_hash)
+            .or_default();
+        if !relationships.contains(&relationship) {
+            relationships.push(relationship);
+            relationships.sort();
+        }
     }
 
     pub fn mount_scene_rpf(
@@ -1242,6 +1285,11 @@ impl WorkspaceIndex {
             }
         };
 
+        let texture_dictionary = match archetype.texture_dictionary {
+            None => SceneTextureDictionaryLookup::None,
+            Some(hash) => self.resolve_scene_texture_dictionary_chain(hash.0),
+        };
+
         let collision = match archetype.physics_dictionary {
             None => SceneCollisionLookup::None,
             Some(hash) => {
@@ -1277,8 +1325,64 @@ impl WorkspaceIndex {
             provider,
             provider_ytyp_hash: provider_ytyp_name.map(|hash| hash.0),
             asset,
+            texture_dictionary,
             collision,
         })
+    }
+
+    fn resolve_scene_texture_dictionary_chain(
+        &self,
+        requested_hash: u32,
+    ) -> SceneTextureDictionaryLookup {
+        let mut sources = Vec::new();
+        let mut missing = Vec::new();
+        let mut ambiguous = Vec::new();
+        let mut visited = BTreeSet::new();
+        let mut current = requested_hash;
+
+        loop {
+            if !visited.insert(current) {
+                break;
+            }
+
+            let candidates = self.scene_candidates(AssetKind::Ytd, current);
+            match candidates.as_slice() {
+                [] => missing.push(current),
+                [locator] => sources.push(SceneTextureDictionarySource {
+                    hash: current,
+                    locator: locator.clone(),
+                }),
+                _ => {
+                    ambiguous.push(SceneTextureDictionaryAmbiguity {
+                        hash: current,
+                        candidates: candidates.len(),
+                    });
+                    break;
+                }
+            }
+
+            let local_parent = self
+                .texture_parents
+                .get(&current)
+                .and_then(|records| records.first())
+                .map(|record| record.parent_hash);
+            let game_parent = self
+                .scene_rpf_texture_parents
+                .get(&current)
+                .and_then(|relationships| relationships.first())
+                .map(|relationship| joaat(&relationship.parent));
+            let Some(parent_hash) = local_parent.or(game_parent) else {
+                break;
+            };
+            current = parent_hash;
+        }
+
+        SceneTextureDictionaryLookup::Chain {
+            hash: requested_hash,
+            sources,
+            missing,
+            ambiguous,
+        }
     }
 
     /// Audits MLO archetypes directly referenced by a YMAP and returns a
@@ -2418,7 +2522,7 @@ mod workspace_index_tests {
     }
 }
 
-fn parse_gtxd_rbf(bytes: &[u8]) -> Result<Vec<TextureParentRelationship>, String> {
+pub fn parse_gtxd_rbf(bytes: &[u8]) -> Result<Vec<TextureParentRelationship>, String> {
     let file = RbfFile::from_bytes(bytes).map_err(|error| error.to_string())?;
     if file.root.name != "CMapParentTxds" {
         return Err(format!(
