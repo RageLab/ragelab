@@ -2,7 +2,7 @@
 
 RageLab exposes renderer-neutral Legacy/Gen8 preview data for software agents and non-graphical consumers. The preview contract serializes normalized Rust domain models; it does not expose Three.js objects or browser rendering state.
 
-Preview construction and limit policy are owned by `ragelab-engine`. CLI, Studio, and future MCP adapters consume the same `PreviewOptions` and `AssetPreviewReport` contracts rather than implementing format-specific preview logic independently.
+Preview construction and limit policy are owned by `ragelab-engine`. CLI, Studio, and future MCP adapters consume the same `PreviewOptions` and `AssetPreviewReport` contracts rather than implementing format-specific preview logic independently. Preview JSON is the diagnostic/automation surface; GPU-oriented consumers should use the typed binary [Shared Render Data Contract](RENDER_CONTRACT.md) instead of treating JSON arrays/base64 as a render transport.
 
 ## Command
 

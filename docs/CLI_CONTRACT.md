@@ -33,7 +33,7 @@ Errors use the same schema:
 
 Consumers must key compatibility decisions on `schema` and `schemaVersion`, not on human-readable output.
 
-The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `spatial <file> --json`, `preview <file> --json`, `plan <operation.json> --json`, `apply <operation.json> --json`, `workspace preflight ... --json`, `workspace export ... --json`, `workspace scene ... --json`, `gta discover --json`, `gta catalog ... --json`, and `fivem discover --json` use the common response envelope.
+The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `spatial <file> --json`, `preview <file> --json`, `plan <operation.json> --json`, `apply <operation.json> --json`, `workspace preflight ... --json`, `workspace export ... --json`, `workspace scene ... --json`, `workspace render-package ... --json`, `gta discover --json`, `gta catalog ... --json`, and `fivem discover --json` use the common response envelope.
 
 ## Agent-first surface
 
@@ -232,6 +232,14 @@ ragelab workspace scene ./stream map.ymap --max-nodes 10000 --json
 ```
 
 The scene contract reports resolved and unresolved nodes, referenced assets, proven entity transforms, local-only collision relationships, warnings, and explicit truncation limits. It does not embed model geometry.
+
+`workspace render-package` consumes the same scene resolution inputs, assembles the scene once, and writes the versioned renderer-neutral binary package used by native, Three.js and WASM consumers:
+
+```bash
+ragelab workspace render-package ./stream map.ymap --output scene.rlrender --json
+```
+
+Existing output is preserved unless `--overwrite` is explicit. Geometry, indices and RGBA pixels are stored in the binary blob rather than JSON/base64. See [RENDER_CONTRACT.md](RENDER_CONTRACT.md).
 
 ## Exit codes
 

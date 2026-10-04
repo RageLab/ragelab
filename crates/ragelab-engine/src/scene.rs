@@ -554,6 +554,34 @@ pub struct SceneAssetPreviewSources<'a> {
     pub game_index: Option<&'a SceneGameIndexSource>,
 }
 
+pub(crate) struct OwnedPreviewTextureDictionarySource {
+    pub(crate) path: String,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) source: &'static str,
+}
+
+pub(crate) struct SceneAssetPreviewInput {
+    pub(crate) path_label: String,
+    pub(crate) asset_type: &'static str,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) options: PreviewOptions,
+    pub(crate) external_texture_dictionaries: Vec<OwnedPreviewTextureDictionarySource>,
+    pub(crate) external_texture_errors: Vec<String>,
+}
+
+impl SceneAssetPreviewInput {
+    pub(crate) fn external_sources(&self) -> Vec<PreviewTextureDictionarySource<'_>> {
+        self.external_texture_dictionaries
+            .iter()
+            .map(|source| PreviewTextureDictionarySource {
+                path: &source.path,
+                bytes: &source.bytes,
+                source: source.source,
+            })
+            .collect()
+    }
+}
+
 pub fn workspace_scene_asset_preview_with_sources(
     workspace: &Path,
     ymap_path: &Path,
@@ -602,8 +630,37 @@ pub fn workspace_scene_asset_preview_with_game_index(
             ),
         )
     })?;
+    let input = prepare_scene_asset_preview_input(asset, options)?;
+    let external = input.external_sources();
 
-    let mut options = options;
+    let mut report = preview_asset_bytes_as_with_texture_dictionaries(
+        &input.path_label,
+        input.asset_type,
+        &input.bytes,
+        input.options,
+        &external,
+    )?;
+
+    if !input.external_texture_errors.is_empty() {
+        if let Some(resolution) = report
+            .preview
+            .get_mut("diffuseTextureResolution")
+            .and_then(Value::as_object_mut)
+        {
+            resolution.insert(
+                "externalTextureDictionaryReadErrors".into(),
+                serde_json::to_value(input.external_texture_errors).unwrap_or(Value::Null),
+            );
+        }
+    }
+
+    Ok(report)
+}
+
+pub(crate) fn prepare_scene_asset_preview_input(
+    asset: &SceneAssetReference,
+    mut options: PreviewOptions,
+) -> Result<SceneAssetPreviewInput, io::Error> {
     let asset_type = match asset.kind {
         AssetKind::Ydr => "YDR",
         AssetKind::Ydd => {
@@ -628,7 +685,7 @@ pub fn workspace_scene_asset_preview_with_game_index(
     };
 
     let bytes = asset.path.read_bytes().map_err(io::Error::other)?;
-    let mut external_texture_dictionaries = Vec::<(String, Vec<u8>, &'static str)>::new();
+    let mut external_texture_dictionaries = Vec::new();
     let mut external_texture_errors = Vec::new();
 
     if let SceneTextureDictionaryLookup::Chain { hash, sources, .. } = &asset.texture_dictionary {
@@ -636,15 +693,15 @@ pub fn workspace_scene_asset_preview_with_game_index(
             let provenance = source.locator.provenance();
             match source.locator.read_bytes() {
                 Ok(texture_bytes) => {
-                    external_texture_dictionaries.push((
-                        provenance,
-                        texture_bytes,
-                        if source.hash == *hash {
+                    external_texture_dictionaries.push(OwnedPreviewTextureDictionarySource {
+                        path: provenance,
+                        bytes: texture_bytes,
+                        source: if source.hash == *hash {
                             "archetypeYtd"
                         } else {
                             "parentYtd"
                         },
-                    ));
+                    });
                 }
                 Err(error) => {
                     external_texture_errors.push(format!("{provenance}: {error}"));
@@ -653,40 +710,17 @@ pub fn workspace_scene_asset_preview_with_game_index(
         }
     }
 
-    let external = external_texture_dictionaries
-        .iter()
-        .map(|(path, bytes, source)| PreviewTextureDictionarySource {
-            path,
-            bytes,
-            source,
-        })
-        .collect::<Vec<_>>();
-
-    let mut report = preview_asset_bytes_as_with_texture_dictionaries(
-        &asset.path.provenance(),
+    Ok(SceneAssetPreviewInput {
+        path_label: asset.path.provenance(),
         asset_type,
-        &bytes,
+        bytes,
         options,
-        &external,
-    )?;
-
-    if !external_texture_errors.is_empty() {
-        if let Some(resolution) = report
-            .preview
-            .get_mut("diffuseTextureResolution")
-            .and_then(Value::as_object_mut)
-        {
-            resolution.insert(
-                "externalTextureDictionaryReadErrors".into(),
-                serde_json::to_value(external_texture_errors).unwrap_or(Value::Null),
-            );
-        }
-    }
-
-    Ok(report)
+        external_texture_dictionaries,
+        external_texture_errors,
+    })
 }
 
-fn workspace_scene_manifest_with_sources(
+pub(crate) fn workspace_scene_manifest_with_sources(
     workspace: &Path,
     ymap_path: &Path,
     fallback_roots: &[PathBuf],

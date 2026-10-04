@@ -9,9 +9,11 @@ use ragelab_engine::{
     apply_operation_document, asset_capabilities, build_vanilla_catalog, discover_fivem_legacy,
     discover_gta_v_legacy, gta_rpf_archive_order, inspect_asset, isolated_asset_spatial_context,
     parse_operation_document, plan_operation_document, preview_asset, render_vanilla_catalog_paths,
-    validate_asset, workspace_scene_report_with_game_index, ymap_spatial_context, EngineError,
-    GtaRpfAssetIndex, OperationError, PreviewOptions, SceneAssemblyOptions, SceneGameIndexSource,
-    SceneRpfMount, SpatialContext, SpatialProvenance,
+    validate_asset, workspace_scene_render_package_with_game_index,
+    workspace_scene_report_with_game_index, ymap_spatial_context, EngineError, GtaRpfAssetIndex,
+    OperationError, PreviewOptions, RenderPackageOptions, SceneAssemblyOptions,
+    SceneAssetPreviewSources, SceneGameIndexSource, SceneRpfMount, SpatialContext,
+    SpatialProvenance,
 };
 use ragelab_ybn::YbnCollision;
 use ragelab_ydd::YddDictionary;
@@ -36,6 +38,7 @@ pub fn is_structured_command(command: &str) -> bool {
             | "spatial"
             | "preview"
             | "scene"
+            | "render-package"
             | "preflight"
             | "export"
             | "gta.discover"
@@ -466,6 +469,62 @@ pub fn scene(
     Ok(())
 }
 
+pub fn render_package(
+    scene: &SceneCommandArgs,
+    output: &Path,
+    options: RenderPackageOptions,
+    overwrite: bool,
+) -> Result<(), Box<dyn Error>> {
+    if output.exists() && !overwrite {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "output already exists: {}; pass --overwrite to replace it",
+                output.display()
+            ),
+        )
+        .into());
+    }
+
+    let package = workspace_scene_render_package_with_game_index(
+        &scene.workspace,
+        &scene.ymap,
+        SceneAssetPreviewSources {
+            fallback_roots: &scene.fallback_roots,
+            rpf_mounts: &scene.rpf_mounts,
+            game_index: scene.game_index.as_ref(),
+        },
+        scene.options,
+        options,
+    )?;
+    let report = package.report();
+    let bytes = package.encode_binary()?;
+    fs::write(output, &bytes)?;
+
+    if scene.json_output {
+        print_success(
+            "render-package",
+            json!({
+                "output": output.display().to_string(),
+                "report": report,
+            }),
+        )?;
+    } else {
+        println!("output: {}", output.display());
+        println!("instances: {}", report.summary.instances);
+        println!("assets: {}", report.summary.assets);
+        println!("ready-assets: {}", report.summary.ready_assets);
+        println!("meshes: {}", report.summary.meshes);
+        println!("materials: {}", report.summary.materials);
+        println!("textures: {}", report.summary.textures);
+        println!("blob-bytes: {}", report.blob_bytes);
+        println!("encoded-bytes: {}", report.encoded_bytes);
+        println!("diagnostics: {}", report.diagnostics.len());
+    }
+
+    Ok(())
+}
+
 pub struct SceneCommandArgs {
     pub workspace: PathBuf,
     pub ymap: PathBuf,
@@ -613,6 +672,67 @@ pub fn parse_scene_args(
         game_index: game_index_source,
         options: max_nodes.map(SceneAssemblyOptions::new).unwrap_or_default(),
         json_output,
+    })
+}
+
+pub struct RenderPackageCommandArgs {
+    pub scene: SceneCommandArgs,
+    pub output: PathBuf,
+    pub options: RenderPackageOptions,
+    pub overwrite: bool,
+}
+
+pub fn parse_render_package_args(
+    args: impl Iterator<Item = String>,
+    usage: &str,
+) -> Result<RenderPackageCommandArgs, io::Error> {
+    let mut base_args = Vec::new();
+    let mut output = None;
+    let mut max_assets = None;
+    let mut max_blob_bytes = None;
+    let mut overwrite = false;
+    let mut args = args;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--output" => {
+                output =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidInput, usage)
+                    })?));
+            }
+            "--max-assets" => {
+                max_assets = Some(parse_preview_limit(args.next(), "--max-assets", usage)?);
+            }
+            "--max-blob-bytes" => {
+                max_blob_bytes = Some(parse_preview_limit(args.next(), "--max-blob-bytes", usage)?);
+            }
+            "--overwrite" => overwrite = true,
+            _ => base_args.push(arg),
+        }
+    }
+
+    let scene = parse_scene_args(base_args.into_iter(), usage)?;
+    let mut options = RenderPackageOptions::default();
+    if let Some(value) = max_assets {
+        options.max_assets = value;
+    }
+    if let Some(value) = max_blob_bytes {
+        options.max_blob_bytes = value;
+    }
+    let options = options.validate()?;
+    let output = output.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{usage}; --output <file> is required"),
+        )
+    })?;
+
+    Ok(RenderPackageCommandArgs {
+        scene,
+        output,
+        options,
+        overwrite,
     })
 }
 
@@ -1098,6 +1218,7 @@ pub fn normalize_command_args(args: Vec<String>) -> Vec<String> {
         ("workspace", "extract") => Some("extract"),
         ("workspace", "export") => Some("export"),
         ("workspace", "scene") => Some("scene"),
+        ("workspace", "render-package") => Some("render-package"),
         ("gta", "discover") => Some("gta.discover"),
         ("gta", "catalog") => Some("gta.catalog"),
         ("gta", "rpf-order") => Some("gta.rpf-order"),

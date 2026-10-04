@@ -28,8 +28,8 @@ pub const HARD_PREVIEW_MAX_TEXTURE_REFERENCES: usize = 4_096;
 pub const HARD_PREVIEW_MAX_CHILDREN: usize = 4_096;
 pub const HARD_PREVIEW_MAX_MATERIALS: usize = 8_192;
 
-const MODEL_DIFFUSE_TEXTURE_LIMIT: usize = 32;
-const MODEL_DIFFUSE_TEXTURE_MAX_DIMENSION: u16 = 256;
+pub(crate) const MODEL_DIFFUSE_TEXTURE_LIMIT: usize = 32;
+pub(crate) const MODEL_DIFFUSE_TEXTURE_MAX_DIMENSION: u16 = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -141,6 +141,34 @@ pub struct PreviewTextureDictionarySource<'a> {
     pub source: &'a str,
 }
 
+pub(crate) struct ModelPreviewSource {
+    pub(crate) model: YdrModel,
+    pub(crate) embedded_textures: Option<YtdDictionary>,
+    pub(crate) selector: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedDiffuseTexture {
+    pub(crate) name: String,
+    pub(crate) name_hash: u32,
+    pub(crate) source: String,
+    pub(crate) source_path: String,
+    pub(crate) original_width: u16,
+    pub(crate) original_height: u16,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+    pub(crate) downscaled: bool,
+    pub(crate) rgba: Vec<u8>,
+}
+
+pub(crate) struct DiffuseTextureResolution {
+    pub(crate) requested: usize,
+    pub(crate) resolved: Vec<ResolvedDiffuseTexture>,
+    pub(crate) unresolved: Vec<Value>,
+    pub(crate) external_dictionary_errors: Vec<Value>,
+    pub(crate) truncated: bool,
+}
+
 pub fn preview_asset_bytes_as_with_texture_dictionary(
     path_label: &str,
     asset_type: &str,
@@ -197,7 +225,35 @@ pub fn preview_asset_bytes_as_with_texture_dictionaries(
         });
     }
 
-    let (model, embedded_textures, selector) = match asset_type {
+    let source = parse_model_preview_source(asset_type, bytes, options)?;
+    let coordinate_convention = source.model.coordinate_convention.as_str().to_string();
+    let mut preview = model_preview_json(&source.model, options, source.selector);
+    append_diffuse_texture_preview(
+        &mut preview,
+        &source.model,
+        source.embedded_textures.as_ref(),
+        path_label,
+        external_texture_dictionaries,
+        options,
+    );
+
+    Ok(AssetPreviewReport {
+        path: path_label.to_string(),
+        asset_type: asset_type.to_string(),
+        spatial: PreviewSpatial {
+            classification: "localOnly",
+            coordinate_convention,
+        },
+        preview,
+    })
+}
+
+pub(crate) fn parse_model_preview_source(
+    asset_type: &str,
+    bytes: &[u8],
+    options: PreviewOptions,
+) -> Result<ModelPreviewSource, io::Error> {
+    match asset_type {
         "YDR" => {
             if options.drawable_index.is_some() {
                 return Err(io::Error::new(
@@ -206,7 +262,11 @@ pub fn preview_asset_bytes_as_with_texture_dictionaries(
                 ));
             }
             let document = YdrDocument::from_bytes(bytes).map_err(validation_error)?;
-            (document.model, document.embedded_textures, Value::Null)
+            Ok(ModelPreviewSource {
+                model: document.model,
+                embedded_textures: document.embedded_textures,
+                selector: Value::Null,
+            })
         }
         "YFT" => {
             if options.drawable_index.is_some() {
@@ -222,14 +282,14 @@ pub fn preview_asset_bytes_as_with_texture_dictionaries(
                     "YFT fragment does not contain a pristine main drawable",
                 )
             })?;
-            (
-                drawable.model,
-                drawable.embedded_textures,
-                json!({
+            Ok(ModelPreviewSource {
+                model: drawable.model,
+                embedded_textures: drawable.embedded_textures,
+                selector: json!({
                     "fragmentRole": "mainDrawable",
                     "fragmentName": fragment.name,
                 }),
-            )
+            })
         }
         "YDD" => {
             let drawable_index = options.drawable_index.ok_or_else(|| {
@@ -251,44 +311,21 @@ pub fn preview_asset_bytes_as_with_texture_dictionaries(
             let document = dictionary
                 .document(drawable_index)
                 .map_err(validation_error)?;
-            (
-                document.model,
-                document.embedded_textures,
-                json!({
+            Ok(ModelPreviewSource {
+                model: document.model,
+                embedded_textures: document.embedded_textures,
+                selector: json!({
                     "drawableIndex": entry.index,
                     "nameHash": format!("0x{:08X}", entry.name_hash),
                     "name": entry.name,
                 }),
-            )
+            })
         }
-        _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!("headless model preview is unavailable for {asset_type}"),
-            ))
-        }
-    };
-
-    let coordinate_convention = model.coordinate_convention.as_str().to_string();
-    let mut preview = model_preview_json(&model, options, selector);
-    append_diffuse_texture_preview(
-        &mut preview,
-        &model,
-        embedded_textures.as_ref(),
-        path_label,
-        external_texture_dictionaries,
-        options,
-    );
-
-    Ok(AssetPreviewReport {
-        path: path_label.to_string(),
-        asset_type: asset_type.to_string(),
-        spatial: PreviewSpatial {
-            classification: "localOnly",
-            coordinate_convention,
-        },
-        preview,
-    })
+        _ => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("headless model preview is unavailable for {asset_type}"),
+        )),
+    }
 }
 
 fn append_diffuse_texture_preview(
@@ -303,6 +340,43 @@ fn append_diffuse_texture_preview(
         return;
     };
 
+    let resolution = resolve_diffuse_textures(
+        model,
+        embedded_textures,
+        embedded_source_path,
+        external_texture_dictionaries,
+        options,
+    );
+    let resolved = resolution
+        .resolved
+        .iter()
+        .map(resolved_diffuse_texture_json)
+        .collect::<Vec<_>>();
+
+    object.insert("diffuseTextures".into(), Value::Array(resolved));
+    object.insert(
+        "diffuseTextureResolution".into(),
+        json!({
+            "requested": resolution.requested,
+            "resolved": resolution.resolved.len(),
+            "unresolved": resolution.unresolved,
+            "externalDictionaryErrors": resolution.external_dictionary_errors,
+            "truncated": resolution.truncated,
+            "limits": {
+                "maxTextures": MODEL_DIFFUSE_TEXTURE_LIMIT,
+                "maxDimension": MODEL_DIFFUSE_TEXTURE_MAX_DIMENSION,
+            }
+        }),
+    );
+}
+
+pub(crate) fn resolve_diffuse_textures(
+    model: &YdrModel,
+    embedded_textures: Option<&YtdDictionary>,
+    embedded_source_path: &str,
+    external_texture_dictionaries: &[PreviewTextureDictionarySource<'_>],
+    options: PreviewOptions,
+) -> DiffuseTextureResolution {
     let mut requested = BTreeMap::<u32, String>::new();
     for shader in model.shaders.iter().take(options.max_shaders) {
         if let Some(name) = shader.diffuse_texture_name() {
@@ -344,15 +418,13 @@ fn append_diffuse_texture_preview(
 
         if let (Some(dictionary), Some(index)) = (embedded_textures, embedded_index) {
             match dictionary.decode_top_mip(index) {
-                Ok(texture) => {
-                    resolved.push(diffuse_texture_json(
-                        &name,
-                        name_hash,
-                        texture,
-                        "embedded",
-                        embedded_source_path,
-                    ));
-                }
+                Ok(texture) => resolved.push(resolved_diffuse_texture(
+                    &name,
+                    name_hash,
+                    texture,
+                    "embedded",
+                    embedded_source_path,
+                )),
                 Err(error) => unresolved.push(json!({
                     "name": name,
                     "nameHash": format!("0x{name_hash:08X}"),
@@ -381,7 +453,7 @@ fn append_diffuse_texture_preview(
 
             matched = true;
             match dictionary.decode_top_mip(index) {
-                Ok(texture) => resolved.push(diffuse_texture_json(
+                Ok(texture) => resolved.push(resolved_diffuse_texture(
                     &name,
                     name_hash,
                     texture,
@@ -410,23 +482,57 @@ fn append_diffuse_texture_preview(
         }
     }
 
-    object.insert("diffuseTextures".into(), Value::Array(resolved.clone()));
-    object.insert(
-        "diffuseTextureResolution".into(),
-        json!({
-            "requested": requested_count,
-            "resolved": resolved.len(),
-            "unresolved": unresolved,
-            "externalDictionaryErrors": external_dictionary_errors,
-            "truncated": truncated,
-            "limits": {
-                "maxTextures": MODEL_DIFFUSE_TEXTURE_LIMIT,
-                "maxDimension": MODEL_DIFFUSE_TEXTURE_MAX_DIMENSION,
-            }
-        }),
-    );
+    DiffuseTextureResolution {
+        requested: requested_count,
+        resolved,
+        unresolved,
+        external_dictionary_errors,
+        truncated,
+    }
 }
 
+fn resolved_diffuse_texture(
+    name: &str,
+    name_hash: u32,
+    texture: DecodedTexture,
+    source: &str,
+    source_path: &str,
+) -> ResolvedDiffuseTexture {
+    let original_width = texture.width;
+    let original_height = texture.height;
+    let bounded = bound_decoded_texture(texture, MODEL_DIFFUSE_TEXTURE_MAX_DIMENSION);
+
+    ResolvedDiffuseTexture {
+        name: name.to_string(),
+        name_hash,
+        source: source.to_string(),
+        source_path: source_path.to_string(),
+        original_width,
+        original_height,
+        width: bounded.width,
+        height: bounded.height,
+        downscaled: bounded.width != original_width || bounded.height != original_height,
+        rgba: bounded.rgba,
+    }
+}
+
+fn resolved_diffuse_texture_json(texture: &ResolvedDiffuseTexture) -> Value {
+    json!({
+        "name": texture.name,
+        "nameHash": format!("0x{:08X}", texture.name_hash),
+        "source": texture.source,
+        "sourcePath": texture.source_path,
+        "originalWidth": texture.original_width,
+        "originalHeight": texture.original_height,
+        "width": texture.width,
+        "height": texture.height,
+        "downscaled": texture.downscaled,
+        "rgbaEncoding": "base64-rgba8",
+        "rgbaBase64": BASE64_STANDARD.encode(&texture.rgba),
+    })
+}
+
+#[cfg(test)]
 fn diffuse_texture_json(
     name: &str,
     name_hash: u32,
@@ -434,26 +540,16 @@ fn diffuse_texture_json(
     source: &str,
     source_path: &str,
 ) -> Value {
-    let original_width = texture.width;
-    let original_height = texture.height;
-    let bounded = bound_decoded_texture(texture, MODEL_DIFFUSE_TEXTURE_MAX_DIMENSION);
-
-    json!({
-        "name": name,
-        "nameHash": format!("0x{name_hash:08X}"),
-        "source": source,
-        "sourcePath": source_path,
-        "originalWidth": original_width,
-        "originalHeight": original_height,
-        "width": bounded.width,
-        "height": bounded.height,
-        "downscaled": bounded.width != original_width || bounded.height != original_height,
-        "rgbaEncoding": "base64-rgba8",
-        "rgbaBase64": BASE64_STANDARD.encode(&bounded.rgba),
-    })
+    resolved_diffuse_texture_json(&resolved_diffuse_texture(
+        name,
+        name_hash,
+        texture,
+        source,
+        source_path,
+    ))
 }
 
-fn bound_decoded_texture(texture: DecodedTexture, max_dimension: u16) -> DecodedTexture {
+pub(crate) fn bound_decoded_texture(texture: DecodedTexture, max_dimension: u16) -> DecodedTexture {
     let width = u32::from(texture.width);
     let height = u32::from(texture.height);
     let max_dimension = u32::from(max_dimension);

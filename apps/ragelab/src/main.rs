@@ -105,6 +105,17 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn Error>> {
                 scene.json_output,
             )?;
         }
+        "render-package" => {
+            const USAGE: &str =
+                "usage: ragelab workspace render-package <directory> <file.ymap> --output <file> [--fallback-root <directory>]... [--rpf-mount <archive.rpf> [--rpf-nested <entry.rpf>]...]... [--game-root <directory> --game-index <file>] [--rpf-keys <directory>] [--max-nodes <n>] [--max-assets <n>] [--max-blob-bytes <n>] [--overwrite] [--json]";
+            let command = agent::parse_render_package_args(args, USAGE)?;
+            agent::render_package(
+                &command.scene,
+                &command.output,
+                command.options,
+                command.overwrite,
+            )?;
+        }
         "plan" => {
             let (path, json) =
                 agent::parse_path_json_args(args, "usage: ragelab plan <operation.json> [--json]")?;
@@ -583,6 +594,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "workspace.extract",
         "workspace.export",
         "workspace.scene",
+        "workspace.render-package",
         "gta.discover",
         "gta.catalog",
         "gta.rpf-order",
@@ -686,6 +698,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "workspace.extract",
         "workspace.export",
         "workspace.scene",
+        "workspace.render-package",
         "gta.discover",
         "gta.catalog",
         "gta.rpf-order",
@@ -708,7 +721,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
                 "version": env!("CARGO_PKG_VERSION"),
                 "commands": DISCOVERY_COMMANDS,
                 "canonicalCommands": CANONICAL_COMMANDS,
-                "structuredOutput": ["version", "capabilities", "inspect", "validate", "spatial", "preview", "plan", "apply", "workspace.preflight", "workspace.export", "workspace.scene", "gta.discover", "gta.catalog", "gta.rpf-order", "gta.rpf-index", "rpf.keys", "rpf.info", "rpf.list", "rpf.extract", "fivem.discover"],
+                "structuredOutput": ["version", "capabilities", "inspect", "validate", "spatial", "preview", "plan", "apply", "workspace.preflight", "workspace.export", "workspace.scene", "workspace.render-package", "gta.discover", "gta.catalog", "gta.rpf-order", "gta.rpf-index", "rpf.keys", "rpf.info", "rpf.list", "rpf.extract", "fivem.discover"],
                 "legacyAliases": LEGACY_ALIASES,
                 "responseEnvelope": {
                     "schema": agent::RESPONSE_SCHEMA,
@@ -766,6 +779,7 @@ ragelab workspace mlo-audit <directory> <file.ymap> [catalog options]\n  \
 ragelab workspace extract <directory> <file.ymap> <output> [--allow-unresolved] [--overwrite]\n  \
 ragelab workspace export <directory> <file.ymap> [more.ymap ...] --output <directory> [--resource-name <name>] [--allow-unresolved] [--overwrite] [catalog options] [--json]\n  \
 ragelab workspace scene <directory> <file.ymap> [--fallback-root <directory>]... [--rpf-mount <archive.rpf> [--rpf-nested <entry.rpf>]...]... [--game-root <directory> --game-index <file>] [--rpf-keys <directory>] [--max-nodes <n>] [--json]\n  \
+ragelab workspace render-package <directory> <file.ymap> --output <file> [scene source options] [--max-nodes <n>] [--max-assets <n>] [--max-blob-bytes <n>] [--overwrite] [--json]\n  \
 ragelab gta discover [--json]\n  \
 ragelab fivem discover [--json]\n  \
 ragelab gta catalog <directory> --output <paths.txt> [--overwrite] [--json]\n  \
