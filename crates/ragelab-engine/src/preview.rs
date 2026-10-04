@@ -115,8 +115,17 @@ pub fn preview_asset_bytes(
     bytes: &[u8],
     options: PreviewOptions,
 ) -> Result<AssetPreviewReport, io::Error> {
-    let options = options.validate()?;
     let asset_type = asset_type_name(path);
+    preview_asset_bytes_as(&path.display().to_string(), asset_type, bytes, options)
+}
+
+pub fn preview_asset_bytes_as(
+    path_label: &str,
+    asset_type: &str,
+    bytes: &[u8],
+    options: PreviewOptions,
+) -> Result<AssetPreviewReport, io::Error> {
+    let options = options.validate()?;
 
     if asset_type == "YBN" {
         if options.drawable_index.is_some() {
@@ -128,7 +137,7 @@ pub fn preview_asset_bytes(
 
         let collision = YbnCollision::from_bytes(bytes).map_err(validation_error)?;
         return Ok(AssetPreviewReport {
-            path: path.display().to_string(),
+            path: path_label.to_string(),
             asset_type: asset_type.to_string(),
             spatial: PreviewSpatial {
                 classification: "localOnly",
@@ -188,7 +197,7 @@ pub fn preview_asset_bytes(
 
     let coordinate_convention = model.coordinate_convention.as_str().to_string();
     Ok(AssetPreviewReport {
-        path: path.display().to_string(),
+        path: path_label.to_string(),
         asset_type: asset_type.to_string(),
         spatial: PreviewSpatial {
             classification: "localOnly",

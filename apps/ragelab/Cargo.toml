@@ -11,6 +11,7 @@ ragelab-engine = { path = "../../crates/ragelab-engine" }
 ragelab-hash = { path = "../../crates/ragelab-hash" }
 ragelab-meta = { path = "../../crates/ragelab-meta" }
 ragelab-resource = { path = "../../crates/ragelab-resource" }
+ragelab-rpf = { path = "../../crates/ragelab-rpf" }
 ragelab-ymap = { path = "../../crates/ragelab-ymap" }
 ragelab-ytd = { path = "../../crates/ragelab-ytd" }
 ragelab-ytyp = { path = "../../crates/ragelab-ytyp" }

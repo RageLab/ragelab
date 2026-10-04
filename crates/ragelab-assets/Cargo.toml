@@ -9,6 +9,7 @@ rust-version.workspace = true
 ragelab-hash = { path = "../ragelab-hash" }
 ragelab-meta = { path = "../ragelab-meta" }
 ragelab-rbf = { path = "../ragelab-rbf" }
+ragelab-rpf = { path = "../ragelab-rpf" }
 ragelab-ymap = { path = "../ragelab-ymap" }
 ragelab-ydd = { path = "../ragelab-ydd" }
 ragelab-ytyp = { path = "../ragelab-ytyp" }

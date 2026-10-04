@@ -1,4 +1,5 @@
 mod agent;
+mod rpf_cmd;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -92,10 +93,16 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn Error>> {
         }
         "scene" => {
             const USAGE: &str =
-                "usage: ragelab workspace scene <directory> <file.ymap> [--fallback-root <directory>]... [--max-nodes <n>] [--json]";
-            let (workspace, ymap, fallback_roots, options, json) =
-                agent::parse_scene_args(args, USAGE)?;
-            agent::scene(&workspace, &ymap, &fallback_roots, options, json)?;
+                "usage: ragelab workspace scene <directory> <file.ymap> [--fallback-root <directory>]... [--rpf-mount <archive.rpf> [--rpf-nested <entry.rpf>]...]... [--rpf-keys <directory>] [--max-nodes <n>] [--json]";
+            let scene = agent::parse_scene_args(args, USAGE)?;
+            agent::scene(
+                &scene.workspace,
+                &scene.ymap,
+                &scene.fallback_roots,
+                &scene.rpf_mounts,
+                scene.options,
+                scene.json_output,
+            )?;
         }
         "plan" => {
             let (path, json) =
@@ -430,6 +437,24 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn Error>> {
             let (root, output, overwrite, json) = agent::parse_gta_catalog_args(args, USAGE)?;
             agent::gta_catalog(&root, &output, overwrite, json)?;
         }
+        "rpf.info" => {
+            const USAGE: &str =
+                "usage: ragelab rpf info <archive.rpf> [--keys <directory>] [--nested <entry.rpf>]... [--json]";
+            let (archive, options) = rpf_cmd::parse_options(args, USAGE)?;
+            rpf_cmd::info(&archive, &options)?;
+        }
+        "rpf.list" => {
+            const USAGE: &str =
+                "usage: ragelab rpf list <archive.rpf> [--keys <directory>] [--nested <entry.rpf>]... [--contains <text>] [--json]";
+            let (archive, options) = rpf_cmd::parse_options(args, USAGE)?;
+            rpf_cmd::list(&archive, &options)?;
+        }
+        "rpf.extract" => {
+            const USAGE: &str =
+                "usage: ragelab rpf extract <archive.rpf> [--keys <directory>] [--nested <entry.rpf>]... --entry <path> --output <file> [--overwrite] [--json]";
+            let (archive, options) = rpf_cmd::parse_options(args, USAGE)?;
+            rpf_cmd::extract(&archive, &options)?;
+        }
         "vanilla-index" => {
             const USAGE: &str =
                 "usage: ragelab vanilla-index <extracted-gta-directory> <output.txt>";
@@ -542,6 +567,9 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "gta.discover",
         "gta.catalog",
         "gta.vanilla-index",
+        "rpf.info",
+        "rpf.list",
+        "rpf.extract",
         "fivem.discover",
     ];
     const LEGACY_ALIASES: &[&str] = &[
@@ -639,6 +667,9 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "gta.discover",
         "gta.catalog",
         "gta.vanilla-index",
+        "rpf.info",
+        "rpf.list",
+        "rpf.extract",
         "fivem.discover",
     ];
 
@@ -652,7 +683,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
                 "version": env!("CARGO_PKG_VERSION"),
                 "commands": DISCOVERY_COMMANDS,
                 "canonicalCommands": CANONICAL_COMMANDS,
-                "structuredOutput": ["version", "capabilities", "inspect", "validate", "spatial", "preview", "plan", "apply", "workspace.preflight", "workspace.export", "workspace.scene", "gta.discover", "gta.catalog", "fivem.discover"],
+                "structuredOutput": ["version", "capabilities", "inspect", "validate", "spatial", "preview", "plan", "apply", "workspace.preflight", "workspace.export", "workspace.scene", "gta.discover", "gta.catalog", "rpf.info", "rpf.list", "rpf.extract", "fivem.discover"],
                 "legacyAliases": LEGACY_ALIASES,
                 "responseEnvelope": {
                     "schema": agent::RESPONSE_SCHEMA,
@@ -709,11 +740,15 @@ ragelab workspace preflight <directory> <file.ymap> [more.ymap ...] [catalog opt
 ragelab workspace mlo-audit <directory> <file.ymap> [catalog options]\n  \
 ragelab workspace extract <directory> <file.ymap> <output> [--allow-unresolved] [--overwrite]\n  \
 ragelab workspace export <directory> <file.ymap> [more.ymap ...] --output <directory> [--resource-name <name>] [--allow-unresolved] [--overwrite] [catalog options] [--json]\n  \
-ragelab workspace scene <directory> <file.ymap> [--fallback-root <directory>]... [--max-nodes <n>] [--json]\n  \
+ragelab workspace scene <directory> <file.ymap> [--fallback-root <directory>]... [--rpf-mount <archive.rpf> [--rpf-nested <entry.rpf>]...]... [--rpf-keys <directory>] [--max-nodes <n>] [--json]\n  \
 ragelab gta discover [--json]\n  \
 ragelab fivem discover [--json]\n  \
 ragelab gta catalog <directory> --output <paths.txt> [--overwrite] [--json]\n  \
 ragelab gta vanilla-index <extracted-gta-directory> <output.txt>\n\n\
+RPF commands:\n  \
+ragelab rpf info <archive.rpf> [--keys <directory>] [--nested <entry.rpf>]... [--json]\n  \
+ragelab rpf list <archive.rpf> [--keys <directory>] [--nested <entry.rpf>]... [--contains <text>] [--json]\n  \
+ragelab rpf extract <archive.rpf> [--keys <directory>] [--nested <entry.rpf>]... --entry <path> --output <file> [--overwrite] [--json]\n\n\
 Utility commands:\n  \
 ragelab hash <asset-name>\n  \
 ragelab meta-hash <case-sensitive-name>\n  \

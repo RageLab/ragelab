@@ -10,16 +10,37 @@ use std::{
 };
 
 use ragelab_assets::{
-    AssetKind, SceneArchetypeResolution, SceneAssetLookupError, SceneAssetLookupErrorCode,
-    SceneCollisionLookup, SceneCollisionLookupErrorCode, SceneResolvedAsset, WorkspaceIndex,
+    AssetKind, SceneArchetypeResolution, SceneAssetLocator, SceneAssetLookupError,
+    SceneAssetLookupErrorCode, SceneCollisionLookup, SceneCollisionLookupErrorCode,
+    SceneResolvedAsset, WorkspaceIndex,
 };
 use ragelab_ymap::Ymap;
 use serde::Serialize;
 
-use crate::{ymap_entity_spatial_context, SpatialTransform};
+use crate::{
+    preview_asset_bytes_as, ymap_entity_spatial_context, AssetPreviewReport, PreviewOptions,
+    SpatialTransform,
+};
 
 pub const DEFAULT_SCENE_NODE_LIMIT: usize = 10_000;
 pub const MAX_SCENE_NODE_LIMIT: usize = 50_000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SceneRpfMount {
+    pub archive: PathBuf,
+    pub nested: Vec<String>,
+    pub keys: PathBuf,
+}
+
+impl SceneRpfMount {
+    pub fn new(archive: impl Into<PathBuf>, nested: Vec<String>, keys: impl Into<PathBuf>) -> Self {
+        Self {
+            archive: archive.into(),
+            nested,
+            keys: keys.into(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SceneAssemblyOptions {
@@ -67,7 +88,7 @@ pub struct SceneNode {
     pub source_ymap: PathBuf,
     pub entity_index: usize,
     pub archetype_hash: u32,
-    pub provider_path: Option<PathBuf>,
+    pub provider_path: Option<String>,
     pub asset_ref: Option<usize>,
     pub asset_kind: Option<AssetKind>,
     pub transform: Option<SpatialTransform>,
@@ -133,7 +154,7 @@ pub struct SceneAssetReference {
     pub id: usize,
     pub kind: AssetKind,
     pub hash: u32,
-    pub path: PathBuf,
+    pub path: SceneAssetLocator,
     pub selector: Option<SceneAssetSelector>,
 }
 
@@ -298,10 +319,7 @@ impl From<&SceneManifest> for SceneManifestReport {
                     source_ymap: node.source_ymap.display().to_string(),
                     entity_index: node.entity_index,
                     archetype_hash: format!("0x{:08X}", node.archetype_hash),
-                    provider_path: node
-                        .provider_path
-                        .as_ref()
-                        .map(|path| path.display().to_string()),
+                    provider_path: node.provider_path.clone(),
                     asset_ref: node.asset_ref,
                     asset_kind: node.asset_kind.map(|kind| kind.to_string()),
                     transform: node.transform.map(|transform| SceneTransformReport {
@@ -334,7 +352,7 @@ impl From<&SceneManifest> for SceneManifestReport {
                     id: asset.id,
                     kind: asset.kind.to_string(),
                     hash: format!("0x{:08X}", asset.hash),
-                    path: asset.path.display().to_string(),
+                    path: asset.path.provenance(),
                     selector: asset.selector.as_ref().map(|selector| match selector {
                         SceneAssetSelector::YddDrawable {
                             index,
@@ -370,7 +388,7 @@ impl From<&SceneManifest> for SceneManifestReport {
 struct SceneAssetKey {
     kind: AssetKind,
     hash: u32,
-    path: PathBuf,
+    path: SceneAssetLocator,
     selector: Option<SceneAssetSelector>,
 }
 
@@ -390,7 +408,7 @@ pub fn workspace_scene_report(
     ymap_path: &Path,
     options: SceneAssemblyOptions,
 ) -> Result<SceneManifestReport, io::Error> {
-    workspace_scene_report_with_fallbacks(workspace, ymap_path, &[], options)
+    workspace_scene_report_with_sources(workspace, ymap_path, &[], &[], options)
 }
 
 pub fn workspace_scene_report_with_fallbacks(
@@ -399,6 +417,85 @@ pub fn workspace_scene_report_with_fallbacks(
     fallback_roots: &[PathBuf],
     options: SceneAssemblyOptions,
 ) -> Result<SceneManifestReport, io::Error> {
+    workspace_scene_report_with_sources(workspace, ymap_path, fallback_roots, &[], options)
+}
+
+pub fn workspace_scene_report_with_sources(
+    workspace: &Path,
+    ymap_path: &Path,
+    fallback_roots: &[PathBuf],
+    rpf_mounts: &[SceneRpfMount],
+    options: SceneAssemblyOptions,
+) -> Result<SceneManifestReport, io::Error> {
+    let manifest = workspace_scene_manifest_with_sources(
+        workspace,
+        ymap_path,
+        fallback_roots,
+        rpf_mounts,
+        options,
+    )?;
+    Ok(SceneManifestReport::from(&manifest))
+}
+
+pub fn workspace_scene_asset_preview_with_sources(
+    workspace: &Path,
+    ymap_path: &Path,
+    fallback_roots: &[PathBuf],
+    rpf_mounts: &[SceneRpfMount],
+    asset_ref: usize,
+    options: PreviewOptions,
+) -> Result<AssetPreviewReport, io::Error> {
+    let manifest = workspace_scene_manifest_with_sources(
+        workspace,
+        ymap_path,
+        fallback_roots,
+        rpf_mounts,
+        SceneAssemblyOptions::default(),
+    )?;
+    let asset = manifest.assets.get(asset_ref).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "scene assetRef {asset_ref} exceeds asset reference count {}",
+                manifest.assets.len()
+            ),
+        )
+    })?;
+
+    let mut options = options;
+    let asset_type = match asset.kind {
+        AssetKind::Ydr => "YDR",
+        AssetKind::Ydd => {
+            let Some(SceneAssetSelector::YddDrawable { index, .. }) = asset.selector.as_ref()
+            else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "scene YDD asset reference is missing its drawable selector",
+                ));
+            };
+            options.drawable_index = Some(*index);
+            "YDD"
+        }
+        AssetKind::Ybn => "YBN",
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("scene preview is unavailable for {other}"),
+            ))
+        }
+    };
+
+    let bytes = asset.path.read_bytes().map_err(io::Error::other)?;
+    preview_asset_bytes_as(&asset.path.provenance(), asset_type, &bytes, options)
+}
+
+fn workspace_scene_manifest_with_sources(
+    workspace: &Path,
+    ymap_path: &Path,
+    fallback_roots: &[PathBuf],
+    rpf_mounts: &[SceneRpfMount],
+    options: SceneAssemblyOptions,
+) -> Result<SceneManifest, io::Error> {
     if !workspace.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -425,10 +522,14 @@ pub fn workspace_scene_report_with_fallbacks(
     let bytes = fs::read(&resolved_ymap)?;
     let ymap = Ymap::from_bytes(&bytes)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-    let index = WorkspaceIndex::scan_with_fallbacks(workspace, fallback_roots)
+    let mut index = WorkspaceIndex::scan_with_fallbacks(workspace, fallback_roots)
         .map_err(|error| io::Error::other(error.to_string()))?;
-    let manifest = assemble_ymap_scene(&index, &resolved_ymap, &ymap, options);
-    Ok(SceneManifestReport::from(&manifest))
+    for mount in rpf_mounts {
+        index
+            .mount_scene_rpf(&mount.archive, mount.nested.clone(), &mount.keys)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+    }
+    Ok(assemble_ymap_scene(&index, &resolved_ymap, &ymap, options))
 }
 
 fn assemble_ymap_scene_with_lookup<F>(
@@ -478,7 +579,7 @@ where
                 let collision =
                     collision_relationship(resolution.collision, &mut assets, &mut asset_ids);
                 (
-                    Some(resolution.provider_path),
+                    Some(resolution.provider.provenance()),
                     Some(asset_ref),
                     Some(asset_kind),
                     collision,
@@ -486,7 +587,7 @@ where
                 )
             }
             Err(error) => {
-                let provider_path = error.provider_path.clone();
+                let provider_path = error.provider.clone();
                 let asset_kind = error.expected_kind;
                 (
                     provider_path,
@@ -568,17 +669,17 @@ fn insert_primary_asset(
     ids: &mut BTreeMap<SceneAssetKey, usize>,
 ) -> usize {
     match asset {
-        SceneResolvedAsset::Drawable { hash, path } => {
-            insert_asset(AssetKind::Ydr, *hash, path.clone(), None, assets, ids)
+        SceneResolvedAsset::Drawable { hash, locator } => {
+            insert_asset(AssetKind::Ydr, *hash, locator.clone(), None, assets, ids)
         }
         SceneResolvedAsset::DrawableDictionary {
             dictionary_hash,
-            path,
+            locator,
             entry,
         } => insert_asset(
             AssetKind::Ydd,
             *dictionary_hash,
-            path.clone(),
+            locator.clone(),
             Some(SceneAssetSelector::YddDrawable {
                 index: entry.index,
                 name_hash: entry.name_hash,
@@ -597,8 +698,8 @@ fn collision_relationship(
 ) -> Option<SceneCollisionRelationship> {
     match collision {
         SceneCollisionLookup::None => None,
-        SceneCollisionLookup::LocalOnly { hash, path } => {
-            let asset_ref = insert_asset(AssetKind::Ybn, hash, path, None, assets, ids);
+        SceneCollisionLookup::LocalOnly { hash, locator } => {
+            let asset_ref = insert_asset(AssetKind::Ybn, hash, locator, None, assets, ids);
             Some(SceneCollisionRelationship {
                 hash,
                 asset_ref: Some(asset_ref),
@@ -627,7 +728,7 @@ fn collision_relationship(
 fn insert_asset(
     kind: AssetKind,
     hash: u32,
-    path: PathBuf,
+    path: SceneAssetLocator,
     selector: Option<SceneAssetSelector>,
     assets: &mut Vec<SceneAssetReference>,
     ids: &mut BTreeMap<SceneAssetKey, usize>,
@@ -739,6 +840,44 @@ mod tests {
             "collision must not become a world node"
         );
         assert_eq!(manifest.assets.len(), 2, "YDR + dependency-only YBN");
+    }
+
+    #[test]
+    fn workspace_scene_asset_preview_reads_asset_ref_through_core_locator() {
+        let source = synthetic_workspace();
+        let temporary =
+            std::env::temp_dir().join(format!("ragelab-scene-preview-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temporary);
+        fs::create_dir_all(&temporary).expect("create preview workspace");
+
+        fs::copy(source.join("simple.ymap"), temporary.join("simple.ymap")).expect("copy YMAP");
+        fs::copy(source.join("simple.ytyp"), temporary.join("simple.ytyp")).expect("copy YTYP");
+        fs::copy(
+            source.join("../ydr/simple.ydr"),
+            temporary.join("test_drawable.ydr"),
+        )
+        .expect("copy valid YDR");
+        fs::copy(
+            source.join("../ybn/simple.ybn"),
+            temporary.join("test_collision.ybn"),
+        )
+        .expect("copy valid YBN");
+
+        let report = workspace_scene_asset_preview_with_sources(
+            &temporary,
+            Path::new("simple.ymap"),
+            &[],
+            &[],
+            0,
+            PreviewOptions::default(),
+        )
+        .expect("preview scene assetRef");
+
+        assert_eq!(report.asset_type, "YDR");
+        assert!(report.path.ends_with("test_drawable.ydr"));
+        assert_eq!(report.spatial.classification, "localOnly");
+
+        fs::remove_dir_all(&temporary).expect("remove preview workspace");
     }
 
     #[test]
@@ -943,7 +1082,7 @@ mod tests {
                 Err(SceneAssetLookupError {
                     code: SceneAssetLookupErrorCode::UnsupportedAssetType,
                     archetype_hash,
-                    provider_path: Some(PathBuf::from("/workspace/simple.ytyp")),
+                    provider: Some("/workspace/simple.ytyp".into()),
                     expected_kind: Some(AssetKind::Yft),
                     hash: Some(0x1234_5678),
                     message: "fragment assets are outside the scene drawable contract".into(),

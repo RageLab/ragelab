@@ -9,8 +9,8 @@ use ragelab_engine::{
     apply_operation_document, asset_capabilities, build_vanilla_catalog, discover_fivem_legacy,
     discover_gta_v_legacy, inspect_asset, isolated_asset_spatial_context, parse_operation_document,
     plan_operation_document, preview_asset, render_vanilla_catalog_paths, validate_asset,
-    workspace_scene_report_with_fallbacks, ymap_spatial_context, EngineError, OperationError,
-    PreviewOptions, SceneAssemblyOptions, SpatialContext, SpatialProvenance,
+    workspace_scene_report_with_sources, ymap_spatial_context, EngineError, OperationError,
+    PreviewOptions, SceneAssemblyOptions, SceneRpfMount, SpatialContext, SpatialProvenance,
 };
 use ragelab_ybn::YbnCollision;
 use ragelab_ydd::YddDictionary;
@@ -39,6 +39,9 @@ pub fn is_structured_command(command: &str) -> bool {
             | "export"
             | "gta.discover"
             | "gta.catalog"
+            | "rpf.info"
+            | "rpf.list"
+            | "rpf.extract"
             | "fivem.discover"
     )
 }
@@ -425,11 +428,17 @@ pub fn scene(
     workspace: &Path,
     ymap_arg: &Path,
     fallback_roots: &[PathBuf],
+    rpf_mounts: &[SceneRpfMount],
     options: SceneAssemblyOptions,
     json_output: bool,
 ) -> Result<(), Box<dyn Error>> {
-    let report =
-        workspace_scene_report_with_fallbacks(workspace, ymap_arg, fallback_roots, options)?;
+    let report = workspace_scene_report_with_sources(
+        workspace,
+        ymap_arg,
+        fallback_roots,
+        rpf_mounts,
+        options,
+    )?;
 
     if json_output {
         print_success("scene", serde_json::to_value(&report)?)?;
@@ -451,10 +460,19 @@ pub fn scene(
     Ok(())
 }
 
+pub struct SceneCommandArgs {
+    pub workspace: PathBuf,
+    pub ymap: PathBuf,
+    pub fallback_roots: Vec<PathBuf>,
+    pub rpf_mounts: Vec<SceneRpfMount>,
+    pub options: SceneAssemblyOptions,
+    pub json_output: bool,
+}
+
 pub fn parse_scene_args(
     args: impl Iterator<Item = String>,
     usage: &str,
-) -> Result<(PathBuf, PathBuf, Vec<PathBuf>, SceneAssemblyOptions, bool), io::Error> {
+) -> Result<SceneCommandArgs, io::Error> {
     let mut args = args;
     let workspace = args
         .next()
@@ -469,6 +487,8 @@ pub fn parse_scene_args(
 
     let mut json_output = false;
     let mut fallback_roots = Vec::new();
+    let mut rpf_mounts: Vec<(PathBuf, Vec<String>)> = Vec::new();
+    let mut rpf_keys = None;
     let mut max_nodes = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -478,6 +498,30 @@ pub fn parse_scene_args(
                     .next()
                     .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
                 fallback_roots.push(PathBuf::from(value));
+            }
+            "--rpf-mount" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+                rpf_mounts.push((PathBuf::from(value), Vec::new()));
+            }
+            "--rpf-nested" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+                let Some((_, nested)) = rpf_mounts.last_mut() else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--rpf-nested requires a preceding --rpf-mount",
+                    ));
+                };
+                nested.push(value);
+            }
+            "--rpf-keys" if rpf_keys.is_none() => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+                rpf_keys = Some(PathBuf::from(value));
             }
             "--max-nodes" if max_nodes.is_none() => {
                 let value = args
@@ -506,13 +550,29 @@ pub fn parse_scene_args(
         }
     }
 
-    Ok((
+    let mounts = if rpf_mounts.is_empty() {
+        Vec::new()
+    } else {
+        let keys = rpf_keys.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--rpf-keys is required when --rpf-mount is used",
+            )
+        })?;
+        rpf_mounts
+            .into_iter()
+            .map(|(archive, nested)| SceneRpfMount::new(archive, nested, keys.clone()))
+            .collect()
+    };
+
+    Ok(SceneCommandArgs {
         workspace,
         ymap,
         fallback_roots,
-        max_nodes.map(SceneAssemblyOptions::new).unwrap_or_default(),
+        rpf_mounts: mounts,
+        options: max_nodes.map(SceneAssemblyOptions::new).unwrap_or_default(),
         json_output,
-    ))
+    })
 }
 
 fn spatial_context_json(context: &SpatialContext) -> Value {
@@ -859,6 +919,9 @@ pub fn normalize_command_args(args: Vec<String>) -> Vec<String> {
         ("gta", "discover") => Some("gta.discover"),
         ("gta", "catalog") => Some("gta.catalog"),
         ("gta", "vanilla-index") => Some("vanilla-index"),
+        ("rpf", "info") => Some("rpf.info"),
+        ("rpf", "list") => Some("rpf.list"),
+        ("rpf", "extract") => Some("rpf.extract"),
         ("fivem", "discover") => Some("fivem.discover"),
         _ => None,
     };

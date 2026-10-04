@@ -14,6 +14,7 @@ use std::{
 use ragelab_hash::joaat;
 use ragelab_meta::MetaHash;
 use ragelab_rbf::{RbfFile, RbfStructure, RbfValue};
+use ragelab_rpf::{RpfEntryLocator, RpfMount};
 use ragelab_ydd::YddDictionary;
 use ragelab_ymap::Ymap;
 use ragelab_ymf::{ManifestFlags, Ymf, YmfInteriorBounds, YmfMapDependency, YmfYtypDependency};
@@ -207,15 +208,56 @@ pub struct MloArchetypeAudit {
     pub report: DependencyReport,
 }
 
+/// Scene-facing asset identity. Dependency/export APIs intentionally remain
+/// filesystem-only; this locator exists so preview/scene assembly can read a
+/// proven asset directly from an RPF without materializing it to disk.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SceneAssetLocator {
+    Loose(PathBuf),
+    Rpf(RpfEntryLocator),
+}
+
+impl SceneAssetLocator {
+    pub fn provenance(&self) -> String {
+        match self {
+            Self::Loose(path) => path.display().to_string(),
+            Self::Rpf(locator) => locator.provenance(),
+        }
+    }
+
+    pub const fn source_type(&self) -> &'static str {
+        match self {
+            Self::Loose(_) => "loose",
+            Self::Rpf(_) => "rpf",
+        }
+    }
+
+    pub fn read_bytes(&self) -> Result<Vec<u8>, String> {
+        match self {
+            Self::Loose(path) => {
+                fs::read(path).map_err(|error| format!("{}: {error}", path.display()))
+            }
+            Self::Rpf(locator) => locator.read().map_err(|error| error.to_string()),
+        }
+    }
+}
+
+impl From<PathBuf> for SceneAssetLocator {
+    fn from(value: PathBuf) -> Self {
+        Self::Loose(value)
+    }
+}
+
 /// Strict scene-facing lookup result for one YMAP archetype.
 ///
 /// Dependency closure can retain multiple candidates for diagnostics, but a
 /// scene node must never silently pick one. This contract fails closed unless
-/// provider and renderable identity are uniquely proven by the workspace.
+/// provider and renderable identity are uniquely proven by the workspace or a
+/// lower-priority read-only game source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SceneArchetypeResolution {
     pub archetype_hash: u32,
-    pub provider_path: PathBuf,
+    pub provider: SceneAssetLocator,
     pub provider_ytyp_hash: Option<u32>,
     pub asset: SceneResolvedAsset,
     pub collision: SceneCollisionLookup,
@@ -225,11 +267,11 @@ pub struct SceneArchetypeResolution {
 pub enum SceneResolvedAsset {
     Drawable {
         hash: u32,
-        path: PathBuf,
+        locator: SceneAssetLocator,
     },
     DrawableDictionary {
         dictionary_hash: u32,
-        path: PathBuf,
+        locator: SceneAssetLocator,
         entry: SceneDrawableDictionaryEntry,
     },
 }
@@ -242,9 +284,9 @@ impl SceneResolvedAsset {
         }
     }
 
-    pub fn path(&self) -> &Path {
+    pub fn locator(&self) -> &SceneAssetLocator {
         match self {
-            Self::Drawable { path, .. } | Self::DrawableDictionary { path, .. } => path,
+            Self::Drawable { locator, .. } | Self::DrawableDictionary { locator, .. } => locator,
         }
     }
 }
@@ -261,7 +303,7 @@ pub enum SceneCollisionLookup {
     None,
     LocalOnly {
         hash: u32,
-        path: PathBuf,
+        locator: SceneAssetLocator,
     },
     Unresolved {
         hash: u32,
@@ -280,7 +322,7 @@ pub enum SceneCollisionLookupErrorCode {
 pub struct SceneAssetLookupError {
     pub code: SceneAssetLookupErrorCode,
     pub archetype_hash: u32,
-    pub provider_path: Option<PathBuf>,
+    pub provider: Option<String>,
     pub expected_kind: Option<AssetKind>,
     pub hash: Option<u32>,
     pub message: String,
@@ -343,6 +385,13 @@ struct ArchetypeProvider {
 }
 
 #[derive(Debug, Clone)]
+struct RpfArchetypeProvider {
+    locator: RpfEntryLocator,
+    ytyp_name: Option<MetaHash>,
+    archetype: Archetype,
+}
+
+#[derive(Debug, Clone)]
 struct YtypRecord {
     name: MetaHash,
     dependencies: Vec<MetaHash>,
@@ -368,6 +417,8 @@ pub struct WorkspaceIndex {
     root: PathBuf,
     files: BTreeMap<(AssetKind, u32), Vec<PathBuf>>,
     archetype_providers: BTreeMap<u32, Vec<ArchetypeProvider>>,
+    scene_rpf_files: BTreeMap<(AssetKind, u32), Vec<RpfEntryLocator>>,
+    scene_rpf_archetype_providers: BTreeMap<u32, Vec<RpfArchetypeProvider>>,
     ytyp_records: BTreeMap<u32, Vec<YtypRecord>>,
     source_map_dependencies: BTreeMap<u32, ManifestDependencyRecord>,
     source_ytyp_dependencies: BTreeMap<u32, ManifestDependencyRecord>,
@@ -395,6 +446,8 @@ impl WorkspaceIndex {
             root,
             files: BTreeMap::new(),
             archetype_providers: BTreeMap::new(),
+            scene_rpf_files: BTreeMap::new(),
+            scene_rpf_archetype_providers: BTreeMap::new(),
             ytyp_records: BTreeMap::new(),
             source_map_dependencies: BTreeMap::new(),
             source_ytyp_dependencies: BTreeMap::new(),
@@ -632,6 +685,14 @@ impl WorkspaceIndex {
         for (hash, providers) in fallback.archetype_providers {
             self.archetype_providers.entry(hash).or_insert(providers);
         }
+        for (key, locators) in fallback.scene_rpf_files {
+            self.scene_rpf_files.entry(key).or_insert(locators);
+        }
+        for (hash, providers) in fallback.scene_rpf_archetype_providers {
+            self.scene_rpf_archetype_providers
+                .entry(hash)
+                .or_insert(providers);
+        }
         for (hash, records) in fallback.ytyp_records {
             self.ytyp_records.entry(hash).or_insert(records);
         }
@@ -661,6 +722,117 @@ impl WorkspaceIndex {
         );
     }
 
+    pub fn mount_scene_rpf(
+        &mut self,
+        archive_path: impl AsRef<Path>,
+        nested: Vec<String>,
+        keys_path: impl AsRef<Path>,
+    ) -> Result<usize, WorkspaceError> {
+        let archive_path = archive_path.as_ref().to_path_buf();
+        let keys_path = keys_path.as_ref().to_path_buf();
+        let mount = RpfMount::open(&archive_path, nested, &keys_path).map_err(|error| {
+            WorkspaceError::Build(format!(
+                "failed to mount RPF {}: {error}",
+                archive_path.display()
+            ))
+        })?;
+
+        let files = mount.files().collect::<Vec<_>>();
+        let mut mounted = 0_usize;
+
+        for file in files {
+            let virtual_path = Path::new(&file.path);
+            let Some(kind) = file_kind(virtual_path) else {
+                continue;
+            };
+            let Some(stem) = virtual_path.file_stem().and_then(|value| value.to_str()) else {
+                continue;
+            };
+
+            let locator = mount.locator(file.path.clone());
+            self.insert_scene_rpf_file(kind, joaat(stem), locator.clone());
+            mounted += 1;
+
+            if kind != AssetKind::Ytyp {
+                continue;
+            }
+
+            let bytes = match mount.read(&file.path) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    self.warnings.push(format!(
+                        "{}: RPF YTYP read failed: {error}",
+                        locator.provenance()
+                    ));
+                    continue;
+                }
+            };
+
+            match Ytyp::from_bytes(&bytes) {
+                Ok(ytyp) => {
+                    let internal_name = ytyp.name.or_else(|| Some(MetaHash(joaat(stem))));
+                    if let Some(name) = internal_name {
+                        self.insert_scene_rpf_file(AssetKind::Ytyp, name.0, locator.clone());
+                    }
+                    for archetype in ytyp.archetypes {
+                        self.scene_rpf_archetype_providers
+                            .entry(archetype.name.0)
+                            .or_default()
+                            .push(RpfArchetypeProvider {
+                                locator: locator.clone(),
+                                ytyp_name: internal_name,
+                                archetype,
+                            });
+                    }
+                }
+                Err(error) => self.warnings.push(format!(
+                    "{}: RPF YTYP parse failed: {error}",
+                    locator.provenance()
+                )),
+            }
+        }
+
+        for locators in self.scene_rpf_files.values_mut() {
+            locators.sort();
+            locators.dedup();
+        }
+        for providers in self.scene_rpf_archetype_providers.values_mut() {
+            providers.sort_by(|left, right| left.locator.cmp(&right.locator));
+            providers.dedup_by(|left, right| left.locator == right.locator);
+        }
+
+        Ok(mounted)
+    }
+
+    fn insert_scene_rpf_file(&mut self, kind: AssetKind, hash: u32, locator: RpfEntryLocator) {
+        let locators = self.scene_rpf_files.entry((kind, hash)).or_default();
+        if !locators.contains(&locator) {
+            locators.push(locator);
+        }
+    }
+
+    fn scene_candidates(&self, kind: AssetKind, hash: u32) -> Vec<SceneAssetLocator> {
+        let local = self.candidates(kind, hash);
+        if !local.is_empty() {
+            return local
+                .iter()
+                .cloned()
+                .map(SceneAssetLocator::Loose)
+                .collect();
+        }
+
+        self.scene_rpf_files
+            .get(&(kind, hash))
+            .map(|locators| {
+                locators
+                    .iter()
+                    .cloned()
+                    .map(SceneAssetLocator::Rpf)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -685,45 +857,75 @@ impl WorkspaceIndex {
     }
 
     /// Resolve one YMAP archetype to the renderable identity needed by scene
-    /// assembly. Ambiguous providers/assets fail closed instead of selecting a
-    /// filesystem candidate by ordering or proximity.
+    /// assembly. Local workspace providers/assets always take precedence over
+    /// mounted RPF sources. Ambiguous candidates within the selected tier fail
+    /// closed instead of selecting by ordering or proximity.
     pub fn resolve_scene_archetype(
         &self,
         archetype_hash: u32,
     ) -> Result<SceneArchetypeResolution, SceneAssetLookupError> {
-        let Some(providers) = self.archetype_providers.get(&archetype_hash) else {
+        let (provider, provider_ytyp_name, archetype) = if let Some(providers) =
+            self.archetype_providers.get(&archetype_hash)
+        {
+            if providers.len() != 1 {
+                return Err(SceneAssetLookupError {
+                        code: SceneAssetLookupErrorCode::ProviderAmbiguous,
+                        archetype_hash,
+                        provider: None,
+                        expected_kind: None,
+                        hash: None,
+                        message: format!(
+                            "archetype 0x{archetype_hash:08X} has {} local YTYP providers; scene assembly requires exactly one",
+                            providers.len()
+                        ),
+                    });
+            }
+            let provider = &providers[0];
+            (
+                SceneAssetLocator::Loose(provider.path.clone()),
+                provider.ytyp_name,
+                provider.archetype.clone(),
+            )
+        } else if let Some(providers) = self.scene_rpf_archetype_providers.get(&archetype_hash) {
+            if providers.len() != 1 {
+                return Err(SceneAssetLookupError {
+                        code: SceneAssetLookupErrorCode::ProviderAmbiguous,
+                        archetype_hash,
+                        provider: None,
+                        expected_kind: None,
+                        hash: None,
+                        message: format!(
+                            "archetype 0x{archetype_hash:08X} has {} mounted RPF YTYP providers; scene assembly requires exactly one",
+                            providers.len()
+                        ),
+                    });
+            }
+            let provider = &providers[0];
+            (
+                SceneAssetLocator::Rpf(provider.locator.clone()),
+                provider.ytyp_name,
+                provider.archetype.clone(),
+            )
+        } else {
             return Err(SceneAssetLookupError {
-                code: SceneAssetLookupErrorCode::ProviderMissing,
-                archetype_hash,
-                provider_path: None,
-                expected_kind: None,
-                hash: None,
-                message: format!("no local YTYP provider defines archetype 0x{archetype_hash:08X}"),
-            });
+                    code: SceneAssetLookupErrorCode::ProviderMissing,
+                    archetype_hash,
+                    provider: None,
+                    expected_kind: None,
+                    hash: None,
+                    message: format!(
+                        "no workspace or mounted RPF YTYP provider defines archetype 0x{archetype_hash:08X}"
+                    ),
+                });
         };
-        if providers.len() != 1 {
-            return Err(SceneAssetLookupError {
-                code: SceneAssetLookupErrorCode::ProviderAmbiguous,
-                archetype_hash,
-                provider_path: None,
-                expected_kind: None,
-                hash: None,
-                message: format!(
-                    "archetype 0x{archetype_hash:08X} has {} local YTYP providers; scene assembly requires exactly one",
-                    providers.len()
-                ),
-            });
-        }
 
-        let provider = &providers[0];
-        let provider_path = provider.path.clone();
-        let asset = match provider.archetype.asset_type {
+        let asset = match archetype.asset_type {
             AssetType::Drawable => {
-                let Some(asset_name) = provider.archetype.asset_name else {
+                let Some(asset_name) = archetype.asset_name else {
                     return Err(SceneAssetLookupError {
                         code: SceneAssetLookupErrorCode::AssetNameMissing,
                         archetype_hash,
-                        provider_path: Some(provider_path),
+                        provider: Some(provider.provenance()),
                         expected_kind: Some(AssetKind::Ydr),
                         hash: None,
                         message: format!(
@@ -731,16 +933,16 @@ impl WorkspaceIndex {
                         ),
                     });
                 };
-                let candidates = self.candidates(AssetKind::Ydr, asset_name.0);
+                let candidates = self.scene_candidates(AssetKind::Ydr, asset_name.0);
                 if candidates.is_empty() {
                     return Err(SceneAssetLookupError {
                         code: SceneAssetLookupErrorCode::AssetMissing,
                         archetype_hash,
-                        provider_path: Some(provider_path),
+                        provider: Some(provider.provenance()),
                         expected_kind: Some(AssetKind::Ydr),
                         hash: Some(asset_name.0),
                         message: format!(
-                            "drawable 0x{:08X} declared by archetype 0x{archetype_hash:08X} has no local YDR candidate",
+                            "drawable 0x{:08X} declared by archetype 0x{archetype_hash:08X} has no workspace or mounted RPF YDR candidate",
                             asset_name.0
                         ),
                     });
@@ -749,11 +951,11 @@ impl WorkspaceIndex {
                     return Err(SceneAssetLookupError {
                         code: SceneAssetLookupErrorCode::AssetAmbiguous,
                         archetype_hash,
-                        provider_path: Some(provider_path),
+                        provider: Some(provider.provenance()),
                         expected_kind: Some(AssetKind::Ydr),
                         hash: Some(asset_name.0),
                         message: format!(
-                            "drawable 0x{:08X} declared by archetype 0x{archetype_hash:08X} has {} local YDR candidates",
+                            "drawable 0x{:08X} declared by archetype 0x{archetype_hash:08X} has {} candidates in the selected source tier",
                             asset_name.0,
                             candidates.len()
                         ),
@@ -761,15 +963,15 @@ impl WorkspaceIndex {
                 }
                 SceneResolvedAsset::Drawable {
                     hash: asset_name.0,
-                    path: candidates[0].clone(),
+                    locator: candidates[0].clone(),
                 }
             }
             AssetType::DrawableDictionary => {
-                let Some(entry_hash) = provider.archetype.asset_name else {
+                let Some(entry_hash) = archetype.asset_name else {
                     return Err(SceneAssetLookupError {
                         code: SceneAssetLookupErrorCode::AssetNameMissing,
                         archetype_hash,
-                        provider_path: Some(provider_path),
+                        provider: Some(provider.provenance()),
                         expected_kind: Some(AssetKind::Ydd),
                         hash: None,
                         message: format!(
@@ -777,11 +979,11 @@ impl WorkspaceIndex {
                         ),
                     });
                 };
-                let Some(dictionary_hash) = provider.archetype.drawable_dictionary else {
+                let Some(dictionary_hash) = archetype.drawable_dictionary else {
                     return Err(SceneAssetLookupError {
                         code: SceneAssetLookupErrorCode::DrawableDictionaryMissing,
                         archetype_hash,
-                        provider_path: Some(provider_path),
+                        provider: Some(provider.provenance()),
                         expected_kind: Some(AssetKind::Ydd),
                         hash: Some(entry_hash.0),
                         message: format!(
@@ -789,16 +991,16 @@ impl WorkspaceIndex {
                         ),
                     });
                 };
-                let candidates = self.candidates(AssetKind::Ydd, dictionary_hash.0);
+                let candidates = self.scene_candidates(AssetKind::Ydd, dictionary_hash.0);
                 if candidates.is_empty() {
                     return Err(SceneAssetLookupError {
                         code: SceneAssetLookupErrorCode::AssetMissing,
                         archetype_hash,
-                        provider_path: Some(provider_path),
+                        provider: Some(provider.provenance()),
                         expected_kind: Some(AssetKind::Ydd),
                         hash: Some(dictionary_hash.0),
                         message: format!(
-                            "drawable dictionary 0x{:08X} declared by archetype 0x{archetype_hash:08X} has no local YDD candidate",
+                            "drawable dictionary 0x{:08X} declared by archetype 0x{archetype_hash:08X} has no workspace or mounted RPF YDD candidate",
                             dictionary_hash.0
                         ),
                     });
@@ -807,33 +1009,35 @@ impl WorkspaceIndex {
                     return Err(SceneAssetLookupError {
                         code: SceneAssetLookupErrorCode::AssetAmbiguous,
                         archetype_hash,
-                        provider_path: Some(provider_path),
+                        provider: Some(provider.provenance()),
                         expected_kind: Some(AssetKind::Ydd),
                         hash: Some(dictionary_hash.0),
                         message: format!(
-                            "drawable dictionary 0x{:08X} declared by archetype 0x{archetype_hash:08X} has {} local YDD candidates",
+                            "drawable dictionary 0x{:08X} declared by archetype 0x{archetype_hash:08X} has {} candidates in the selected source tier",
                             dictionary_hash.0,
                             candidates.len()
                         ),
                     });
                 }
-                let path = candidates[0].clone();
-                let bytes = fs::read(&path).map_err(|error| SceneAssetLookupError {
-                    code: SceneAssetLookupErrorCode::DictionaryUnreadable,
-                    archetype_hash,
-                    provider_path: Some(provider_path.clone()),
-                    expected_kind: Some(AssetKind::Ydd),
-                    hash: Some(dictionary_hash.0),
-                    message: format!(
-                        "drawable dictionary 0x{:08X} could not be read: {error}",
-                        dictionary_hash.0
-                    ),
-                })?;
+                let locator = candidates[0].clone();
+                let bytes = locator
+                    .read_bytes()
+                    .map_err(|error| SceneAssetLookupError {
+                        code: SceneAssetLookupErrorCode::DictionaryUnreadable,
+                        archetype_hash,
+                        provider: Some(provider.provenance()),
+                        expected_kind: Some(AssetKind::Ydd),
+                        hash: Some(dictionary_hash.0),
+                        message: format!(
+                            "drawable dictionary 0x{:08X} could not be read: {error}",
+                            dictionary_hash.0
+                        ),
+                    })?;
                 let dictionary =
                     YddDictionary::from_bytes(&bytes).map_err(|error| SceneAssetLookupError {
                         code: SceneAssetLookupErrorCode::DictionaryUnreadable,
                         archetype_hash,
-                        provider_path: Some(provider_path.clone()),
+                        provider: Some(provider.provenance()),
                         expected_kind: Some(AssetKind::Ydd),
                         hash: Some(dictionary_hash.0),
                         message: format!(
@@ -845,7 +1049,7 @@ impl WorkspaceIndex {
                     return Err(SceneAssetLookupError {
                         code: SceneAssetLookupErrorCode::DictionaryEntryMissing,
                         archetype_hash,
-                        provider_path: Some(provider_path),
+                        provider: Some(provider.provenance()),
                         expected_kind: Some(AssetKind::Ydd),
                         hash: Some(entry_hash.0),
                         message: format!(
@@ -856,7 +1060,7 @@ impl WorkspaceIndex {
                 };
                 SceneResolvedAsset::DrawableDictionary {
                     dictionary_hash: dictionary_hash.0,
-                    path,
+                    locator,
                     entry: SceneDrawableDictionaryEntry {
                         index: entry.index,
                         name_hash: entry.name_hash,
@@ -868,9 +1072,9 @@ impl WorkspaceIndex {
                 return Err(SceneAssetLookupError {
                     code: SceneAssetLookupErrorCode::UnsupportedAssetType,
                     archetype_hash,
-                    provider_path: Some(provider_path),
+                    provider: Some(provider.provenance()),
                     expected_kind: Some(AssetKind::Yft),
-                    hash: provider.archetype.asset_name.map(|hash| hash.0),
+                    hash: archetype.asset_name.map(|hash| hash.0),
                     message: format!(
                         "archetype 0x{archetype_hash:08X} resolves to a YFT fragment; fragments are not scene-renderable in the current contract"
                     ),
@@ -880,7 +1084,7 @@ impl WorkspaceIndex {
                 return Err(SceneAssetLookupError {
                     code: SceneAssetLookupErrorCode::UnsupportedAssetType,
                     archetype_hash,
-                    provider_path: Some(provider_path),
+                    provider: Some(provider.provenance()),
                     expected_kind: None,
                     hash: None,
                     message: format!(
@@ -892,9 +1096,9 @@ impl WorkspaceIndex {
                 return Err(SceneAssetLookupError {
                     code: SceneAssetLookupErrorCode::UnsupportedAssetType,
                     archetype_hash,
-                    provider_path: Some(provider_path),
+                    provider: Some(provider.provenance()),
                     expected_kind: None,
-                    hash: provider.archetype.asset_name.map(|hash| hash.0),
+                    hash: archetype.asset_name.map(|hash| hash.0),
                     message: format!(
                         "archetype 0x{archetype_hash:08X} has an unsupported primary asset type for scene assembly"
                     ),
@@ -902,11 +1106,11 @@ impl WorkspaceIndex {
             }
         };
 
-        let collision = match provider.archetype.physics_dictionary {
+        let collision = match archetype.physics_dictionary {
             None => SceneCollisionLookup::None,
             Some(hash) => {
-                let candidates = self.candidates(AssetKind::Ybn, hash.0);
-                match candidates {
+                let candidates = self.scene_candidates(AssetKind::Ybn, hash.0);
+                match candidates.as_slice() {
                     [] => SceneCollisionLookup::Unresolved {
                         hash: hash.0,
                         code: SceneCollisionLookupErrorCode::MissingAsset,
@@ -915,15 +1119,15 @@ impl WorkspaceIndex {
                             hash.0
                         ),
                     },
-                    [path] => SceneCollisionLookup::LocalOnly {
+                    [locator] => SceneCollisionLookup::LocalOnly {
                         hash: hash.0,
-                        path: path.clone(),
+                        locator: locator.clone(),
                     },
                     _ => SceneCollisionLookup::Unresolved {
                         hash: hash.0,
                         code: SceneCollisionLookupErrorCode::AmbiguousAsset,
                         message: format!(
-                            "YTYP declares physics dictionary 0x{:08X}, but {} local YBN candidates exist; no world placement is inferred",
+                            "YTYP declares physics dictionary 0x{:08X}, but {} candidates exist in the selected source tier; no world placement is inferred",
                             hash.0,
                             candidates.len()
                         ),
@@ -934,8 +1138,8 @@ impl WorkspaceIndex {
 
         Ok(SceneArchetypeResolution {
             archetype_hash,
-            provider_path,
-            provider_ytyp_hash: provider.ytyp_name.map(|hash| hash.0),
+            provider,
+            provider_ytyp_hash: provider_ytyp_name.map(|hash| hash.0),
             asset,
             collision,
         })
