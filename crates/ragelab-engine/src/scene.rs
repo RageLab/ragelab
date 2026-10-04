@@ -442,6 +442,7 @@ pub fn workspace_scene_asset_preview_with_sources(
     ymap_path: &Path,
     fallback_roots: &[PathBuf],
     rpf_mounts: &[SceneRpfMount],
+    scene_options: SceneAssemblyOptions,
     asset_ref: usize,
     options: PreviewOptions,
 ) -> Result<AssetPreviewReport, io::Error> {
@@ -450,7 +451,7 @@ pub fn workspace_scene_asset_preview_with_sources(
         ymap_path,
         fallback_roots,
         rpf_mounts,
-        SceneAssemblyOptions::default(),
+        scene_options,
     )?;
     let asset = manifest.assets.get(asset_ref).ok_or_else(|| {
         io::Error::new(
@@ -868,6 +869,7 @@ mod tests {
             Path::new("simple.ymap"),
             &[],
             &[],
+            SceneAssemblyOptions::default(),
             0,
             PreviewOptions::default(),
         )
