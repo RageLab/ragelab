@@ -14,6 +14,7 @@ members = [
     "crates/ragelab-ytyp",
     "crates/ragelab-ymf",
     "crates/ragelab-ydr",
+    "crates/ragelab-yft",
     "crates/ragelab-ydd",
     "crates/ragelab-ybn",
     "apps/ragelab",

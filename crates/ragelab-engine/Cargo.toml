@@ -16,6 +16,7 @@ ragelab-ymf = { path = "../ragelab-ymf" }
 ragelab-ybn = { path = "../ragelab-ybn" }
 ragelab-ydd = { path = "../ragelab-ydd" }
 ragelab-ydr = { path = "../ragelab-ydr" }
+ragelab-yft = { path = "../ragelab-yft" }
 ragelab-ytd = { path = "../ragelab-ytd" }
 ragelab-ytyp = { path = "../ragelab-ytyp" }
 serde = { version = "1", features = ["derive"] }

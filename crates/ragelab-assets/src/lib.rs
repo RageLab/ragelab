@@ -269,6 +269,10 @@ pub enum SceneResolvedAsset {
         hash: u32,
         locator: SceneAssetLocator,
     },
+    Fragment {
+        hash: u32,
+        locator: SceneAssetLocator,
+    },
     DrawableDictionary {
         dictionary_hash: u32,
         locator: SceneAssetLocator,
@@ -280,13 +284,16 @@ impl SceneResolvedAsset {
     pub const fn kind(&self) -> AssetKind {
         match self {
             Self::Drawable { .. } => AssetKind::Ydr,
+            Self::Fragment { .. } => AssetKind::Yft,
             Self::DrawableDictionary { .. } => AssetKind::Ydd,
         }
     }
 
     pub fn locator(&self) -> &SceneAssetLocator {
         match self {
-            Self::Drawable { locator, .. } | Self::DrawableDictionary { locator, .. } => locator,
+            Self::Drawable { locator, .. }
+            | Self::Fragment { locator, .. }
+            | Self::DrawableDictionary { locator, .. } => locator,
         }
     }
 }
@@ -1164,16 +1171,50 @@ impl WorkspaceIndex {
                 }
             }
             AssetType::Fragment => {
-                return Err(SceneAssetLookupError {
-                    code: SceneAssetLookupErrorCode::UnsupportedAssetType,
-                    archetype_hash,
-                    provider: Some(provider.provenance()),
-                    expected_kind: Some(AssetKind::Yft),
-                    hash: archetype.asset_name.map(|hash| hash.0),
-                    message: format!(
-                        "archetype 0x{archetype_hash:08X} resolves to a YFT fragment; fragments are not scene-renderable in the current contract"
-                    ),
-                });
+                let Some(asset_name) = archetype.asset_name else {
+                    return Err(SceneAssetLookupError {
+                        code: SceneAssetLookupErrorCode::AssetNameMissing,
+                        archetype_hash,
+                        provider: Some(provider.provenance()),
+                        expected_kind: Some(AssetKind::Yft),
+                        hash: None,
+                        message: format!(
+                            "YTYP provider for archetype 0x{archetype_hash:08X} declares Fragment without assetName"
+                        ),
+                    });
+                };
+                let candidates = self.scene_candidates(AssetKind::Yft, asset_name.0);
+                if candidates.is_empty() {
+                    return Err(SceneAssetLookupError {
+                        code: SceneAssetLookupErrorCode::AssetMissing,
+                        archetype_hash,
+                        provider: Some(provider.provenance()),
+                        expected_kind: Some(AssetKind::Yft),
+                        hash: Some(asset_name.0),
+                        message: format!(
+                            "fragment 0x{:08X} declared by archetype 0x{archetype_hash:08X} has no workspace or mounted RPF YFT candidate",
+                            asset_name.0
+                        ),
+                    });
+                }
+                if candidates.len() != 1 {
+                    return Err(SceneAssetLookupError {
+                        code: SceneAssetLookupErrorCode::AssetAmbiguous,
+                        archetype_hash,
+                        provider: Some(provider.provenance()),
+                        expected_kind: Some(AssetKind::Yft),
+                        hash: Some(asset_name.0),
+                        message: format!(
+                            "fragment 0x{:08X} declared by archetype 0x{archetype_hash:08X} has {} candidates in the selected source tier",
+                            asset_name.0,
+                            candidates.len()
+                        ),
+                    });
+                }
+                SceneResolvedAsset::Fragment {
+                    hash: asset_name.0,
+                    locator: candidates[0].clone(),
+                }
             }
             AssetType::Assetless => {
                 return Err(SceneAssetLookupError {

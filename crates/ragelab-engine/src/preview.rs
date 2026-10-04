@@ -3,6 +3,7 @@ use std::{fs, io, path::Path};
 use ragelab_ybn::{CollisionShape, YbnCollision};
 use ragelab_ydd::YddDictionary;
 use ragelab_ydr::{YdrDocument, YdrModel};
+use ragelab_yft::YftDocument;
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -157,6 +158,28 @@ pub fn preview_asset_bytes_as(
             }
             let document = YdrDocument::from_bytes(bytes).map_err(validation_error)?;
             (document.model, Value::Null)
+        }
+        "YFT" => {
+            if options.drawable_index.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--drawable-index is only valid for YDD preview",
+                ));
+            }
+            let fragment = YftDocument::from_bytes(bytes).map_err(validation_error)?;
+            let drawable = fragment.main_drawable.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "YFT fragment does not contain a pristine main drawable",
+                )
+            })?;
+            (
+                drawable.model,
+                json!({
+                    "fragmentRole": "mainDrawable",
+                    "fragmentName": fragment.name,
+                }),
+            )
         }
         "YDD" => {
             let drawable_index = options.drawable_index.ok_or_else(|| {

@@ -232,6 +232,7 @@ dependencies = [
  "ragelab-ybn",
  "ragelab-ydd",
  "ragelab-ydr",
+ "ragelab-yft",
  "ragelab-ymap",
  "ragelab-ymf",
  "ragelab-ytd",
@@ -300,6 +301,14 @@ dependencies = [
  "flate2",
  "ragelab-resource",
  "ragelab-ytd",
+]
+
+[[package]]
+name = "ragelab-yft"
+version = "0.1.0"
+dependencies = [
+ "ragelab-resource",
+ "ragelab-ydr",
 ]
 
 [[package]]

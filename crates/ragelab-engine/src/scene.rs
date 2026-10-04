@@ -546,6 +546,7 @@ pub fn workspace_scene_asset_preview_with_game_index(
             options.drawable_index = Some(*index);
             "YDD"
         }
+        AssetKind::Yft => "YFT",
         AssetKind::Ybn => "YBN",
         other => {
             return Err(io::Error::new(
@@ -846,6 +847,9 @@ fn insert_primary_asset(
     match asset {
         SceneResolvedAsset::Drawable { hash, locator } => {
             insert_asset(AssetKind::Ydr, *hash, locator.clone(), None, assets, ids)
+        }
+        SceneResolvedAsset::Fragment { hash, locator } => {
+            insert_asset(AssetKind::Yft, *hash, locator.clone(), None, assets, ids)
         }
         SceneResolvedAsset::DrawableDictionary {
             dictionary_hash,

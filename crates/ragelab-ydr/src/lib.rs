@@ -10,6 +10,8 @@ use ragelab_resource::{ResourceError, Rsc7Resource, SYSTEM_BASE};
 use ragelab_ytd::{YtdDictionary, YtdError};
 
 const SUPPORTED_VERSION: u32 = 165;
+const YDR_ROOT_SIZE: usize = 0xD0;
+const YDR_NAME_OFFSET: u64 = 0xA8;
 const MAX_MODELS: usize = 4_096;
 const MAX_SHADERS: usize = 4_096;
 const MAX_SHADER_PARAMETERS: usize = 255;
@@ -18,6 +20,27 @@ const MAX_VERTICES_PER_GEOMETRY: usize = 2_000_000;
 const MAX_INDICES_PER_GEOMETRY: usize = 6_000_000;
 const MAX_VERTEX_BYTES: usize = 256 * 1024 * 1024;
 const MAX_NAME_LENGTH: usize = 1_024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrawableReadLayout {
+    pub resource_version: u32,
+    pub root_size: usize,
+    pub name_offset: u64,
+}
+
+impl DrawableReadLayout {
+    pub const YDR: Self = Self {
+        resource_version: SUPPORTED_VERSION,
+        root_size: YDR_ROOT_SIZE,
+        name_offset: YDR_NAME_OFFSET,
+    };
+
+    pub const YFT_FRAGMENT: Self = Self {
+        resource_version: 162,
+        root_size: 0x150,
+        name_offset: 0x130,
+    };
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DrawableBounds {
@@ -284,9 +307,17 @@ impl YdrDocument {
         resource: Arc<Rsc7Resource>,
         root: u64,
     ) -> Result<Self, YdrError> {
-        validate_resource_version(&resource)?;
+        Self::from_shared_resource_at_with_layout(resource, root, DrawableReadLayout::YDR)
+    }
 
-        let model = parse_ydr_model(&resource, root)?;
+    pub fn from_shared_resource_at_with_layout(
+        resource: Arc<Rsc7Resource>,
+        root: u64,
+        layout: DrawableReadLayout,
+    ) -> Result<Self, YdrError> {
+        validate_resource_version_for(&resource, layout.resource_version)?;
+
+        let model = parse_ydr_model(&resource, root, layout)?;
         let shader_group_pointer = resource.read_u64(root + 0x10)?;
         let texture_dictionary_pointer = if shader_group_pointer == 0 {
             0
@@ -671,7 +702,7 @@ impl YdrModel {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, YdrError> {
         let resource = Rsc7Resource::parse(bytes)?;
         validate_resource_version(&resource)?;
-        parse_ydr_model(&resource, SYSTEM_BASE)
+        parse_ydr_model(&resource, SYSTEM_BASE, DrawableReadLayout::YDR)
     }
 
     pub fn vertex_count(&self) -> usize {
@@ -697,18 +728,29 @@ impl YdrModel {
 }
 
 fn validate_resource_version(resource: &Rsc7Resource) -> Result<(), YdrError> {
-    if resource.header.version != SUPPORTED_VERSION {
+    validate_resource_version_for(resource, SUPPORTED_VERSION)
+}
+
+fn validate_resource_version_for(
+    resource: &Rsc7Resource,
+    expected_version: u32,
+) -> Result<(), YdrError> {
+    if resource.header.version != expected_version {
         return Err(YdrError::Unsupported(format!(
-            "YDR resource version {} is unsupported; expected GTA V PC version {SUPPORTED_VERSION}",
+            "drawable resource version {} is unsupported for this layout; expected GTA V PC version {expected_version}",
             resource.header.version
         )));
     }
     Ok(())
 }
 
-fn parse_ydr_model(resource: &Rsc7Resource, root: u64) -> Result<YdrModel, YdrError> {
-    // Ensure the complete PC Drawable root is addressable before reading fields.
-    resource.bytes_at(root, 0xD0)?;
+fn parse_ydr_model(
+    resource: &Rsc7Resource,
+    root: u64,
+    layout: DrawableReadLayout,
+) -> Result<YdrModel, YdrError> {
+    // Ensure the complete selected Drawable root layout is addressable.
+    resource.bytes_at(root, layout.root_size)?;
 
     let bounds = DrawableBounds {
         center: read_vec3(resource, root + 0x20)?,
@@ -718,7 +760,7 @@ fn parse_ydr_model(resource: &Rsc7Resource, root: u64) -> Result<YdrModel, YdrEr
     };
     validate_bounds(bounds)?;
 
-    let name_pointer = resource.read_u64(root + 0xa8)?;
+    let name_pointer = resource.read_u64(root + layout.name_offset)?;
     let name = if name_pointer == 0 {
         None
     } else {
