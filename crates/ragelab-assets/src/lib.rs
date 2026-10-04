@@ -737,71 +737,166 @@ impl WorkspaceIndex {
             ))
         })?;
 
-        let files = mount.files().collect::<Vec<_>>();
-        let mut mounted = 0_usize;
+        let locators = mount
+            .files()
+            .filter(|file| {
+                let path = Path::new(&file.path);
+                file_kind(path).is_some()
+                    && path.file_stem().and_then(|value| value.to_str()).is_some()
+            })
+            .map(|file| mount.locator(file.path))
+            .collect::<Vec<_>>();
+        let mounted = locators.len();
+        self.mount_scene_rpf_entries(&locators)?;
+        Ok(mounted)
+    }
 
-        for file in files {
-            let virtual_path = Path::new(&file.path);
-            let Some(kind) = file_kind(virtual_path) else {
-                continue;
-            };
-            let Some(stem) = virtual_path.file_stem().and_then(|value| value.to_str()) else {
-                continue;
-            };
-
-            let locator = mount.locator(file.path.clone());
-            self.insert_scene_rpf_file(kind, joaat(stem), locator.clone());
-            mounted += 1;
-
-            if kind != AssetKind::Ytyp {
-                continue;
-            }
-
-            let bytes = match mount.read(&file.path) {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    self.warnings.push(format!(
-                        "{}: RPF YTYP read failed: {error}",
-                        locator.provenance()
-                    ));
-                    continue;
-                }
-            };
-
-            match Ytyp::from_bytes(&bytes) {
-                Ok(ytyp) => {
-                    let internal_name = ytyp.name.or_else(|| Some(MetaHash(joaat(stem))));
-                    if let Some(name) = internal_name {
-                        self.insert_scene_rpf_file(AssetKind::Ytyp, name.0, locator.clone());
-                    }
-                    for archetype in ytyp.archetypes {
-                        self.scene_rpf_archetype_providers
-                            .entry(archetype.name.0)
-                            .or_default()
-                            .push(RpfArchetypeProvider {
-                                locator: locator.clone(),
-                                ytyp_name: internal_name,
-                                archetype,
-                            });
-                    }
-                }
-                Err(error) => self.warnings.push(format!(
-                    "{}: RPF YTYP parse failed: {error}",
-                    locator.provenance()
-                )),
-            }
+    /// Mount only explicitly selected RPF entries into scene resolution.
+    ///
+    /// This is the preferred path for a load-order-aware game index: losers
+    /// are never added to the workspace overlay, so precedence is resolved
+    /// before scene assembly and same-rank ambiguity remains explicit.
+    pub fn mount_scene_rpf_entries(
+        &mut self,
+        locators: &[RpfEntryLocator],
+    ) -> Result<usize, WorkspaceError> {
+        for locator in locators {
+            self.index_scene_rpf_locator(locator)?;
         }
 
-        for locators in self.scene_rpf_files.values_mut() {
-            locators.sort();
-            locators.dedup();
+        for candidates in self.scene_rpf_files.values_mut() {
+            candidates.sort();
+            candidates.dedup();
         }
         for providers in self.scene_rpf_archetype_providers.values_mut() {
             providers.sort_by(|left, right| left.locator.cmp(&right.locator));
             providers.dedup_by(|left, right| left.locator == right.locator);
         }
 
-        Ok(mounted)
+        Ok(locators.len())
+    }
+
+    fn index_scene_rpf_locator(&mut self, locator: &RpfEntryLocator) -> Result<(), WorkspaceError> {
+        let virtual_path = Path::new(&locator.entry);
+        let Some(kind) = file_kind(virtual_path) else {
+            return Ok(());
+        };
+        let Some(stem) = virtual_path.file_stem().and_then(|value| value.to_str()) else {
+            return Ok(());
+        };
+
+        self.insert_scene_rpf_file(kind, joaat(stem), locator.clone());
+        if kind != AssetKind::Ytyp {
+            return Ok(());
+        }
+
+        let bytes = locator.read().map_err(|error| {
+            WorkspaceError::Build(format!(
+                "{}: RPF YTYP read failed: {error}",
+                locator.provenance()
+            ))
+        })?;
+        let ytyp = Ytyp::from_bytes(&bytes).map_err(|error| {
+            WorkspaceError::Build(format!(
+                "{}: RPF YTYP parse failed: {error}",
+                locator.provenance()
+            ))
+        })?;
+        let internal_name = ytyp.name.or_else(|| Some(MetaHash(joaat(stem))));
+        if let Some(name) = internal_name {
+            self.insert_scene_rpf_file(AssetKind::Ytyp, name.0, locator.clone());
+        }
+        for archetype in ytyp.archetypes {
+            self.scene_rpf_archetype_providers
+                .entry(archetype.name.0)
+                .or_default()
+                .push(RpfArchetypeProvider {
+                    locator: locator.clone(),
+                    ytyp_name: internal_name,
+                    archetype,
+                });
+        }
+
+        Ok(())
+    }
+
+    pub fn mount_scene_rpf_provider_archetypes(
+        &mut self,
+        locator: &RpfEntryLocator,
+        archetype_hashes: &[u32],
+    ) -> Result<usize, WorkspaceError> {
+        let virtual_path = Path::new(&locator.entry);
+        if file_kind(virtual_path) != Some(AssetKind::Ytyp) {
+            return Err(WorkspaceError::Build(format!(
+                "{}: indexed provider entry is not a YTYP",
+                locator.provenance()
+            )));
+        }
+        let Some(stem) = virtual_path.file_stem().and_then(|value| value.to_str()) else {
+            return Err(WorkspaceError::Build(format!(
+                "{}: indexed provider YTYP has no file stem",
+                locator.provenance()
+            )));
+        };
+
+        let requested = archetype_hashes.iter().copied().collect::<BTreeSet<_>>();
+        if requested.is_empty() {
+            return Ok(0);
+        }
+
+        let bytes = locator.read().map_err(|error| {
+            WorkspaceError::Build(format!(
+                "{}: indexed provider YTYP read failed: {error}",
+                locator.provenance()
+            ))
+        })?;
+        let ytyp = Ytyp::from_bytes(&bytes).map_err(|error| {
+            WorkspaceError::Build(format!(
+                "{}: indexed provider YTYP parse failed: {error}",
+                locator.provenance()
+            ))
+        })?;
+        let internal_name = ytyp.name.or_else(|| Some(MetaHash(joaat(stem))));
+        self.insert_scene_rpf_file(AssetKind::Ytyp, joaat(stem), locator.clone());
+        if let Some(name) = internal_name {
+            self.insert_scene_rpf_file(AssetKind::Ytyp, name.0, locator.clone());
+        }
+
+        let mut found = BTreeSet::new();
+        for archetype in ytyp.archetypes {
+            if !requested.contains(&archetype.name.0) {
+                continue;
+            }
+            found.insert(archetype.name.0);
+            self.scene_rpf_archetype_providers
+                .entry(archetype.name.0)
+                .or_default()
+                .push(RpfArchetypeProvider {
+                    locator: locator.clone(),
+                    ytyp_name: internal_name,
+                    archetype,
+                });
+        }
+
+        let missing = requested.difference(&found).copied().collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(WorkspaceError::Build(format!(
+                "{}: indexed provider is stale; requested archetype(s) not present: {}",
+                locator.provenance(),
+                missing
+                    .iter()
+                    .map(|hash| format!("0x{hash:08X}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+
+        for providers in self.scene_rpf_archetype_providers.values_mut() {
+            providers.sort_by(|left, right| left.locator.cmp(&right.locator));
+            providers.dedup_by(|left, right| left.locator == right.locator);
+        }
+
+        Ok(found.len())
     }
 
     fn insert_scene_rpf_file(&mut self, kind: AssetKind, hash: u32, locator: RpfEntryLocator) {

@@ -4,7 +4,7 @@
 //! Geometry remains behind the existing lazy preview endpoints.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Path, PathBuf},
 };
@@ -18,8 +18,8 @@ use ragelab_ymap::Ymap;
 use serde::Serialize;
 
 use crate::{
-    preview_asset_bytes_as, ymap_entity_spatial_context, AssetPreviewReport, PreviewOptions,
-    SpatialTransform,
+    preview_asset_bytes_as, ymap_entity_spatial_context, AssetPreviewReport, GtaRpfAssetIndex,
+    PreviewOptions, SpatialTransform,
 };
 
 pub const DEFAULT_SCENE_NODE_LIMIT: usize = 10_000;
@@ -37,6 +37,27 @@ impl SceneRpfMount {
         Self {
             archive: archive.into(),
             nested,
+            keys: keys.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SceneGameIndexSource {
+    pub game_root: PathBuf,
+    pub index: PathBuf,
+    pub keys: PathBuf,
+}
+
+impl SceneGameIndexSource {
+    pub fn new(
+        game_root: impl Into<PathBuf>,
+        index: impl Into<PathBuf>,
+        keys: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            game_root: game_root.into(),
+            index: index.into(),
             keys: keys.into(),
         }
     }
@@ -427,14 +448,39 @@ pub fn workspace_scene_report_with_sources(
     rpf_mounts: &[SceneRpfMount],
     options: SceneAssemblyOptions,
 ) -> Result<SceneManifestReport, io::Error> {
+    workspace_scene_report_with_game_index(
+        workspace,
+        ymap_path,
+        fallback_roots,
+        rpf_mounts,
+        None,
+        options,
+    )
+}
+
+pub fn workspace_scene_report_with_game_index(
+    workspace: &Path,
+    ymap_path: &Path,
+    fallback_roots: &[PathBuf],
+    rpf_mounts: &[SceneRpfMount],
+    game_index: Option<&SceneGameIndexSource>,
+    options: SceneAssemblyOptions,
+) -> Result<SceneManifestReport, io::Error> {
     let manifest = workspace_scene_manifest_with_sources(
         workspace,
         ymap_path,
         fallback_roots,
         rpf_mounts,
+        game_index,
         options,
     )?;
     Ok(SceneManifestReport::from(&manifest))
+}
+
+pub struct SceneAssetPreviewSources<'a> {
+    pub fallback_roots: &'a [PathBuf],
+    pub rpf_mounts: &'a [SceneRpfMount],
+    pub game_index: Option<&'a SceneGameIndexSource>,
 }
 
 pub fn workspace_scene_asset_preview_with_sources(
@@ -446,11 +492,34 @@ pub fn workspace_scene_asset_preview_with_sources(
     asset_ref: usize,
     options: PreviewOptions,
 ) -> Result<AssetPreviewReport, io::Error> {
+    workspace_scene_asset_preview_with_game_index(
+        workspace,
+        ymap_path,
+        SceneAssetPreviewSources {
+            fallback_roots,
+            rpf_mounts,
+            game_index: None,
+        },
+        scene_options,
+        asset_ref,
+        options,
+    )
+}
+
+pub fn workspace_scene_asset_preview_with_game_index(
+    workspace: &Path,
+    ymap_path: &Path,
+    sources: SceneAssetPreviewSources<'_>,
+    scene_options: SceneAssemblyOptions,
+    asset_ref: usize,
+    options: PreviewOptions,
+) -> Result<AssetPreviewReport, io::Error> {
     let manifest = workspace_scene_manifest_with_sources(
         workspace,
         ymap_path,
-        fallback_roots,
-        rpf_mounts,
+        sources.fallback_roots,
+        sources.rpf_mounts,
+        sources.game_index,
         scene_options,
     )?;
     let asset = manifest.assets.get(asset_ref).ok_or_else(|| {
@@ -495,6 +564,7 @@ fn workspace_scene_manifest_with_sources(
     ymap_path: &Path,
     fallback_roots: &[PathBuf],
     rpf_mounts: &[SceneRpfMount],
+    game_index_source: Option<&SceneGameIndexSource>,
     options: SceneAssemblyOptions,
 ) -> Result<SceneManifest, io::Error> {
     if !workspace.is_dir() {
@@ -530,7 +600,111 @@ fn workspace_scene_manifest_with_sources(
             .mount_scene_rpf(&mount.archive, mount.nested.clone(), &mount.keys)
             .map_err(|error| io::Error::other(error.to_string()))?;
     }
-    Ok(assemble_ymap_scene(&index, &resolved_ymap, &ymap, options))
+
+    let mut source_warnings = Vec::new();
+    if let Some(source) = game_index_source {
+        source_warnings = mount_game_index_for_ymap(&mut index, &ymap, source, options)?;
+    }
+
+    let mut manifest = assemble_ymap_scene(&index, &resolved_ymap, &ymap, options);
+    manifest.warnings.extend(source_warnings);
+    Ok(manifest)
+}
+
+fn mount_game_index_for_ymap(
+    workspace_index: &mut WorkspaceIndex,
+    ymap: &Ymap,
+    source: &SceneGameIndexSource,
+    options: SceneAssemblyOptions,
+) -> Result<Vec<String>, io::Error> {
+    if !source.game_root.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "scene game root is not a directory: {}",
+                source.game_root.display()
+            ),
+        ));
+    }
+    if !source.index.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("scene game index not found: {}", source.index.display()),
+        ));
+    }
+    if !source.keys.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "scene game RPF key store is not a directory: {}",
+                source.keys.display()
+            ),
+        ));
+    }
+
+    let game_index = GtaRpfAssetIndex::load(&source.index)?;
+    if !game_index.matches_installation(&source.game_root)? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "scene game index is stale for {}; rebuild {}",
+                source.game_root.display(),
+                source.index.display()
+            ),
+        ));
+    }
+
+    let plan = game_index.plan_for_archetypes(
+        ymap.entities
+            .iter()
+            .take(options.effective_max_nodes())
+            .map(|entity| entity.archetype_name.0),
+    );
+
+    for selection in &plan.provider_selections {
+        let locator = selection
+            .locator
+            .materialize(&source.game_root, &source.keys);
+        workspace_index
+            .mount_scene_rpf_provider_archetypes(&locator, &selection.archetype_hashes)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+    }
+
+    let mut selected_entries = BTreeSet::new();
+    for locator in plan.asset_entries.iter().chain(&plan.collision_entries) {
+        selected_entries.insert(locator.materialize(&source.game_root, &source.keys));
+    }
+    workspace_index
+        .mount_scene_rpf_entries(&selected_entries.into_iter().collect::<Vec<_>>())
+        .map_err(|error| io::Error::other(error.to_string()))?;
+
+    let mut warnings = Vec::new();
+    if !plan.unresolved_archetypes.is_empty() {
+        warnings.push(format!(
+            "game index has no winning provider for {} requested archetype(s)",
+            plan.unresolved_archetypes.len()
+        ));
+    }
+    if !plan.ambiguous_archetypes.is_empty() {
+        warnings.push(format!(
+            "game index has same-rank ambiguity for {} requested archetype(s)",
+            plan.ambiguous_archetypes.len()
+        ));
+    }
+    if !plan.unresolved_assets.is_empty() {
+        warnings.push(format!(
+            "game index has no winning primary asset for {} requested asset key(s)",
+            plan.unresolved_assets.len()
+        ));
+    }
+    if !plan.ambiguous_assets.is_empty() {
+        warnings.push(format!(
+            "game index has same-rank ambiguity for {} requested asset key(s)",
+            plan.ambiguous_assets.len()
+        ));
+    }
+
+    Ok(warnings)
 }
 
 fn assemble_ymap_scene_with_lookup<F>(

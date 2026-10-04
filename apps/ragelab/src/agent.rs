@@ -7,10 +7,11 @@ use std::{
 use ragelab_assets::AssetKind;
 use ragelab_engine::{
     apply_operation_document, asset_capabilities, build_vanilla_catalog, discover_fivem_legacy,
-    discover_gta_v_legacy, inspect_asset, isolated_asset_spatial_context, parse_operation_document,
-    plan_operation_document, preview_asset, render_vanilla_catalog_paths, validate_asset,
-    workspace_scene_report_with_sources, ymap_spatial_context, EngineError, OperationError,
-    PreviewOptions, SceneAssemblyOptions, SceneRpfMount, SpatialContext, SpatialProvenance,
+    discover_gta_v_legacy, gta_rpf_archive_order, inspect_asset, isolated_asset_spatial_context,
+    parse_operation_document, plan_operation_document, preview_asset, render_vanilla_catalog_paths,
+    validate_asset, workspace_scene_report_with_game_index, ymap_spatial_context, EngineError,
+    GtaRpfAssetIndex, OperationError, PreviewOptions, SceneAssemblyOptions, SceneGameIndexSource,
+    SceneRpfMount, SpatialContext, SpatialProvenance,
 };
 use ragelab_ybn::YbnCollision;
 use ragelab_ydd::YddDictionary;
@@ -39,6 +40,8 @@ pub fn is_structured_command(command: &str) -> bool {
             | "export"
             | "gta.discover"
             | "gta.catalog"
+            | "gta.rpf-order"
+            | "gta.rpf-index"
             | "rpf.keys"
             | "rpf.info"
             | "rpf.list"
@@ -430,14 +433,16 @@ pub fn scene(
     ymap_arg: &Path,
     fallback_roots: &[PathBuf],
     rpf_mounts: &[SceneRpfMount],
+    game_index: Option<&SceneGameIndexSource>,
     options: SceneAssemblyOptions,
     json_output: bool,
 ) -> Result<(), Box<dyn Error>> {
-    let report = workspace_scene_report_with_sources(
+    let report = workspace_scene_report_with_game_index(
         workspace,
         ymap_arg,
         fallback_roots,
         rpf_mounts,
+        game_index,
         options,
     )?;
 
@@ -466,6 +471,7 @@ pub struct SceneCommandArgs {
     pub ymap: PathBuf,
     pub fallback_roots: Vec<PathBuf>,
     pub rpf_mounts: Vec<SceneRpfMount>,
+    pub game_index: Option<SceneGameIndexSource>,
     pub options: SceneAssemblyOptions,
     pub json_output: bool,
 }
@@ -490,6 +496,8 @@ pub fn parse_scene_args(
     let mut fallback_roots = Vec::new();
     let mut rpf_mounts: Vec<(PathBuf, Vec<String>)> = Vec::new();
     let mut rpf_keys = None;
+    let mut game_root = None;
+    let mut game_index = None;
     let mut max_nodes = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -524,6 +532,18 @@ pub fn parse_scene_args(
                     .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
                 rpf_keys = Some(PathBuf::from(value));
             }
+            "--game-root" if game_root.is_none() => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+                game_root = Some(PathBuf::from(value));
+            }
+            "--game-index" if game_index.is_none() => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+                game_index = Some(PathBuf::from(value));
+            }
             "--max-nodes" if max_nodes.is_none() => {
                 let value = args
                     .next()
@@ -554,7 +574,7 @@ pub fn parse_scene_args(
     let mounts = if rpf_mounts.is_empty() {
         Vec::new()
     } else {
-        let keys = rpf_keys.ok_or_else(|| {
+        let keys = rpf_keys.clone().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "--rpf-keys is required when --rpf-mount is used",
@@ -566,11 +586,31 @@ pub fn parse_scene_args(
             .collect()
     };
 
+    let game_index_source = match (game_root, game_index) {
+        (None, None) => None,
+        (Some(root), Some(index)) => {
+            let keys = rpf_keys.clone().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--rpf-keys is required when --game-index is used",
+                )
+            })?;
+            Some(SceneGameIndexSource::new(root, index, keys))
+        }
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--game-root and --game-index must be provided together",
+            ))
+        }
+    };
+
     Ok(SceneCommandArgs {
         workspace,
         ymap,
         fallback_roots,
         rpf_mounts: mounts,
+        game_index: game_index_source,
         options: max_nodes.map(SceneAssemblyOptions::new).unwrap_or_default(),
         json_output,
     })
@@ -718,6 +758,147 @@ pub fn fivem_discover(json_output: bool) -> Result<(), Box<dyn Error>> {
         }
     }
 
+    Ok(())
+}
+
+pub struct GtaRpfIndexCommandArgs {
+    pub root: PathBuf,
+    pub keys: PathBuf,
+    pub output: PathBuf,
+    pub overwrite: bool,
+    pub json_output: bool,
+}
+
+pub fn parse_gta_rpf_index_args(
+    args: impl Iterator<Item = String>,
+    usage: &str,
+) -> Result<GtaRpfIndexCommandArgs, io::Error> {
+    let mut args = args;
+    let root = args
+        .next()
+        .filter(|value| !value.starts_with('-'))
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+
+    let mut keys = None;
+    let mut output = None;
+    let mut overwrite = false;
+    let mut json_output = false;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--keys" if keys.is_none() => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+                keys = Some(PathBuf::from(value));
+            }
+            "--output" if output.is_none() => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+                output = Some(PathBuf::from(value));
+            }
+            "--overwrite" if !overwrite => overwrite = true,
+            "--json" if !json_output => json_output = true,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{usage}; unknown option: {arg}"),
+                ))
+            }
+        }
+    }
+
+    Ok(GtaRpfIndexCommandArgs {
+        root,
+        keys: keys.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?,
+        output: output.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?,
+        overwrite,
+        json_output,
+    })
+}
+
+pub fn gta_rpf_index(request: GtaRpfIndexCommandArgs) -> Result<(), Box<dyn Error>> {
+    let build = GtaRpfAssetIndex::build(&request.root, &request.keys)?;
+    build.index.save(&request.output, request.overwrite)?;
+    let bytes = fs::metadata(&request.output)?.len();
+
+    if request.json_output {
+        print_success(
+            "gta.rpf-index",
+            json!({
+                "report": build.report,
+                "output": request.output.display().to_string(),
+                "bytes": bytes,
+            }),
+        )?;
+    } else {
+        println!("output: {}", request.output.display());
+        println!("bytes: {bytes}");
+        println!("ordered-archives: {}", build.report.ordered_archives);
+        println!("scanned-archives: {}", build.report.scanned_archives);
+        println!("nested-archives: {}", build.report.nested_archives);
+        println!("indexed-files: {}", build.report.indexed_files);
+        println!("parsed-ytyps: {}", build.report.parsed_ytyps);
+        println!("archetypes: {}", build.report.archetypes);
+        println!("file-keys: {}", build.report.file_keys);
+        println!("warnings: {}", build.report.warnings.len());
+    }
+
+    Ok(())
+}
+
+pub fn parse_gta_rpf_order_args(
+    args: impl Iterator<Item = String>,
+    usage: &str,
+) -> Result<(PathBuf, PathBuf, bool), io::Error> {
+    let mut args = args;
+    let root = args
+        .next()
+        .filter(|value| !value.starts_with('-'))
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+
+    let mut keys = None;
+    let mut json_output = false;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--keys" if keys.is_none() => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+                keys = Some(PathBuf::from(value));
+            }
+            "--json" if !json_output => json_output = true,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{usage}; unknown option: {arg}"),
+                ))
+            }
+        }
+    }
+
+    let keys = keys.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+    Ok((root, keys, json_output))
+}
+
+pub fn gta_rpf_order(root: &Path, keys: &Path, json_output: bool) -> Result<(), Box<dyn Error>> {
+    let report = gta_rpf_archive_order(root, keys)?;
+    if json_output {
+        print_success("gta.rpf-order", serde_json::to_value(&report)?)?;
+    } else {
+        println!("game-root: {}", report.game_root);
+        println!("archives: {}", report.archives.len());
+        println!("platform-packs: {}", report.platform_packs.len());
+        println!("warnings: {}", report.warnings.len());
+        for archive in report.archives {
+            println!(
+                "{:03} [{}] {}",
+                archive.load_rank, archive.tier, archive.relative_path
+            );
+        }
+    }
     Ok(())
 }
 
@@ -919,6 +1100,8 @@ pub fn normalize_command_args(args: Vec<String>) -> Vec<String> {
         ("workspace", "scene") => Some("scene"),
         ("gta", "discover") => Some("gta.discover"),
         ("gta", "catalog") => Some("gta.catalog"),
+        ("gta", "rpf-order") => Some("gta.rpf-order"),
+        ("gta", "rpf-index") => Some("gta.rpf-index"),
         ("gta", "vanilla-index") => Some("vanilla-index"),
         ("rpf", "keys") => Some("rpf.keys"),
         ("rpf", "info") => Some("rpf.info"),

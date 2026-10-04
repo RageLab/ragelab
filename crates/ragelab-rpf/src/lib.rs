@@ -232,11 +232,11 @@ impl RpfEntryLocator {
     }
 }
 
-#[derive(Debug)]
 pub struct RpfMount {
     archive_path: PathBuf,
     nested: Vec<String>,
     keys_path: PathBuf,
+    keys: GtaKeys,
     archive: Rpf7Archive,
 }
 
@@ -258,6 +258,7 @@ impl RpfMount {
             archive_path,
             nested,
             keys_path,
+            keys,
             archive,
         })
     }
@@ -276,8 +277,7 @@ impl RpfMount {
     }
 
     pub fn read(&self, entry: &str) -> Result<Vec<u8>, RpfError> {
-        let keys = GtaKeyStore::load(&self.keys_path)?;
-        self.archive.read_file(entry, Some(&keys))
+        self.archive.read_file(entry, Some(&self.keys))
     }
 
     pub fn archive_name(&self) -> &str {
