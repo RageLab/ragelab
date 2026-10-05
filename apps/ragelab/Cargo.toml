@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 ragelab-assets = { path = "../../crates/ragelab-assets" }
 ragelab-engine = { path = "../../crates/ragelab-engine" }
+ragelab-render = { path = "../../crates/ragelab-render" }
 ragelab-hash = { path = "../../crates/ragelab-hash" }
 ragelab-meta = { path = "../../crates/ragelab-meta" }
 ragelab-resource = { path = "../../crates/ragelab-resource" }

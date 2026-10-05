@@ -33,7 +33,7 @@ Errors use the same schema:
 
 Consumers must key compatibility decisions on `schema` and `schemaVersion`, not on human-readable output.
 
-The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `spatial <file> --json`, `preview <file> --json`, `plan <operation.json> --json`, `apply <operation.json> --json`, `workspace preflight ... --json`, `workspace export ... --json`, `workspace scene ... --json`, `workspace render-package ... --json`, `gta discover --json`, `gta catalog ... --json`, and `fivem discover --json` use the common response envelope.
+The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `spatial <file> --json`, `preview <file> --json`, `plan <operation.json> --json`, `apply <operation.json> --json`, `workspace preflight ... --json`, `workspace export ... --json`, `workspace scene ... --json`, `workspace render-package ... --json`, `render asset ... --json`, `render scene ... --json`, `render compare ... --json`, `gta discover --json`, `gta catalog ... --json`, and `fivem discover --json` use the common response envelope.
 
 ## Agent-first surface
 
@@ -240,6 +240,14 @@ ragelab workspace render-package ./stream map.ymap --output scene.rlrender --jso
 ```
 
 Existing output is preserved unless `--overwrite` is explicit. Geometry, indices and RGBA pixels are stored in the binary blob rather than JSON/base64. See [RENDER_CONTRACT.md](RENDER_CONTRACT.md).
+
+## Native rendering
+
+`render asset` renders supported YDR/YDD/YFT model packets offscreen. YDD requires `--drawable-index`. Because isolated files have no workspace dependency context, external YTDs are not guessed.
+
+`render scene` resolves a YMAP through the same workspace/RPF/game-index rules as `workspace scene`, builds one shared `RenderPackage`, and renders its instances through wgpu. Both commands write PNG plus deterministic metadata sidecar and are non-destructive unless `--overwrite` is explicit.
+
+`render compare` reports RGBA8 visual differences with an explicit per-channel tolerance. Use tolerance 0 for same-backend determinism. See [RENDERER.md](RENDERER.md).
 
 ## Exit codes
 

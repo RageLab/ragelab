@@ -61,11 +61,15 @@ Format crates remain authoritative for binary-layout safety and writer capabilit
 
 If a rule must behave identically in the CLI, an MCP server, and RageLab Studio, it belongs at or below this layer.
 
+### Native renderer
+
+`ragelab-render` is the reusable native/wgpu rendering layer. It consumes only the engine-owned `RenderPackage` contract and must not depend on RAGE format crates. The initial backend is deterministic offscreen rendering for PNG/visual regression; later native viewport work reuses the same GPU packet/cache vocabulary. See [RENDERER.md](RENDERER.md).
+
 ### CLI
 
-`apps/ragelab` is the primary automation adapter. It exposes diagnostics and product operations without requiring a graphical environment.
+`apps/ragelab` is the primary automation adapter. It exposes diagnostics and product operations without requiring a graphical environment, including `render asset`, `render scene`, and `render compare` over the shared native renderer.
 
-The CLI must not contain an independent implementation of format parsing or writer safety.
+The CLI must not contain an independent implementation of format parsing, renderer semantics, or writer safety.
 
 ### RageLab Studio
 

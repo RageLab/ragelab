@@ -4,6 +4,7 @@ members = [
     "crates/ragelab-hash",
     "crates/ragelab-assets",
     "crates/ragelab-engine",
+    "crates/ragelab-render",
     "crates/ragelab-rpf",
     "crates/ragelab-resource",
     "crates/ragelab-rbf",

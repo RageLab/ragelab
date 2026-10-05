@@ -1,0 +1,61 @@
+{
+  "schema": "ragelab.render.fixtures",
+  "schemaVersion": 1,
+  "baselinePolicy": "Generate PNG baselines per CI GPU backend/adapter and compare with an explicit tolerance.",
+  "cases": [
+    {
+      "id": "synthetic-ydr-isometric",
+      "asset": "../synthetic/ydr/editable.ydr",
+      "command": "render.asset",
+      "options": {
+        "width": 512,
+        "height": 512,
+        "view": "isometric",
+        "projection": "perspective",
+        "grid": true,
+        "bounds": true
+      },
+      "expectedPackage": {
+        "assets": 1,
+        "meshes": 1,
+        "materials": 2
+      }
+    },
+    {
+      "id": "synthetic-ydr-front-ortho-wire",
+      "asset": "../synthetic/ydr/editable.ydr",
+      "command": "render.asset",
+      "options": {
+        "width": 512,
+        "height": 384,
+        "view": "front",
+        "projection": "orthographic",
+        "transparent": true,
+        "wireframe": true
+      },
+      "expectedPackage": {
+        "assets": 1,
+        "meshes": 1,
+        "materials": 2
+      }
+    },
+    {
+      "id": "synthetic-ydd-drawable-0",
+      "asset": "../synthetic/ydd/editable.ydd",
+      "command": "render.asset",
+      "drawableIndex": 0,
+      "options": {
+        "width": 512,
+        "height": 512,
+        "view": "isometric",
+        "projection": "perspective",
+        "bounds": true
+      },
+      "expectedPackage": {
+        "assets": 1,
+        "meshes": 1,
+        "materials": 2
+      }
+    }
+  ]
+}

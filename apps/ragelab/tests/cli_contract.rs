@@ -155,6 +155,9 @@ fn global_capabilities_preserve_legacy_ids_and_advertise_canonical_ids() {
     assert!(canonical.iter().any(|value| value == "workspace.preflight"));
     assert!(canonical.iter().any(|value| value == "workspace.export"));
     assert!(canonical.iter().any(|value| value == "workspace.scene"));
+    assert!(canonical.iter().any(|value| value == "render.asset"));
+    assert!(canonical.iter().any(|value| value == "render.scene"));
+    assert!(canonical.iter().any(|value| value == "render.compare"));
     assert!(canonical.iter().any(|value| value == "gta.discover"));
     assert!(canonical.iter().any(|value| value == "gta.catalog"));
     assert!(canonical.iter().any(|value| value == "fivem.discover"));
@@ -194,6 +197,13 @@ fn global_capabilities_preserve_legacy_ids_and_advertise_canonical_ids() {
         .unwrap()
         .iter()
         .any(|value| value == "workspace.scene"));
+    for command in ["render.asset", "render.scene", "render.compare"] {
+        assert!(body["structuredOutput"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == command));
+    }
     assert!(body["structuredOutput"]
         .as_array()
         .unwrap()
