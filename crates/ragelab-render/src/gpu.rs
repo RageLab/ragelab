@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::HashMap, sync::mpsc};
+use std::{borrow::Cow, collections::HashMap, sync::mpsc, time::Instant};
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Quat, Vec3};
@@ -6,9 +6,13 @@ use ragelab_engine::{
     RenderAssetDescriptor, RenderAssetState, RenderBufferView, RenderElementType, RenderPackage,
     RenderTextureDescriptor,
 };
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use wgpu::util::DeviceExt;
 
-use crate::{OffscreenOptions, Projection, RenderError, RenderResult, RenderView, RenderedImage};
+use crate::{
+    CameraSnapshot, OffscreenOptions, PickResult, Projection, RenderError, RenderResult,
+    RenderView, RenderedImage, ViewportOptions, ViewportStats,
+};
 
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -23,6 +27,7 @@ struct Camera {
 struct Model {
     model: mat4x4<f32>,
     normal: mat4x4<f32>,
+    style: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -47,6 +52,7 @@ struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) world_normal: vec3<f32>,
     @location(1) uv0: vec2<f32>,
+    @location(2) @interpolate(flat) style: vec2<f32>,
 };
 
 @vertex
@@ -56,6 +62,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     output.position = camera.view_proj * world_position;
     output.world_normal = normalize((model.normal * vec4<f32>(input.normal, 0.0)).xyz);
     output.uv0 = input.uv0;
+    output.style = model.style.xy;
     return output;
 }
 
@@ -65,7 +72,14 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let normal = normalize(input.world_normal);
     let diffuse = max(dot(normal, normalize(camera.light_dir.xyz)), 0.0);
     let lighting = 0.34 + 0.66 * diffuse;
-    return vec4<f32>(base.rgb * lighting, base.a);
+    var shaded = base.rgb * lighting;
+    if (input.style.y > 0.5) {
+        shaded = mix(shaded, vec3<f32>(0.35, 0.48, 0.62), 0.10);
+    }
+    if (input.style.x > 0.5) {
+        shaded = mix(shaded, vec3<f32>(0.30, 0.62, 1.0), 0.58) + vec3<f32>(0.08, 0.10, 0.14);
+    }
+    return vec4<f32>(shaded, base.a);
 }
 "#;
 
@@ -79,6 +93,7 @@ struct Camera {
 struct Model {
     model: mat4x4<f32>,
     normal: mat4x4<f32>,
+    style: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -111,10 +126,11 @@ struct CameraUniform {
 struct ModelUniform {
     model: [[f32; 4]; 4],
     normal: [[f32; 4]; 4],
+    style: [f32; 4],
 }
 
 struct ModelBinding {
-    _buffer: wgpu::Buffer,
+    buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
 }
 
@@ -148,6 +164,9 @@ struct DrawInstance {
     asset_key: String,
     model: Mat4,
     model_binding: ModelBinding,
+    node_index: Option<u32>,
+    local_overlay: bool,
+    world_bounds: Aabb,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -188,6 +207,7 @@ impl Aabb {
 
 pub struct OffscreenRenderer {
     _instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
     camera_layout: wgpu::BindGroupLayout,
@@ -207,11 +227,17 @@ impl OffscreenRenderer {
     }
 
     async fn new_async() -> RenderResult<Self> {
-        let instance = wgpu::Instance::default();
+        Self::new_async_for_instance(wgpu::Instance::default(), None).await
+    }
+
+    async fn new_async_for_instance(
+        instance: wgpu::Instance,
+        compatible_surface: Option<&wgpu::Surface<'_>>,
+    ) -> RenderResult<Self> {
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: None,
+                compatible_surface,
                 force_fallback_adapter: false,
             })
             .await
@@ -428,6 +454,7 @@ impl OffscreenRenderer {
 
         Ok(Self {
             _instance: instance,
+            adapter,
             device,
             queue,
             camera_layout,
@@ -461,7 +488,7 @@ impl OffscreenRenderer {
             }
         }
 
-        let draws = self.build_draw_instances(package)?;
+        let draws = self.build_draw_instances(package, false)?;
         if draws.is_empty() {
             return Err(RenderError::Unsupported(
                 "render package has no ready drawable instances".into(),
@@ -486,7 +513,7 @@ impl OffscreenRenderer {
             }],
         });
 
-        let identity_model = self.create_model_binding(Mat4::IDENTITY);
+        let identity_model = self.create_model_binding(Mat4::IDENTITY, [0.0; 4]);
         let overlay_vertices = build_overlay_vertices(world_bounds, options);
         let overlay_buffer = (!overlay_vertices.is_empty()).then(|| {
             self.device
@@ -868,23 +895,14 @@ impl OffscreenRenderer {
         }
     }
 
-    fn create_model_binding(&self, model: Mat4) -> ModelBinding {
-        let determinant = model.determinant();
-        let normal = if determinant.is_finite() && determinant.abs() > 1.0e-8 {
-            model.inverse().transpose()
-        } else {
-            Mat4::IDENTITY
-        };
-        let uniform = ModelUniform {
-            model: model.to_cols_array_2d(),
-            normal: normal.to_cols_array_2d(),
-        };
+    fn create_model_binding(&self, model: Mat4, style: [f32; 4]) -> ModelBinding {
+        let uniform = model_uniform(model, style);
         let buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("RageLab model uniform"),
                 contents: bytemuck::bytes_of(&uniform),
-                usage: wgpu::BufferUsages::UNIFORM,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("RageLab model bind group"),
@@ -894,13 +912,36 @@ impl OffscreenRenderer {
                 resource: buffer.as_entire_binding(),
             }],
         });
-        ModelBinding {
-            _buffer: buffer,
-            bind_group,
-        }
+        ModelBinding { buffer, bind_group }
     }
 
-    fn build_draw_instances(&self, package: &RenderPackage) -> RenderResult<Vec<DrawInstance>> {
+    fn update_model_binding(
+        &self,
+        draw: &DrawInstance,
+        selected_node: Option<u32>,
+        emphasize_local: bool,
+    ) {
+        let selected = draw.node_index.is_some() && draw.node_index == selected_node;
+        let style = [
+            if selected { 1.0 } else { 0.0 },
+            if emphasize_local && draw.local_overlay {
+                1.0
+            } else {
+                0.0
+            },
+            0.0,
+            0.0,
+        ];
+        let uniform = model_uniform(draw.model, style);
+        self.queue
+            .write_buffer(&draw.model_binding.buffer, 0, bytemuck::bytes_of(&uniform));
+    }
+
+    fn build_draw_instances(
+        &self,
+        package: &RenderPackage,
+        emphasize_local: bool,
+    ) -> RenderResult<Vec<DrawInstance>> {
         let mut draws = Vec::new();
 
         if package.descriptor.scene.instances.is_empty() {
@@ -908,10 +949,15 @@ impl OffscreenRenderer {
                 if asset.state != RenderAssetState::Ready {
                     continue;
                 }
+                let model = Mat4::IDENTITY;
+                let world_bounds = asset_world_bounds(asset, model)?;
                 draws.push(DrawInstance {
                     asset_key: asset_key(asset),
-                    model: Mat4::IDENTITY,
-                    model_binding: self.create_model_binding(Mat4::IDENTITY),
+                    model,
+                    model_binding: self.create_model_binding(model, [0.0; 4]),
+                    node_index: None,
+                    local_overlay: false,
+                    world_bounds,
                 });
             }
             return Ok(draws);
@@ -959,14 +1005,764 @@ impl OffscreenRenderer {
                 rotation.normalize(),
                 Vec3::from_array(transform.translation),
             );
+            let local_overlay = asset.source.source_type == "loose";
+            let style = [
+                0.0,
+                if emphasize_local && local_overlay {
+                    1.0
+                } else {
+                    0.0
+                },
+                0.0,
+                0.0,
+            ];
             draws.push(DrawInstance {
                 asset_key: asset_key(asset),
                 model,
-                model_binding: self.create_model_binding(model),
+                model_binding: self.create_model_binding(model, style),
+                node_index: Some(instance.node_index),
+                local_overlay,
+                world_bounds: asset_world_bounds(asset, model)?,
             });
         }
 
+        draws.sort_by_key(|draw| draw.local_overlay);
         Ok(draws)
+    }
+}
+
+struct OrbitCamera {
+    target: Vec3,
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
+    radius: f32,
+    projection: Projection,
+}
+
+impl OrbitCamera {
+    fn fit(bounds: Aabb, projection: Projection) -> Self {
+        let direction = Vec3::new(1.0, -1.0, 0.78).normalize();
+        let yaw = direction.y.atan2(direction.x);
+        let pitch = direction.z.asin();
+        let radius = bounds.radius();
+        let fov = 45.0_f32.to_radians();
+        let distance = (radius / (fov * 0.5).tan()).max(radius * 2.0) * 1.25;
+        Self {
+            target: bounds.center(),
+            yaw,
+            pitch,
+            distance,
+            radius,
+            projection,
+        }
+    }
+
+    fn eye(&self) -> Vec3 {
+        let cos_pitch = self.pitch.cos();
+        let direction = Vec3::new(
+            cos_pitch * self.yaw.cos(),
+            cos_pitch * self.yaw.sin(),
+            self.pitch.sin(),
+        );
+        self.target + direction * self.distance
+    }
+
+    fn forward(&self) -> Vec3 {
+        (self.target - self.eye()).normalize_or_zero()
+    }
+
+    fn right(&self) -> Vec3 {
+        self.forward().cross(Vec3::Z).normalize_or_zero()
+    }
+
+    fn view_projection(&self, width: u32, height: u32) -> Mat4 {
+        let eye = self.eye();
+        let view = Mat4::look_at_rh(eye, self.target, Vec3::Z);
+        let aspect = (width as f32 / height.max(1) as f32).max(0.0001);
+        let near = (self.radius * 0.01).max(0.01);
+        let far = self.distance + self.radius * 6.0 + 1.0;
+        let projection = match self.projection {
+            Projection::Perspective => {
+                Mat4::perspective_rh(45.0_f32.to_radians(), aspect, near, far)
+            }
+            Projection::Orthographic => {
+                let half_y = self.radius * 1.35 * (self.distance / self.fit_distance()).max(0.05);
+                let half_x = half_y * aspect;
+                Mat4::orthographic_rh(-half_x, half_x, -half_y, half_y, near, far)
+            }
+        };
+        projection * view
+    }
+
+    fn fit_distance(&self) -> f32 {
+        let fov = 45.0_f32.to_radians();
+        (self.radius / (fov * 0.5).tan()).max(self.radius * 2.0) * 1.25
+    }
+
+    fn uniform(&self, width: u32, height: u32) -> CameraUniform {
+        let eye = self.eye();
+        CameraUniform {
+            view_proj: self.view_projection(width, height).to_cols_array_2d(),
+            light_dir: [0.45, -0.65, 0.62, 0.0],
+            camera_pos: [eye.x, eye.y, eye.z, 1.0],
+        }
+    }
+
+    fn orbit(&mut self, delta_x: f32, delta_y: f32) {
+        if delta_x.is_finite() {
+            self.yaw -= delta_x * 2.5;
+        }
+        if delta_y.is_finite() {
+            self.pitch = (self.pitch + delta_y * 2.0).clamp(-1.45, 1.45);
+        }
+    }
+
+    fn pan(&mut self, delta_x: f32, delta_y: f32) {
+        if !delta_x.is_finite() || !delta_y.is_finite() {
+            return;
+        }
+        let forward = self.forward();
+        let right = self.right();
+        let up = right.cross(forward).normalize_or_zero();
+        let scale = self.distance * 1.6;
+        self.target += (-right * delta_x + up * delta_y) * scale;
+    }
+
+    fn zoom(&mut self, delta: f32) {
+        if !delta.is_finite() {
+            return;
+        }
+        let min_distance = (self.radius * 0.05).max(0.01);
+        let max_distance = (self.radius * 100.0).max(min_distance * 2.0);
+        self.distance = (self.distance * (delta * 0.16).exp()).clamp(min_distance, max_distance);
+    }
+
+    fn fly(&mut self, forward: f32, right: f32, up: f32) {
+        if !forward.is_finite() || !right.is_finite() || !up.is_finite() {
+            return;
+        }
+        let speed = (self.radius * 0.08).max(0.05);
+        let movement = self.forward() * forward + self.right() * right + Vec3::Z * up;
+        self.target += movement * speed;
+    }
+
+    fn snapshot(&self) -> CameraSnapshot {
+        CameraSnapshot {
+            target: self.target.to_array(),
+            eye: self.eye().to_array(),
+            yaw_radians: self.yaw,
+            pitch_radians: self.pitch,
+            distance: self.distance,
+            projection: self.projection,
+        }
+    }
+
+    fn ray(&self, width: u32, height: u32, x: f32, y: f32) -> Option<(Vec3, Vec3)> {
+        if !x.is_finite()
+            || !y.is_finite()
+            || !(0.0..=1.0).contains(&x)
+            || !(0.0..=1.0).contains(&y)
+        {
+            return None;
+        }
+        let inverse = self.view_projection(width, height).inverse();
+        if !inverse.is_finite() {
+            return None;
+        }
+        let ndc_x = x * 2.0 - 1.0;
+        let ndc_y = 1.0 - y * 2.0;
+        let near = inverse.project_point3(Vec3::new(ndc_x, ndc_y, 0.0));
+        let far = inverse.project_point3(Vec3::new(ndc_x, ndc_y, 1.0));
+        let direction = (far - near).normalize_or_zero();
+        (direction.length_squared() > 0.0).then_some((near, direction))
+    }
+}
+
+pub struct SurfaceRenderer {
+    gpu: OffscreenRenderer,
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    depth_texture: wgpu::Texture,
+    depth_view: wgpu::TextureView,
+    mesh_pipeline: wgpu::RenderPipeline,
+    line_pipeline: wgpu::RenderPipeline,
+    options: ViewportOptions,
+    package: Option<RenderPackage>,
+    draws: Vec<DrawInstance>,
+    world_bounds: Option<Aabb>,
+    camera: Option<OrbitCamera>,
+    selected_node_index: Option<u32>,
+    scene_load_ms: f64,
+    last_frame_ms: f64,
+}
+
+impl SurfaceRenderer {
+    pub fn new<T>(target: T, options: ViewportOptions) -> RenderResult<Self>
+    where
+        T: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
+    {
+        pollster::block_on(Self::new_async(target, options))
+    }
+
+    async fn new_async<T>(target: T, options: ViewportOptions) -> RenderResult<Self>
+    where
+        T: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
+    {
+        let options = options.validate()?;
+        let instance = wgpu::Instance::default();
+        let surface = instance
+            .create_surface(target)
+            .map_err(|error| RenderError::Gpu(error.to_string()))?;
+        let gpu = OffscreenRenderer::new_async_for_instance(instance, Some(&surface)).await?;
+        let capabilities = surface.get_capabilities(&gpu.adapter);
+        if capabilities.formats.is_empty() {
+            return Err(RenderError::Gpu(
+                "native surface reported no compatible color formats".into(),
+            ));
+        }
+        let format = capabilities
+            .formats
+            .iter()
+            .copied()
+            .find(wgpu::TextureFormat::is_srgb)
+            .unwrap_or(capabilities.formats[0]);
+        let mut config = surface
+            .get_default_config(&gpu.adapter, options.width, options.height)
+            .ok_or_else(|| {
+                RenderError::Gpu("native surface has no default configuration".into())
+            })?;
+        config.format = format;
+        config.present_mode = if capabilities
+            .present_modes
+            .contains(&wgpu::PresentMode::Fifo)
+        {
+            wgpu::PresentMode::Fifo
+        } else {
+            config.present_mode
+        };
+        if capabilities
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::Opaque)
+        {
+            config.alpha_mode = wgpu::CompositeAlphaMode::Opaque;
+        }
+        surface.configure(&gpu.device, &config);
+        let (depth_texture, depth_view) =
+            create_depth_target(&gpu.device, options.width, options.height);
+        let (mesh_pipeline, line_pipeline) = create_pipelines_for_format(
+            &gpu.device,
+            &gpu.camera_layout,
+            &gpu.model_layout,
+            &gpu.material_layout,
+            format,
+        );
+
+        Ok(Self {
+            gpu,
+            surface,
+            config,
+            depth_texture,
+            depth_view,
+            mesh_pipeline,
+            line_pipeline,
+            options,
+            package: None,
+            draws: Vec::new(),
+            world_bounds: None,
+            camera: None,
+            selected_node_index: None,
+            scene_load_ms: 0.0,
+            last_frame_ms: 0.0,
+        })
+    }
+
+    pub fn set_package(&mut self, package: RenderPackage) -> RenderResult<()> {
+        let started = Instant::now();
+        package
+            .validate()
+            .map_err(|error| RenderError::InvalidInput(error.to_string()))?;
+        for texture in &package.descriptor.textures {
+            self.gpu.ensure_texture(&package, texture)?;
+        }
+        for asset in &package.descriptor.assets {
+            if asset.state == RenderAssetState::Ready {
+                self.gpu.ensure_asset(&package, asset)?;
+            }
+        }
+        let draws = self.gpu.build_draw_instances(&package, true)?;
+        if draws.is_empty() {
+            return Err(RenderError::Unsupported(
+                "render package has no ready drawable instances".into(),
+            ));
+        }
+        let world_bounds = package_world_bounds(&package, &draws)?;
+        let camera = OrbitCamera::fit(world_bounds, self.options.projection);
+        self.package = Some(package);
+        self.draws = draws;
+        self.world_bounds = Some(world_bounds);
+        self.camera = Some(camera);
+        self.selected_node_index = None;
+        self.scene_load_ms = started.elapsed().as_secs_f64() * 1000.0;
+        Ok(())
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) -> RenderResult<()> {
+        let options = ViewportOptions {
+            width,
+            height,
+            ..self.options
+        }
+        .validate()?;
+        self.options = options;
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(&self.gpu.device, &self.config);
+        let (depth_texture, depth_view) = create_depth_target(&self.gpu.device, width, height);
+        self.depth_texture = depth_texture;
+        self.depth_view = depth_view;
+        Ok(())
+    }
+
+    pub fn set_projection(&mut self, projection: Projection) {
+        self.options.projection = projection;
+        if let Some(camera) = self.camera.as_mut() {
+            camera.projection = projection;
+        }
+    }
+
+    pub fn set_overlays(&mut self, grid: bool, wireframe: bool, bounds: bool) {
+        self.options.grid = grid;
+        self.options.wireframe = wireframe;
+        self.options.bounds = bounds;
+    }
+
+    pub fn orbit(&mut self, delta_x: f32, delta_y: f32) {
+        if let Some(camera) = self.camera.as_mut() {
+            camera.orbit(delta_x, delta_y);
+        }
+    }
+
+    pub fn pan(&mut self, delta_x: f32, delta_y: f32) {
+        if let Some(camera) = self.camera.as_mut() {
+            camera.pan(delta_x, delta_y);
+        }
+    }
+
+    pub fn zoom(&mut self, delta: f32) {
+        if let Some(camera) = self.camera.as_mut() {
+            camera.zoom(delta);
+        }
+    }
+
+    pub fn fly(&mut self, forward: f32, right: f32, up: f32) {
+        if let Some(camera) = self.camera.as_mut() {
+            camera.fly(forward, right, up);
+        }
+    }
+
+    pub fn pick(&self, x: f32, y: f32) -> Option<PickResult> {
+        let camera = self.camera.as_ref()?;
+        let (origin, direction) = camera.ray(self.options.width, self.options.height, x, y)?;
+        self.draws
+            .iter()
+            .filter_map(|draw| {
+                let node_index = draw.node_index?;
+                let distance = ray_aabb(origin, direction, draw.world_bounds)?;
+                Some(PickResult {
+                    node_index,
+                    distance,
+                })
+            })
+            .min_by(|a, b| a.distance.total_cmp(&b.distance))
+    }
+
+    pub fn select(&mut self, node_index: Option<u32>) {
+        self.selected_node_index = node_index;
+        for draw in &self.draws {
+            self.gpu.update_model_binding(draw, node_index, true);
+        }
+    }
+
+    pub fn camera_snapshot(&self) -> Option<CameraSnapshot> {
+        self.camera.as_ref().map(OrbitCamera::snapshot)
+    }
+
+    pub fn stats(&self) -> ViewportStats {
+        let (instances, assets, meshes, materials, textures, uploaded_payload_bytes) =
+            if let Some(package) = self.package.as_ref() {
+                (
+                    package.descriptor.summary.instances,
+                    package.descriptor.summary.assets,
+                    package.descriptor.summary.meshes,
+                    package.descriptor.summary.materials,
+                    package.descriptor.summary.textures,
+                    package.blob.len() as u64,
+                )
+            } else {
+                (0, 0, 0, 0, 0, 0)
+            };
+        ViewportStats {
+            width: self.options.width,
+            height: self.options.height,
+            instances,
+            assets,
+            meshes,
+            materials,
+            textures,
+            gpu_asset_cache: self.gpu.asset_cache.len().try_into().unwrap_or(u32::MAX),
+            gpu_texture_cache: self.gpu.texture_cache.len().try_into().unwrap_or(u32::MAX),
+            uploaded_payload_bytes,
+            scene_load_ms: self.scene_load_ms,
+            last_frame_ms: self.last_frame_ms,
+            selected_node_index: self.selected_node_index,
+        }
+    }
+
+    pub fn render_frame(&mut self) -> RenderResult<()> {
+        let started = Instant::now();
+        let package = self.package.as_ref().ok_or_else(|| {
+            RenderError::InvalidInput("native viewport has no loaded render package".into())
+        })?;
+        let camera = self.camera.as_ref().ok_or_else(|| {
+            RenderError::InvalidInput("native viewport has no camera state".into())
+        })?;
+        let world_bounds = self.world_bounds.ok_or_else(|| {
+            RenderError::InvalidInput("native viewport has no world bounds".into())
+        })?;
+
+        let camera_uniform = camera.uniform(self.options.width, self.options.height);
+        let camera_buffer = self
+            .gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("RageLab viewport camera uniform"),
+                contents: bytemuck::bytes_of(&camera_uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let camera_bind_group = self
+            .gpu
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("RageLab viewport camera bind group"),
+                layout: &self.gpu.camera_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                }],
+            });
+        let identity_model = self.gpu.create_model_binding(Mat4::IDENTITY, [0.0; 4]);
+        let overlay_options = OffscreenOptions {
+            width: self.options.width,
+            height: self.options.height,
+            view: RenderView::Auto,
+            projection: self.options.projection,
+            transparent: false,
+            grid: self.options.grid,
+            wireframe: self.options.wireframe,
+            bounds: self.options.bounds,
+        };
+        let overlay_vertices = build_overlay_vertices(world_bounds, overlay_options);
+        let overlay_buffer = (!overlay_vertices.is_empty()).then(|| {
+            self.gpu
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("RageLab viewport overlay lines"),
+                    contents: bytemuck::cast_slice(&overlay_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
+
+        let frame = match self.surface.get_current_texture() {
+            Ok(frame) => frame,
+            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                self.surface.configure(&self.gpu.device, &self.config);
+                self.surface
+                    .get_current_texture()
+                    .map_err(|error| RenderError::Gpu(error.to_string()))?
+            }
+            Err(wgpu::SurfaceError::Timeout) => return Ok(()),
+            Err(error) => return Err(RenderError::Gpu(error.to_string())),
+        };
+        let color_view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("RageLab viewport encoder"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("RageLab native viewport pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.035,
+                            g: 0.045,
+                            b: 0.06,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            pass.set_bind_group(0, &camera_bind_group, &[]);
+            pass.set_pipeline(&self.mesh_pipeline);
+            for draw in &self.draws {
+                let asset = self.gpu.asset_cache.get(&draw.asset_key).ok_or_else(|| {
+                    RenderError::Gpu(format!("GPU asset cache missing {}", draw.asset_key))
+                })?;
+                pass.set_bind_group(1, &draw.model_binding.bind_group, &[]);
+                for mesh in &asset.meshes {
+                    let material = mesh
+                        .material_ref
+                        .and_then(|index| asset.materials.get(index as usize))
+                        .unwrap_or(&asset.fallback_material);
+                    pass.set_bind_group(2, &material.bind_group, &[]);
+                    pass.set_vertex_buffer(0, mesh.positions.slice(..));
+                    pass.set_vertex_buffer(1, mesh.normals.slice(..));
+                    pass.set_vertex_buffer(2, mesh.uv0.slice(..));
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                }
+            }
+
+            if self.options.wireframe {
+                pass.set_pipeline(&self.line_pipeline);
+                for draw in &self.draws {
+                    let Some(asset) = self.gpu.asset_cache.get(&draw.asset_key) else {
+                        continue;
+                    };
+                    pass.set_bind_group(1, &draw.model_binding.bind_group, &[]);
+                    for mesh in &asset.meshes {
+                        if mesh.wire_index_count == 0 {
+                            continue;
+                        }
+                        pass.set_vertex_buffer(0, mesh.positions.slice(..));
+                        pass.set_index_buffer(
+                            mesh.wire_indices.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        pass.draw_indexed(0..mesh.wire_index_count, 0, 0..1);
+                    }
+                }
+            }
+
+            if let Some(buffer) = overlay_buffer.as_ref() {
+                pass.set_pipeline(&self.line_pipeline);
+                pass.set_bind_group(1, &identity_model.bind_group, &[]);
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..overlay_vertices.len() as u32, 0..1);
+            }
+        }
+
+        self.gpu.queue.submit(Some(encoder.finish()));
+        frame.present();
+        self.last_frame_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let _ = package;
+        Ok(())
+    }
+}
+
+fn create_depth_target(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("RageLab native viewport depth"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+fn create_pipelines_for_format(
+    device: &wgpu::Device,
+    camera_layout: &wgpu::BindGroupLayout,
+    model_layout: &wgpu::BindGroupLayout,
+    material_layout: &wgpu::BindGroupLayout,
+    format: wgpu::TextureFormat,
+) -> (wgpu::RenderPipeline, wgpu::RenderPipeline) {
+    let mesh_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("RageLab native mesh shader"),
+        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(MESH_SHADER)),
+    });
+    let line_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("RageLab native line shader"),
+        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(LINE_SHADER)),
+    });
+    let mesh_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("RageLab native mesh pipeline layout"),
+        bind_group_layouts: &[camera_layout, model_layout, material_layout],
+        push_constant_ranges: &[],
+    });
+    let line_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("RageLab native line pipeline layout"),
+        bind_group_layouts: &[camera_layout, model_layout],
+        push_constant_ranges: &[],
+    });
+    const POSITION_ATTRIBUTES: [wgpu::VertexAttribute; 1] =
+        wgpu::vertex_attr_array![0 => Float32x3];
+    const NORMAL_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![1 => Float32x3];
+    const UV_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![2 => Float32x2];
+
+    let mesh_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("RageLab native mesh pipeline"),
+        layout: Some(&mesh_layout),
+        vertex: wgpu::VertexState {
+            module: &mesh_shader,
+            entry_point: "vs_main",
+            buffers: &[
+                wgpu::VertexBufferLayout {
+                    array_stride: 12,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &POSITION_ATTRIBUTES,
+                },
+                wgpu::VertexBufferLayout {
+                    array_stride: 12,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &NORMAL_ATTRIBUTES,
+                },
+                wgpu::VertexBufferLayout {
+                    array_stride: 8,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &UV_ATTRIBUTES,
+                },
+            ],
+            compilation_options: Default::default(),
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::LessEqual,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &mesh_shader,
+            entry_point: "fs_main",
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        multiview: None,
+        cache: None,
+    });
+
+    let line_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("RageLab native line pipeline"),
+        layout: Some(&line_layout),
+        vertex: wgpu::VertexState {
+            module: &line_shader,
+            entry_point: "vs_line",
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: 12,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &POSITION_ATTRIBUTES,
+            }],
+            compilation_options: Default::default(),
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::LineList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: false,
+            depth_compare: wgpu::CompareFunction::LessEqual,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &line_shader,
+            entry_point: "fs_line",
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        multiview: None,
+        cache: None,
+    });
+
+    (mesh_pipeline, line_pipeline)
+}
+
+fn ray_aabb(origin: Vec3, direction: Vec3, bounds: Aabb) -> Option<f32> {
+    let inv = Vec3::new(
+        if direction.x.abs() > 1.0e-8 {
+            1.0 / direction.x
+        } else {
+            f32::INFINITY
+        },
+        if direction.y.abs() > 1.0e-8 {
+            1.0 / direction.y
+        } else {
+            f32::INFINITY
+        },
+        if direction.z.abs() > 1.0e-8 {
+            1.0 / direction.z
+        } else {
+            f32::INFINITY
+        },
+    );
+    let t0 = (bounds.min - origin) * inv;
+    let t1 = (bounds.max - origin) * inv;
+    let near = t0.min(t1);
+    let far = t0.max(t1);
+    let t_min = near.x.max(near.y).max(near.z);
+    let t_max = far.x.min(far.y).min(far.z);
+    if t_max < 0.0 || t_min > t_max {
+        None
+    } else {
+        Some(t_min.max(0.0))
     }
 }
 
@@ -1138,29 +1934,45 @@ fn wire_indices(bytes: &[u8]) -> RenderResult<Vec<u32>> {
     Ok(wire)
 }
 
-fn package_world_bounds(package: &RenderPackage, draws: &[DrawInstance]) -> RenderResult<Aabb> {
+fn model_uniform(model: Mat4, style: [f32; 4]) -> ModelUniform {
+    let determinant = model.determinant();
+    let normal = if determinant.is_finite() && determinant.abs() > 1.0e-8 {
+        model.inverse().transpose()
+    } else {
+        Mat4::IDENTITY
+    };
+    ModelUniform {
+        model: model.to_cols_array_2d(),
+        normal: normal.to_cols_array_2d(),
+        style,
+    }
+}
+
+fn asset_world_bounds(asset: &RenderAssetDescriptor, model: Mat4) -> RenderResult<Aabb> {
+    let local = asset.bounds.ok_or_else(|| {
+        RenderError::Unsupported(format!(
+            "asset {} has no proven drawable bounds",
+            asset.asset_ref
+        ))
+    })?;
+    let mut bounds = Aabb::empty();
+    for corner in aabb_corners(Vec3::from_array(local.min), Vec3::from_array(local.max)) {
+        bounds.include(model.transform_point3(corner));
+    }
+    if !bounds.is_valid() {
+        return Err(RenderError::InvalidInput(format!(
+            "asset {} produced invalid world bounds",
+            asset.asset_ref
+        )));
+    }
+    Ok(bounds)
+}
+
+fn package_world_bounds(_package: &RenderPackage, draws: &[DrawInstance]) -> RenderResult<Aabb> {
     let mut bounds = Aabb::empty();
     for draw in draws {
-        let asset = package
-            .descriptor
-            .assets
-            .iter()
-            .find(|asset| asset_key(asset) == draw.asset_key)
-            .ok_or_else(|| {
-                RenderError::InvalidInput(format!(
-                    "draw references missing asset {}",
-                    draw.asset_key
-                ))
-            })?;
-        let local = asset.bounds.ok_or_else(|| {
-            RenderError::Unsupported(format!(
-                "asset {} has no proven drawable bounds",
-                asset.asset_ref
-            ))
-        })?;
-        for corner in aabb_corners(Vec3::from_array(local.min), Vec3::from_array(local.max)) {
-            bounds.include(draw.model.transform_point3(corner));
-        }
+        bounds.include(draw.world_bounds.min);
+        bounds.include(draw.world_bounds.max);
     }
     if !bounds.is_valid() {
         return Err(RenderError::InvalidInput(
@@ -1282,4 +2094,54 @@ fn nice_grid_spacing(target: f32) -> f32 {
         10.0
     };
     step * base
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn orbit_camera_fit_and_controls_remain_finite() {
+        let bounds = Aabb {
+            min: Vec3::new(-2.0, -1.0, 0.0),
+            max: Vec3::new(4.0, 3.0, 5.0),
+        };
+        let mut camera = OrbitCamera::fit(bounds, Projection::Perspective);
+        let initial = camera.snapshot();
+        assert!(initial.distance.is_finite());
+        assert!(initial.distance > 0.0);
+
+        camera.orbit(0.2, -0.15);
+        camera.pan(0.1, -0.05);
+        camera.zoom(-0.5);
+        camera.fly(1.0, -0.25, 0.5);
+        let moved = camera.snapshot();
+        assert!(moved.eye.iter().all(|value| value.is_finite()));
+        assert!(moved.target.iter().all(|value| value.is_finite()));
+        assert!(moved.distance > 0.0);
+        assert_ne!(moved.eye, initial.eye);
+    }
+
+    #[test]
+    fn ray_aabb_selects_forward_box_and_rejects_miss() {
+        let bounds = Aabb {
+            min: Vec3::new(-1.0, -1.0, -1.0),
+            max: Vec3::new(1.0, 1.0, 1.0),
+        };
+        let hit = ray_aabb(Vec3::new(0.0, -5.0, 0.0), Vec3::Y, bounds)
+            .expect("forward ray should hit box");
+        assert!((hit - 4.0).abs() < 1.0e-5);
+        assert!(ray_aabb(Vec3::new(5.0, -5.0, 0.0), Vec3::Y, bounds).is_none());
+    }
+
+    #[test]
+    fn camera_center_ray_hits_scene_bounds() {
+        let bounds = Aabb {
+            min: Vec3::new(-2.0, -2.0, -1.0),
+            max: Vec3::new(2.0, 2.0, 3.0),
+        };
+        let camera = OrbitCamera::fit(bounds, Projection::Perspective);
+        let (origin, direction) = camera.ray(1280, 720, 0.5, 0.5).expect("center ray");
+        assert!(ray_aabb(origin, direction, bounds).is_some());
+    }
 }

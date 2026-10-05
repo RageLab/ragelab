@@ -11,7 +11,7 @@ use ragelab_engine::RenderPackage;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-pub use gpu::OffscreenRenderer;
+pub use gpu::{OffscreenRenderer, SurfaceRenderer};
 
 pub const SCREENSHOT_METADATA_SCHEMA_VERSION: u32 = 1;
 
@@ -158,6 +158,82 @@ impl OffscreenOptions {
         }
         Ok(self)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewportOptions {
+    pub width: u32,
+    pub height: u32,
+    pub projection: Projection,
+    pub grid: bool,
+    pub wireframe: bool,
+    pub bounds: bool,
+}
+
+impl Default for ViewportOptions {
+    fn default() -> Self {
+        Self {
+            width: 1280,
+            height: 720,
+            projection: Projection::Perspective,
+            grid: true,
+            wireframe: false,
+            bounds: false,
+        }
+    }
+}
+
+impl ViewportOptions {
+    pub fn validate(self) -> RenderResult<Self> {
+        if self.width == 0 || self.height == 0 {
+            return Err(RenderError::InvalidInput(
+                "viewport width and height must be greater than zero".into(),
+            ));
+        }
+        if self.width > 8192 || self.height > 8192 {
+            return Err(RenderError::InvalidInput(
+                "viewport width and height must not exceed 8192".into(),
+            ));
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraSnapshot {
+    pub target: [f32; 3],
+    pub eye: [f32; 3],
+    pub yaw_radians: f32,
+    pub pitch_radians: f32,
+    pub distance: f32,
+    pub projection: Projection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PickResult {
+    pub node_index: u32,
+    pub distance: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewportStats {
+    pub width: u32,
+    pub height: u32,
+    pub instances: u32,
+    pub assets: u32,
+    pub meshes: u32,
+    pub materials: u32,
+    pub textures: u32,
+    pub gpu_asset_cache: u32,
+    pub gpu_texture_cache: u32,
+    pub uploaded_payload_bytes: u64,
+    pub scene_load_ms: f64,
+    pub last_frame_ms: f64,
+    pub selected_node_index: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

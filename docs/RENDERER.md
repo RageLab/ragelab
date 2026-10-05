@@ -113,6 +113,23 @@ Use tolerance 0 for exact same-backend determinism checks. Cross-adapter or cros
 
 Synthetic render cases are declared under `fixtures/render/cases.json`. Baseline PNGs are intentionally not treated as universal across all GPU drivers; CI should record backend/adapter metadata with any baseline artifact.
 
+## Interactive native surface
+
+`SurfaceRenderer` reuses the same device-side asset/material/texture cache used by offscreen rendering and accepts any owned target implementing `HasWindowHandle + HasDisplayHandle`. It has no Tauri dependency.
+
+The interactive API provides:
+
+- surface configuration using an adapter explicitly compatible with the target window;
+- resize handling and depth-target recreation;
+- orbit, pan, zoom and fly camera controls;
+- perspective/orthographic projection switching;
+- CPU ray/AABB entity picking from normalized viewport coordinates;
+- per-instance selection highlight via the model uniform, without duplicating source materials;
+- read-only game instances first and loose workspace instances last, with a subtle workspace tint;
+- frame/load/cache statistics for Studio parity benchmarking.
+
+The current Studio integration uses a native Tauri window without a WebView as the wgpu presentation target. Pointer/keyboard input stays in the main WebView and is forwarded as normalized renderer input, avoiding Win32 subclassing and WebView2 HWND contention.
+
 ## Cache identity
 
 GPU assets are keyed by Core-provided stable source identity:
