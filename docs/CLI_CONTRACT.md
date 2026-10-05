@@ -33,7 +33,7 @@ Errors use the same schema:
 
 Consumers must key compatibility decisions on `schema` and `schemaVersion`, not on human-readable output.
 
-The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `spatial <file> --json`, `preview <file> --json`, `plan <operation.json> --json`, `apply <operation.json> --json`, `workspace preflight ... --json`, `workspace export ... --json`, `workspace scene ... --json`, `workspace render-package ... --json`, `render asset ... --json`, `render scene ... --json`, `render compare ... --json`, `gta discover --json`, `gta catalog ... --json`, and `fivem discover --json` use the common response envelope.
+The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `spatial <file> --json`, `preview <file> --json`, `plan <operation.json> --json`, `apply <operation.json> --json`, `workspace preflight ... --json`, `workspace export ... --json`, `workspace scene ... --json`, `workspace render-package ... --json`, `render asset ... --json`, `render scene ... --json`, `render compare ... --json`, `gta discover --json`, `gta catalog ... --json`, `gta rpf-index ... --json`, `gta world-query ... --json`, and `fivem discover --json` use the common response envelope.
 
 ## Agent-first surface
 
@@ -248,6 +248,12 @@ Existing output is preserved unless `--overwrite` is explicit. Geometry, indices
 `render scene` resolves a YMAP through the same workspace/RPF/game-index rules as `workspace scene`, builds one shared `RenderPackage`, and renders its instances through wgpu. Both commands write PNG plus deterministic metadata sidecar and are non-destructive unless `--overwrite` is explicit.
 
 `render compare` reports RGBA8 visual differences with an explicit per-channel tolerance. Use tolerance 0 for same-backend determinism. See [RENDERER.md](RENDERER.md).
+
+## Persistent GTA world index
+
+`gta rpf-index` builds the versioned persistent Legacy asset/world index using the same ordered base/update/DLC RPF scan used by Core resolution. Schema v4 includes YMAP extents/hierarchy/entities and YTYP dependency records in addition to file/archetype/GTXD data.
+
+`gta world-query` loads that index and executes point/radius or box queries without reopening RPFs or assembling a global scene. `--entities` includes persisted entity origins, while `--repeat <n>` reports warm in-memory query timing separately from index-load timing. Frustum queries are exposed by the Rust Core API for streaming/viewport consumers. See [WORLD_INDEX.md](WORLD_INDEX.md).
 
 ## Exit codes
 

@@ -160,6 +160,7 @@ fn global_capabilities_preserve_legacy_ids_and_advertise_canonical_ids() {
     assert!(canonical.iter().any(|value| value == "render.compare"));
     assert!(canonical.iter().any(|value| value == "gta.discover"));
     assert!(canonical.iter().any(|value| value == "gta.catalog"));
+    assert!(canonical.iter().any(|value| value == "gta.world-query"));
     assert!(canonical.iter().any(|value| value == "fivem.discover"));
     assert_eq!(body["responseEnvelope"]["schema"], "ragelab.cli.response");
     assert!(body["structuredOutput"]
@@ -214,6 +215,11 @@ fn global_capabilities_preserve_legacy_ids_and_advertise_canonical_ids() {
         .unwrap()
         .iter()
         .any(|value| value == "gta.catalog"));
+    assert!(body["structuredOutput"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "gta.world-query"));
     assert!(body["structuredOutput"]
         .as_array()
         .unwrap()

@@ -61,6 +61,8 @@ Format crates remain authoritative for binary-layout safety and writer capabilit
 
 If a rule must behave identically in the CLI, an MCP server, and RageLab Studio, it belongs at or below this layer.
 
+The application layer also owns the persistent GTA V Legacy RPF/world index. The index reuses the engine-owned ordered archive scan and installation fingerprint, persists YMAP/YTYP spatial/dependency metadata, and exposes bounded box/radius/frustum queries without global scene assembly. Missing spatial evidence degrades selectivity but never silently promotes inferred world bounds. See [WORLD_INDEX.md](WORLD_INDEX.md).
+
 ### Native renderer
 
 `ragelab-render` is the reusable native/wgpu rendering layer. It consumes only the engine-owned `RenderPackage` contract and must not depend on RAGE format crates. The initial backend is deterministic offscreen rendering for PNG/visual regression; later native viewport work reuses the same GPU packet/cache vocabulary. See [RENDERER.md](RENDERER.md).

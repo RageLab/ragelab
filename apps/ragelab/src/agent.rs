@@ -2,6 +2,7 @@ use std::{
     error::Error,
     fs, io,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use ragelab_assets::AssetKind;
@@ -11,9 +12,10 @@ use ragelab_engine::{
     isolated_asset_spatial_context, parse_operation_document, plan_operation_document,
     preview_asset, render_asset_package_bytes_as, render_vanilla_catalog_paths, validate_asset,
     workspace_scene_render_package_with_game_index, workspace_scene_report_with_game_index,
-    ymap_spatial_context, EngineError, GtaRpfAssetIndex, OperationError, PreviewOptions,
-    RenderPackageOptions, SceneAssemblyOptions, SceneAssetPreviewSources, SceneGameIndexSource,
-    SceneRpfMount, SpatialContext, SpatialProvenance,
+    ymap_spatial_context, EngineError, GtaRpfAssetIndex, GtaRpfWorldBounds, GtaRpfWorldPoint,
+    OperationError, PreviewOptions, RenderPackageOptions, SceneAssemblyOptions,
+    SceneAssetPreviewSources, SceneGameIndexSource, SceneRpfMount, SpatialContext,
+    SpatialProvenance,
 };
 use ragelab_render::{
     compare_png_files, OffscreenOptions, OffscreenRenderer, Projection, RenderError, RenderView,
@@ -52,6 +54,7 @@ pub fn is_structured_command(command: &str) -> bool {
             | "gta.catalog"
             | "gta.rpf-order"
             | "gta.rpf-index"
+            | "gta.world-query"
             | "rpf.keys"
             | "rpf.info"
             | "rpf.list"
@@ -1422,12 +1425,202 @@ pub fn gta_rpf_index(request: GtaRpfIndexCommandArgs) -> Result<(), Box<dyn Erro
         println!("nested-archives: {}", build.report.nested_archives);
         println!("indexed-files: {}", build.report.indexed_files);
         println!("parsed-ytyps: {}", build.report.parsed_ytyps);
+        println!("parsed-ymaps: {}", build.report.parsed_ymaps);
         println!("archetypes: {}", build.report.archetypes);
+        println!("ytyp-records: {}", build.report.ytyp_records);
+        println!("world-maps: {}", build.report.world_maps);
+        println!("world-entities: {}", build.report.world_entities);
         println!("file-keys: {}", build.report.file_keys);
         println!("warnings: {}", build.report.warnings.len());
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum GtaWorldQueryShape {
+    Radius {
+        center: GtaRpfWorldPoint,
+        radius: f32,
+    },
+    Box {
+        bounds: GtaRpfWorldBounds,
+    },
+}
+
+pub struct GtaWorldQueryCommandArgs {
+    pub index: PathBuf,
+    pub shape: GtaWorldQueryShape,
+    pub include_entities: bool,
+    pub repeat: usize,
+    pub json_output: bool,
+}
+
+pub fn parse_gta_world_query_args(
+    args: impl Iterator<Item = String>,
+    usage: &str,
+) -> Result<GtaWorldQueryCommandArgs, io::Error> {
+    let mut args = args;
+    let index = args
+        .next()
+        .filter(|value| !value.starts_with('-'))
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+
+    let mut point = None;
+    let mut radius = None;
+    let mut bounds = None;
+    let mut include_entities = false;
+    let mut repeat = 1usize;
+    let mut json_output = false;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--point" if point.is_none() && bounds.is_none() => {
+                point = Some(GtaRpfWorldPoint {
+                    x: parse_world_f32(args.next(), usage, "--point x")?,
+                    y: parse_world_f32(args.next(), usage, "--point y")?,
+                    z: parse_world_f32(args.next(), usage, "--point z")?,
+                });
+            }
+            "--radius" if radius.is_none() && bounds.is_none() => {
+                radius = Some(parse_world_f32(args.next(), usage, "--radius")?);
+            }
+            "--box" if bounds.is_none() && point.is_none() && radius.is_none() => {
+                bounds = Some(GtaRpfWorldBounds {
+                    min: GtaRpfWorldPoint {
+                        x: parse_world_f32(args.next(), usage, "--box minx")?,
+                        y: parse_world_f32(args.next(), usage, "--box miny")?,
+                        z: parse_world_f32(args.next(), usage, "--box minz")?,
+                    },
+                    max: GtaRpfWorldPoint {
+                        x: parse_world_f32(args.next(), usage, "--box maxx")?,
+                        y: parse_world_f32(args.next(), usage, "--box maxy")?,
+                        z: parse_world_f32(args.next(), usage, "--box maxz")?,
+                    },
+                });
+            }
+            "--entities" if !include_entities => include_entities = true,
+            "--repeat" if repeat == 1 => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+                repeat = value.parse::<usize>().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("{usage}; --repeat must be a positive integer"),
+                    )
+                })?;
+                if repeat == 0 || repeat > 100_000 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("{usage}; --repeat must be in 1..=100000"),
+                    ));
+                }
+            }
+            "--json" if !json_output => json_output = true,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{usage}; unknown or conflicting option: {arg}"),
+                ))
+            }
+        }
+    }
+
+    let shape = match (point, radius, bounds) {
+        (Some(center), Some(radius), None) => GtaWorldQueryShape::Radius { center, radius },
+        (None, None, Some(bounds)) => GtaWorldQueryShape::Box { bounds },
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{usage}; provide either --point x y z --radius r or --box minx miny minz maxx maxy maxz"),
+            ))
+        }
+    };
+
+    Ok(GtaWorldQueryCommandArgs {
+        index,
+        shape,
+        include_entities,
+        repeat,
+        json_output,
+    })
+}
+
+pub fn gta_world_query(request: GtaWorldQueryCommandArgs) -> Result<(), Box<dyn Error>> {
+    let load_started = Instant::now();
+    let index = GtaRpfAssetIndex::load(&request.index)?;
+    let index_load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
+
+    let query_started = Instant::now();
+    let mut report = None;
+    for _ in 0..request.repeat {
+        report = Some(match request.shape {
+            GtaWorldQueryShape::Radius { center, radius } => {
+                index.query_world_radius(center, radius, request.include_entities)?
+            }
+            GtaWorldQueryShape::Box { bounds } => {
+                index.query_world_box(bounds, request.include_entities)?
+            }
+        });
+    }
+    let query_total_ms = query_started.elapsed().as_secs_f64() * 1000.0;
+    let query_average_ms = query_total_ms / request.repeat as f64;
+    let report = report.ok_or_else(|| io::Error::other("world query did not execute"))?;
+
+    if request.json_output {
+        print_success(
+            "gta.world-query",
+            json!({
+                "index": request.index.display().to_string(),
+                "indexLoadMs": index_load_ms,
+                "repeat": request.repeat,
+                "queryTotalMs": query_total_ms,
+                "queryAverageMs": query_average_ms,
+                "report": report,
+            }),
+        )?;
+    } else {
+        println!("index: {}", request.index.display());
+        println!("index-load-ms: {index_load_ms:.3}");
+        println!("repeat: {}", request.repeat);
+        println!("query-average-ms: {query_average_ms:.6}");
+        println!("candidate-map-keys: {}", report.candidate_map_keys);
+        println!("maps: {}", report.maps.len());
+        println!("entities: {}", report.entities.len());
+        for map in &report.maps {
+            println!(
+                "  map 0x{:08X}: {}{}!{}",
+                map.map_hash,
+                map.provider.archive_relative,
+                if map.provider.nested.is_empty() {
+                    String::new()
+                } else {
+                    format!("!/{}", map.provider.nested.join("!/"))
+                },
+                map.provider.entry
+            );
+        }
+    }
+    Ok(())
+}
+
+fn parse_world_f32(value: Option<String>, usage: &str, name: &str) -> Result<f32, io::Error> {
+    let raw = value.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+    let parsed = raw.parse::<f32>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{usage}; {name} must be a finite number"),
+        )
+    })?;
+    if !parsed.is_finite() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{usage}; {name} must be finite"),
+        ));
+    }
+    Ok(parsed)
 }
 
 pub fn parse_gta_rpf_order_args(
@@ -1688,6 +1881,7 @@ pub fn normalize_command_args(args: Vec<String>) -> Vec<String> {
         ("gta", "catalog") => Some("gta.catalog"),
         ("gta", "rpf-order") => Some("gta.rpf-order"),
         ("gta", "rpf-index") => Some("gta.rpf-index"),
+        ("gta", "world-query") => Some("gta.world-query"),
         ("gta", "vanilla-index") => Some("vanilla-index"),
         ("rpf", "keys") => Some("rpf.keys"),
         ("rpf", "info") => Some("rpf.info"),

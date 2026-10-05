@@ -40,6 +40,8 @@ pub struct YmapEntity {
 pub struct Ymap {
     pub name: Option<MetaHash>,
     pub parent: Option<MetaHash>,
+    pub flags: Option<u32>,
+    pub content_flags: Option<u32>,
     pub entities: Vec<YmapEntity>,
     pub physics_dictionaries: Vec<MetaHash>,
     pub entities_extents_min: Option<Vec3>,
@@ -106,6 +108,8 @@ impl Ymap {
         Ok(Self {
             name: nonzero_hash(name),
             parent: nonzero_hash(parent),
+            flags: read_optional_u32_field(root_structure, &root.data, "flags")?,
+            content_flags: read_optional_u32_field(root_structure, &root.data, "contentFlags")?,
             entities,
             physics_dictionaries,
             entities_extents_min: read_optional_vec3_field(
@@ -211,6 +215,18 @@ fn read_array_field(
     name: &str,
 ) -> Result<MetaArrayRef, ResourceError> {
     MetaArrayRef::parse(bytes, field_offset(structure, name)?)
+}
+
+fn read_optional_u32_field(
+    structure: &MetaStructureInfo,
+    bytes: &[u8],
+    name: &str,
+) -> Result<Option<u32>, ResourceError> {
+    let hash = MetaHash(jenkins(name));
+    let Some(field) = structure.field(hash) else {
+        return Ok(None);
+    };
+    Ok(Some(read_u32(bytes, field.data_offset)?))
 }
 
 fn read_optional_f32_field(

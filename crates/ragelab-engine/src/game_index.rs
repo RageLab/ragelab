@@ -8,17 +8,22 @@ use std::{
 use ragelab_assets::{parse_gtxd_rbf, TextureParentRelationship};
 use ragelab_hash::joaat;
 use ragelab_rpf::{GtaKeyStore, GtaKeys, Rpf7Archive, RpfEntryLocator};
+use ragelab_ymap::{Vec3 as YmapVec3, Ymap};
 use ragelab_ytyp::{AssetType, Ytyp};
 use serde::{Deserialize, Serialize};
 
 use crate::gta_rpf_archive_order;
 
-const GTA_RPF_INDEX_SCHEMA_VERSION: u32 = 3;
+const GTA_RPF_INDEX_SCHEMA_VERSION: u32 = 4;
+const WORLD_SPATIAL_CELL_SIZE: f32 = 512.0;
+const WORLD_SPATIAL_MAX_CELLS_PER_MAP: i64 = 4_096;
+const WORLD_SPATIAL_MAX_QUERY_CELLS: i64 = 16_384;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum GtaRpfAssetKind {
     Ytyp,
+    Ymap,
     Ydr,
     Ydd,
     Ytd,
@@ -30,6 +35,7 @@ impl GtaRpfAssetKind {
     pub const fn extension(self) -> &'static str {
         match self {
             Self::Ytyp => "ytyp",
+            Self::Ymap => "ymap",
             Self::Ydr => "ydr",
             Self::Ydd => "ydd",
             Self::Ytd => "ytd",
@@ -41,6 +47,7 @@ impl GtaRpfAssetKind {
     fn from_extension(extension: &str) -> Option<Self> {
         match extension.to_ascii_lowercase().as_str() {
             "ytyp" => Some(Self::Ytyp),
+            "ymap" => Some(Self::Ymap),
             "ydr" => Some(Self::Ydr),
             "ydd" => Some(Self::Ydd),
             "ytd" => Some(Self::Ytd),
@@ -127,6 +134,270 @@ impl GtaRpfTextureParentRecord {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GtaRpfWorldPoint {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
+
+impl From<YmapVec3> for GtaRpfWorldPoint {
+    fn from(value: YmapVec3) -> Self {
+        Self {
+            x: value.x,
+            y: value.y,
+            z: value.z,
+        }
+    }
+}
+
+impl GtaRpfWorldPoint {
+    fn is_finite(self) -> bool {
+        self.x.is_finite() && self.y.is_finite() && self.z.is_finite()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GtaRpfWorldBounds {
+    pub min: GtaRpfWorldPoint,
+    pub max: GtaRpfWorldPoint,
+}
+
+impl GtaRpfWorldBounds {
+    pub fn is_valid(self) -> bool {
+        self.min.is_finite()
+            && self.max.is_finite()
+            && self.min.x <= self.max.x
+            && self.min.y <= self.max.y
+            && self.min.z <= self.max.z
+    }
+
+    pub fn intersects(self, other: Self) -> bool {
+        self.is_valid()
+            && other.is_valid()
+            && self.min.x <= other.max.x
+            && self.max.x >= other.min.x
+            && self.min.y <= other.max.y
+            && self.max.y >= other.min.y
+            && self.min.z <= other.max.z
+            && self.max.z >= other.min.z
+    }
+
+    pub fn contains_point(self, point: GtaRpfWorldPoint) -> bool {
+        self.is_valid()
+            && point.is_finite()
+            && point.x >= self.min.x
+            && point.x <= self.max.x
+            && point.y >= self.min.y
+            && point.y <= self.max.y
+            && point.z >= self.min.z
+            && point.z <= self.max.z
+    }
+
+    pub fn distance_squared_to_point(self, point: GtaRpfWorldPoint) -> f32 {
+        if !self.is_valid() || !point.is_finite() {
+            return f32::INFINITY;
+        }
+        let dx = if point.x < self.min.x {
+            self.min.x - point.x
+        } else if point.x > self.max.x {
+            point.x - self.max.x
+        } else {
+            0.0
+        };
+        let dy = if point.y < self.min.y {
+            self.min.y - point.y
+        } else if point.y > self.max.y {
+            point.y - self.max.y
+        } else {
+            0.0
+        };
+        let dz = if point.z < self.min.z {
+            self.min.z - point.z
+        } else if point.z > self.max.z {
+            point.z - self.max.z
+        } else {
+            0.0
+        };
+        dx * dx + dy * dy + dz * dz
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GtaRpfWorldEntityRecord {
+    pub index: u32,
+    pub archetype_hash: u32,
+    pub position: GtaRpfWorldPoint,
+    pub rotation: [f32; 4],
+    pub scale_xy: Option<f32>,
+    pub scale_z: Option<f32>,
+    pub flags: u32,
+    pub parent_index: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GtaRpfWorldMapRecord {
+    pub provider: GtaRpfIndexLocator,
+    pub file_name_hash: u32,
+    pub map_name_hash: Option<u32>,
+    pub parent_hash: Option<u32>,
+    pub flags: Option<u32>,
+    pub content_flags: Option<u32>,
+    pub entities_bounds: Option<GtaRpfWorldBounds>,
+    pub streaming_bounds: Option<GtaRpfWorldBounds>,
+    pub physics_dictionary_hashes: Vec<u32>,
+    pub archetype_hashes: Vec<u32>,
+    pub entities: Vec<GtaRpfWorldEntityRecord>,
+}
+
+impl GtaRpfWorldMapRecord {
+    pub fn map_hash(&self) -> u32 {
+        self.map_name_hash.unwrap_or(self.file_name_hash)
+    }
+
+    pub fn effective_bounds(&self) -> Option<GtaRpfWorldBounds> {
+        self.streaming_bounds.or(self.entities_bounds)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GtaRpfYtypRecord {
+    pub provider: GtaRpfIndexLocator,
+    pub file_name_hash: u32,
+    pub name_hash: Option<u32>,
+    pub dependencies: Vec<u32>,
+    pub archetype_hashes: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorldMapWinnerSet {
+    load_rank: u32,
+    candidates: Vec<GtaRpfWorldMapRecord>,
+}
+
+impl WorldMapWinnerSet {
+    fn insert(&mut self, load_rank: u32, candidate: GtaRpfWorldMapRecord) {
+        if load_rank > self.load_rank {
+            self.load_rank = load_rank;
+            self.candidates.clear();
+            self.candidates.push(candidate);
+            return;
+        }
+        if load_rank == self.load_rank
+            && !self
+                .candidates
+                .iter()
+                .any(|existing| existing.provider == candidate.provider)
+        {
+            self.candidates.push(candidate);
+            self.candidates
+                .sort_by(|left, right| left.provider.cmp(&right.provider));
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GtaRpfWorldPlane {
+    pub normal: GtaRpfWorldPoint,
+    pub distance: f32,
+}
+
+impl GtaRpfWorldPlane {
+    fn is_valid(self) -> bool {
+        self.normal.is_finite() && self.distance.is_finite()
+    }
+
+    fn signed_distance(self, point: GtaRpfWorldPoint) -> f32 {
+        self.normal.x * point.x + self.normal.y * point.y + self.normal.z * point.z + self.distance
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GtaRpfWorldFrustum {
+    pub broadphase_bounds: GtaRpfWorldBounds,
+    pub planes: [GtaRpfWorldPlane; 6],
+}
+
+impl GtaRpfWorldFrustum {
+    pub fn is_valid(self) -> bool {
+        self.broadphase_bounds.is_valid() && self.planes.iter().all(|plane| plane.is_valid())
+    }
+
+    pub fn contains_point(self, point: GtaRpfWorldPoint) -> bool {
+        point.is_finite()
+            && self
+                .planes
+                .iter()
+                .all(|plane| plane.signed_distance(point) >= 0.0)
+    }
+
+    pub fn intersects_bounds(self, bounds: GtaRpfWorldBounds) -> bool {
+        if !bounds.is_valid() {
+            return false;
+        }
+        self.planes.iter().all(|plane| {
+            let positive = GtaRpfWorldPoint {
+                x: if plane.normal.x >= 0.0 {
+                    bounds.max.x
+                } else {
+                    bounds.min.x
+                },
+                y: if plane.normal.y >= 0.0 {
+                    bounds.max.y
+                } else {
+                    bounds.min.y
+                },
+                z: if plane.normal.z >= 0.0 {
+                    bounds.max.z
+                } else {
+                    bounds.min.z
+                },
+            };
+            plane.signed_distance(positive) >= 0.0
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GtaRpfWorldMapHit {
+    pub map_hash: u32,
+    pub provider: GtaRpfIndexLocator,
+    pub parent_hash: Option<u32>,
+    pub flags: Option<u32>,
+    pub content_flags: Option<u32>,
+    pub entities_bounds: Option<GtaRpfWorldBounds>,
+    pub streaming_bounds: Option<GtaRpfWorldBounds>,
+    pub bounds: Option<GtaRpfWorldBounds>,
+    pub entity_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GtaRpfWorldEntityHit {
+    pub map_hash: u32,
+    pub map_provider: GtaRpfIndexLocator,
+    pub entity: GtaRpfWorldEntityRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GtaRpfWorldQueryReport {
+    pub schema: &'static str,
+    pub schema_version: u32,
+    pub bounds: GtaRpfWorldBounds,
+    pub maps: Vec<GtaRpfWorldMapHit>,
+    pub entities: Vec<GtaRpfWorldEntityHit>,
+    pub candidate_map_keys: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GtaRpfInstallationFingerprint {
@@ -175,6 +446,11 @@ pub struct GtaRpfAssetIndex {
     files: BTreeMap<(GtaRpfAssetKind, u32), WinnerSet<GtaRpfIndexLocator>>,
     archetypes: BTreeMap<u32, WinnerSet<GtaRpfArchetypeRecord>>,
     texture_parents: BTreeMap<u32, WinnerSet<GtaRpfTextureParentRecord>>,
+    ytyps: BTreeMap<u32, WinnerSet<GtaRpfYtypRecord>>,
+    world_maps: BTreeMap<u32, WorldMapWinnerSet>,
+    world_children: BTreeMap<u32, Vec<u32>>,
+    world_cells: BTreeMap<(i32, i32), Vec<u32>>,
+    world_global_maps: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -188,8 +464,12 @@ pub struct GtaRpfIndexBuildReport {
     pub nested_archives: usize,
     pub indexed_files: usize,
     pub parsed_ytyps: usize,
+    pub parsed_ymaps: usize,
     pub parsed_gtxd_files: usize,
     pub archetypes: usize,
+    pub ytyp_records: usize,
+    pub world_maps: usize,
+    pub world_entities: usize,
     pub file_keys: usize,
     pub texture_parent_keys: usize,
     pub warnings: Vec<String>,
@@ -313,6 +593,11 @@ impl GtaRpfAssetIndex {
             files: BTreeMap::new(),
             archetypes: BTreeMap::new(),
             texture_parents: BTreeMap::new(),
+            ytyps: BTreeMap::new(),
+            world_maps: BTreeMap::new(),
+            world_children: BTreeMap::new(),
+            world_cells: BTreeMap::new(),
+            world_global_maps: Vec::new(),
         };
         let mut scan = ScanCounters::default();
         let mut warnings = order.warnings.clone();
@@ -343,6 +628,8 @@ impl GtaRpfAssetIndex {
             }
         }
 
+        index.rebuild_world_acceleration();
+
         Ok(GtaRpfIndexBuild {
             report: GtaRpfIndexBuildReport {
                 schema: "ragelab.gta.rpf-index",
@@ -353,8 +640,12 @@ impl GtaRpfAssetIndex {
                 nested_archives: scan.nested_archives,
                 indexed_files: scan.indexed_files,
                 parsed_ytyps: scan.parsed_ytyps,
+                parsed_ymaps: scan.parsed_ymaps,
                 parsed_gtxd_files: scan.parsed_gtxd_files,
                 archetypes: index.archetypes.len(),
+                ytyp_records: index.ytyps.len(),
+                world_maps: index.world_maps.len(),
+                world_entities: scan.world_entities,
                 file_keys: index.files.len(),
                 texture_parent_keys: index.texture_parents.len(),
                 warnings,
@@ -421,6 +712,237 @@ impl GtaRpfAssetIndex {
             .get(&child_hash)
             .map(|winner| winner.candidates.as_slice())
             .unwrap_or(&[])
+    }
+
+    pub fn ytyp_candidates(&self, hash: u32) -> &[GtaRpfYtypRecord] {
+        self.ytyps
+            .get(&hash)
+            .map(|winner| winner.candidates.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn world_map_candidates(&self, hash: u32) -> &[GtaRpfWorldMapRecord] {
+        self.world_maps
+            .get(&hash)
+            .map(|winner| winner.candidates.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn world_children(&self, parent_hash: u32) -> &[u32] {
+        self.world_children
+            .get(&parent_hash)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn query_world_box(
+        &self,
+        bounds: GtaRpfWorldBounds,
+        include_entities: bool,
+    ) -> Result<GtaRpfWorldQueryReport, io::Error> {
+        if !bounds.is_valid() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "world query bounds must be finite and ordered",
+            ));
+        }
+
+        let candidate_keys = self.world_candidate_keys(bounds);
+        let mut maps = Vec::new();
+        let mut entities = Vec::new();
+
+        for map_hash in &candidate_keys {
+            for record in self.world_map_candidates(*map_hash) {
+                let record_bounds = record.effective_bounds();
+                if record_bounds.is_some_and(|candidate| !candidate.intersects(bounds)) {
+                    continue;
+                }
+
+                maps.push(GtaRpfWorldMapHit {
+                    map_hash: *map_hash,
+                    provider: record.provider.clone(),
+                    parent_hash: record.parent_hash,
+                    flags: record.flags,
+                    content_flags: record.content_flags,
+                    entities_bounds: record.entities_bounds,
+                    streaming_bounds: record.streaming_bounds,
+                    bounds: record_bounds,
+                    entity_count: record.entities.len(),
+                });
+
+                if include_entities {
+                    for entity in &record.entities {
+                        if bounds.contains_point(entity.position) {
+                            entities.push(GtaRpfWorldEntityHit {
+                                map_hash: *map_hash,
+                                map_provider: record.provider.clone(),
+                                entity: entity.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        maps.sort_by(|left, right| {
+            left.map_hash
+                .cmp(&right.map_hash)
+                .then_with(|| left.provider.cmp(&right.provider))
+        });
+        entities.sort_by(|left, right| {
+            left.map_hash
+                .cmp(&right.map_hash)
+                .then_with(|| left.map_provider.cmp(&right.map_provider))
+                .then_with(|| left.entity.index.cmp(&right.entity.index))
+        });
+
+        Ok(GtaRpfWorldQueryReport {
+            schema: "ragelab.gta.world-query",
+            schema_version: 1,
+            bounds,
+            maps,
+            entities,
+            candidate_map_keys: candidate_keys.len(),
+        })
+    }
+
+    pub fn query_world_radius(
+        &self,
+        center: GtaRpfWorldPoint,
+        radius: f32,
+        include_entities: bool,
+    ) -> Result<GtaRpfWorldQueryReport, io::Error> {
+        if !center.is_finite() || !radius.is_finite() || radius < 0.0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "world radius query requires finite center and non-negative finite radius",
+            ));
+        }
+        let bounds = GtaRpfWorldBounds {
+            min: GtaRpfWorldPoint {
+                x: center.x - radius,
+                y: center.y - radius,
+                z: center.z - radius,
+            },
+            max: GtaRpfWorldPoint {
+                x: center.x + radius,
+                y: center.y + radius,
+                z: center.z + radius,
+            },
+        };
+        let mut report = self.query_world_box(bounds, include_entities)?;
+        let radius_squared = radius * radius;
+        report.maps.retain(|hit| {
+            hit.bounds.map_or(true, |candidate| {
+                candidate.distance_squared_to_point(center) <= radius_squared
+            })
+        });
+        report.entities.retain(|hit| {
+            let dx = hit.entity.position.x - center.x;
+            let dy = hit.entity.position.y - center.y;
+            let dz = hit.entity.position.z - center.z;
+            dx * dx + dy * dy + dz * dz <= radius_squared
+        });
+        Ok(report)
+    }
+
+    pub fn query_world_frustum(
+        &self,
+        frustum: GtaRpfWorldFrustum,
+        include_entities: bool,
+    ) -> Result<GtaRpfWorldQueryReport, io::Error> {
+        if !frustum.is_valid() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "world frustum query requires finite broadphase bounds and planes",
+            ));
+        }
+        let mut report = self.query_world_box(frustum.broadphase_bounds, include_entities)?;
+        report.maps.retain(|hit| {
+            hit.bounds
+                .map_or(true, |bounds| frustum.intersects_bounds(bounds))
+        });
+        report
+            .entities
+            .retain(|hit| frustum.contains_point(hit.entity.position));
+        Ok(report)
+    }
+
+    fn world_candidate_keys(&self, bounds: GtaRpfWorldBounds) -> BTreeSet<u32> {
+        let mut keys = self
+            .world_global_maps
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let Some((min_x, max_x, min_y, max_y)) = world_cell_range(bounds) else {
+            keys.extend(self.world_maps.keys().copied());
+            return keys;
+        };
+        let count = cell_range_count(min_x, max_x, min_y, max_y);
+        if count > WORLD_SPATIAL_MAX_QUERY_CELLS {
+            keys.extend(self.world_maps.keys().copied());
+            return keys;
+        }
+
+        for x in min_x..=max_x {
+            for y in min_y..=max_y {
+                if let Some(cell) = self.world_cells.get(&(x, y)) {
+                    keys.extend(cell.iter().copied());
+                }
+            }
+        }
+        keys
+    }
+
+    fn rebuild_world_acceleration(&mut self) {
+        let mut children = BTreeMap::<u32, Vec<u32>>::new();
+        let mut cells = BTreeMap::<(i32, i32), Vec<u32>>::new();
+        let mut global = Vec::<u32>::new();
+
+        for (map_hash, winner) in &self.world_maps {
+            let mut map_is_global = false;
+            for record in &winner.candidates {
+                if let Some(parent_hash) = record.parent_hash {
+                    children.entry(parent_hash).or_default().push(*map_hash);
+                }
+
+                let Some(bounds) = record.effective_bounds() else {
+                    map_is_global = true;
+                    continue;
+                };
+                let Some((min_x, max_x, min_y, max_y)) = world_cell_range(bounds) else {
+                    map_is_global = true;
+                    continue;
+                };
+                if cell_range_count(min_x, max_x, min_y, max_y) > WORLD_SPATIAL_MAX_CELLS_PER_MAP {
+                    map_is_global = true;
+                    continue;
+                }
+                for x in min_x..=max_x {
+                    for y in min_y..=max_y {
+                        cells.entry((x, y)).or_default().push(*map_hash);
+                    }
+                }
+            }
+            if map_is_global {
+                global.push(*map_hash);
+            }
+        }
+
+        for values in children.values_mut() {
+            values.sort_unstable();
+            values.dedup();
+        }
+        for values in cells.values_mut() {
+            values.sort_unstable();
+            values.dedup();
+        }
+        global.sort_unstable();
+        global.dedup();
+
+        self.world_children = children;
+        self.world_cells = cells;
+        self.world_global_maps = global;
     }
 
     pub fn plan_for_archetypes(&self, hashes: impl IntoIterator<Item = u32>) -> GtaRpfIndexPlan {
@@ -567,7 +1089,9 @@ struct ScanCounters {
     nested_archives: usize,
     indexed_files: usize,
     parsed_ytyps: usize,
+    parsed_ymaps: usize,
     parsed_gtxd_files: usize,
+    world_entities: usize,
 }
 
 struct ScanArchiveContext {
@@ -674,8 +1198,37 @@ fn scan_archive(
             entry: file.path.clone(),
             load_rank: context.load_rank,
         };
-        insert_file_winner(index, kind, joaat(stem), locator.clone());
+        let file_name_hash = joaat(stem);
+        insert_file_winner(index, kind, file_name_hash, locator.clone());
         counters.indexed_files += 1;
+
+        if kind == GtaRpfAssetKind::Ymap {
+            let bytes = match archive.read_file(&file.path, Some(keys)) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    warnings.push(format!(
+                        "{}: YMAP read failed: {error}",
+                        provenance(&locator)
+                    ));
+                    continue;
+                }
+            };
+            let ymap = match Ymap::from_bytes(&bytes) {
+                Ok(ymap) => ymap,
+                Err(error) => {
+                    warnings.push(format!(
+                        "{}: YMAP parse failed: {error}",
+                        provenance(&locator)
+                    ));
+                    continue;
+                }
+            };
+            counters.parsed_ymaps += 1;
+            counters.world_entities += ymap.entities.len();
+            let record = world_map_record(locator.clone(), file_name_hash, ymap);
+            insert_world_map_winner(index, record.map_hash(), record);
+            continue;
+        }
 
         if kind != GtaRpfAssetKind::Ytyp {
             continue;
@@ -703,6 +1256,33 @@ fn scan_archive(
         };
         counters.parsed_ytyps += 1;
 
+        let ytyp_key = ytyp.name.map(|hash| hash.0).unwrap_or(file_name_hash);
+        let mut dependencies = ytyp
+            .dependencies
+            .iter()
+            .map(|hash| hash.0)
+            .collect::<Vec<_>>();
+        dependencies.sort_unstable();
+        dependencies.dedup();
+        let mut archetype_hashes = ytyp
+            .archetypes
+            .iter()
+            .map(|archetype| archetype.name.0)
+            .collect::<Vec<_>>();
+        archetype_hashes.sort_unstable();
+        archetype_hashes.dedup();
+        insert_ytyp_winner(
+            index,
+            ytyp_key,
+            GtaRpfYtypRecord {
+                provider: locator.clone(),
+                file_name_hash,
+                name_hash: ytyp.name.map(|hash| hash.0),
+                dependencies,
+                archetype_hashes,
+            },
+        );
+
         for archetype in ytyp.archetypes {
             let asset_kind = match archetype.asset_type {
                 AssetType::Fragment => Some(GtaRpfAssetKind::Yft),
@@ -722,6 +1302,133 @@ fn scan_archive(
             insert_archetype_winner(index, archetype.name.0, record);
         }
     }
+}
+
+fn world_map_record(
+    provider: GtaRpfIndexLocator,
+    file_name_hash: u32,
+    ymap: Ymap,
+) -> GtaRpfWorldMapRecord {
+    let mut physics_dictionary_hashes = ymap
+        .physics_dictionaries
+        .iter()
+        .map(|hash| hash.0)
+        .collect::<Vec<_>>();
+    physics_dictionary_hashes.sort_unstable();
+    physics_dictionary_hashes.dedup();
+
+    let mut archetype_hashes = ymap
+        .entities
+        .iter()
+        .map(|entity| entity.archetype_name.0)
+        .collect::<Vec<_>>();
+    archetype_hashes.sort_unstable();
+    archetype_hashes.dedup();
+
+    let entities = ymap
+        .entities
+        .into_iter()
+        .enumerate()
+        .map(|(index, entity)| GtaRpfWorldEntityRecord {
+            index: u32::try_from(index).unwrap_or(u32::MAX),
+            archetype_hash: entity.archetype_name.0,
+            position: entity.position.into(),
+            rotation: [
+                entity.rotation.x,
+                entity.rotation.y,
+                entity.rotation.z,
+                entity.rotation.w,
+            ],
+            scale_xy: entity.scale_xy,
+            scale_z: entity.scale_z,
+            flags: entity.flags,
+            parent_index: entity.parent_index,
+        })
+        .collect();
+
+    GtaRpfWorldMapRecord {
+        provider,
+        file_name_hash,
+        map_name_hash: ymap.name.map(|hash| hash.0),
+        parent_hash: ymap.parent.map(|hash| hash.0),
+        flags: ymap.flags,
+        content_flags: ymap.content_flags,
+        entities_bounds: ymap_bounds(ymap.entities_extents_min, ymap.entities_extents_max),
+        streaming_bounds: ymap_bounds(ymap.streaming_extents_min, ymap.streaming_extents_max),
+        physics_dictionary_hashes,
+        archetype_hashes,
+        entities,
+    }
+}
+
+fn ymap_bounds(min: Option<YmapVec3>, max: Option<YmapVec3>) -> Option<GtaRpfWorldBounds> {
+    let bounds = GtaRpfWorldBounds {
+        min: min?.into(),
+        max: max?.into(),
+    };
+    bounds.is_valid().then_some(bounds)
+}
+
+fn insert_world_map_winner(index: &mut GtaRpfAssetIndex, hash: u32, record: GtaRpfWorldMapRecord) {
+    let load_rank = record.provider.load_rank;
+    match index.world_maps.get_mut(&hash) {
+        Some(winner) => winner.insert(load_rank, record),
+        None => {
+            index.world_maps.insert(
+                hash,
+                WorldMapWinnerSet {
+                    load_rank,
+                    candidates: vec![record],
+                },
+            );
+        }
+    }
+}
+
+fn insert_ytyp_winner(index: &mut GtaRpfAssetIndex, hash: u32, record: GtaRpfYtypRecord) {
+    let load_rank = record.provider.load_rank;
+    match index.ytyps.get_mut(&hash) {
+        Some(winner) => winner.insert(load_rank, record),
+        None => {
+            index.ytyps.insert(
+                hash,
+                WinnerSet {
+                    load_rank,
+                    candidates: vec![record],
+                },
+            );
+        }
+    }
+}
+
+fn world_cell_range(bounds: GtaRpfWorldBounds) -> Option<(i32, i32, i32, i32)> {
+    if !bounds.is_valid() {
+        return None;
+    }
+    Some((
+        world_cell_coordinate(bounds.min.x)?,
+        world_cell_coordinate(bounds.max.x)?,
+        world_cell_coordinate(bounds.min.y)?,
+        world_cell_coordinate(bounds.max.y)?,
+    ))
+}
+
+fn world_cell_coordinate(value: f32) -> Option<i32> {
+    if !value.is_finite() {
+        return None;
+    }
+    let cell = (f64::from(value) / f64::from(WORLD_SPATIAL_CELL_SIZE)).floor();
+    if cell < f64::from(i32::MIN) || cell > f64::from(i32::MAX) {
+        None
+    } else {
+        Some(cell as i32)
+    }
+}
+
+fn cell_range_count(min_x: i32, max_x: i32, min_y: i32, max_y: i32) -> i64 {
+    let width = i64::from(max_x) - i64::from(min_x) + 1;
+    let height = i64::from(max_y) - i64::from(min_y) + 1;
+    width.saturating_mul(height)
 }
 
 fn insert_file_winner(
@@ -880,6 +1587,57 @@ mod tests {
         }
     }
 
+    fn world_bounds(min: [f32; 3], max: [f32; 3]) -> GtaRpfWorldBounds {
+        GtaRpfWorldBounds {
+            min: GtaRpfWorldPoint {
+                x: min[0],
+                y: min[1],
+                z: min[2],
+            },
+            max: GtaRpfWorldPoint {
+                x: max[0],
+                y: max[1],
+                z: max[2],
+            },
+        }
+    }
+
+    fn world_record(
+        rank: u32,
+        entry: &str,
+        map_hash: u32,
+        parent_hash: Option<u32>,
+        bounds: Option<GtaRpfWorldBounds>,
+        entity_position: Option<GtaRpfWorldPoint>,
+    ) -> GtaRpfWorldMapRecord {
+        let entities = entity_position
+            .into_iter()
+            .map(|position| GtaRpfWorldEntityRecord {
+                index: 0,
+                archetype_hash: 0xAABBCCDD,
+                position,
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale_xy: Some(1.0),
+                scale_z: Some(1.0),
+                flags: 7,
+                parent_index: None,
+            })
+            .collect();
+        GtaRpfWorldMapRecord {
+            provider: locator(rank, entry),
+            file_name_hash: map_hash,
+            map_name_hash: Some(map_hash),
+            parent_hash,
+            flags: Some(1),
+            content_flags: Some(2),
+            entities_bounds: bounds,
+            streaming_bounds: bounds,
+            physics_dictionary_hashes: vec![0x01020304],
+            archetype_hashes: vec![0xAABBCCDD],
+            entities,
+        }
+    }
+
     fn empty_index() -> GtaRpfAssetIndex {
         GtaRpfAssetIndex {
             schema_version: GTA_RPF_INDEX_SCHEMA_VERSION,
@@ -894,7 +1652,34 @@ mod tests {
             files: BTreeMap::new(),
             archetypes: BTreeMap::new(),
             texture_parents: BTreeMap::new(),
+            ytyps: BTreeMap::new(),
+            world_maps: BTreeMap::new(),
+            world_children: BTreeMap::new(),
+            world_cells: BTreeMap::new(),
+            world_global_maps: Vec::new(),
         }
+    }
+
+    #[test]
+    fn load_rejects_previous_world_index_schema() {
+        let index = empty_index();
+        let mut bytes = bincode::serialize(&index).expect("serialize world index");
+        bytes[..4].copy_from_slice(&3_u32.to_le_bytes());
+
+        let path = std::env::temp_dir().join(format!(
+            "ragelab-world-index-old-schema-{}.bin",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        fs::write(&path, bytes).expect("write old-schema fixture");
+
+        let error = GtaRpfAssetIndex::load(&path).expect_err("schema v3 must be rejected");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error
+            .to_string()
+            .contains("unsupported GTA RPF index schema 3; expected 4"));
+
+        fs::remove_file(path).expect("remove old-schema fixture");
     }
 
     #[test]
@@ -922,6 +1707,11 @@ mod tests {
             files: BTreeMap::new(),
             archetypes: BTreeMap::new(),
             texture_parents: BTreeMap::new(),
+            ytyps: BTreeMap::new(),
+            world_maps: BTreeMap::new(),
+            world_children: BTreeMap::new(),
+            world_cells: BTreeMap::new(),
+            world_global_maps: Vec::new(),
         };
         index.save(&index_path, true).expect("seed cached index");
 
@@ -954,6 +1744,255 @@ mod tests {
 
         let candidates = index.file_candidates(GtaRpfAssetKind::Ydr, 7);
         assert_eq!(candidates.len(), 2);
+    }
+
+    #[test]
+    fn world_map_winner_and_grid_follow_load_rank() {
+        let mut index = empty_index();
+        insert_world_map_winner(
+            &mut index,
+            0x1000,
+            world_record(
+                10,
+                "old.ymap",
+                0x1000,
+                None,
+                Some(world_bounds([0.0, 0.0, 0.0], [100.0, 100.0, 100.0])),
+                Some(GtaRpfWorldPoint {
+                    x: 50.0,
+                    y: 50.0,
+                    z: 10.0,
+                }),
+            ),
+        );
+        insert_world_map_winner(
+            &mut index,
+            0x1000,
+            world_record(
+                20,
+                "new.ymap",
+                0x1000,
+                None,
+                Some(world_bounds([1000.0, 1000.0, 0.0], [1100.0, 1100.0, 100.0])),
+                Some(GtaRpfWorldPoint {
+                    x: 1050.0,
+                    y: 1050.0,
+                    z: 10.0,
+                }),
+            ),
+        );
+        index.rebuild_world_acceleration();
+
+        let old = index
+            .query_world_box(
+                world_bounds([-10.0, -10.0, -10.0], [120.0, 120.0, 120.0]),
+                true,
+            )
+            .expect("old area query");
+        assert!(old.maps.is_empty());
+        assert!(old.entities.is_empty());
+
+        let new = index
+            .query_world_box(
+                world_bounds([990.0, 990.0, -10.0], [1110.0, 1110.0, 120.0]),
+                true,
+            )
+            .expect("new area query");
+        assert_eq!(new.maps.len(), 1);
+        assert_eq!(new.maps[0].provider.entry, "new.ymap");
+        assert_eq!(new.entities.len(), 1);
+    }
+
+    #[test]
+    fn world_hierarchy_and_radius_query_are_persisted() {
+        let mut index = empty_index();
+        insert_world_map_winner(
+            &mut index,
+            0x2000,
+            world_record(
+                20,
+                "child.ymap",
+                0x2000,
+                Some(0x1000),
+                Some(world_bounds([0.0, 0.0, 0.0], [200.0, 200.0, 100.0])),
+                Some(GtaRpfWorldPoint {
+                    x: 25.0,
+                    y: 30.0,
+                    z: 5.0,
+                }),
+            ),
+        );
+        index.rebuild_world_acceleration();
+        assert_eq!(index.world_children(0x1000), &[0x2000]);
+
+        let radius = index
+            .query_world_radius(
+                GtaRpfWorldPoint {
+                    x: 25.0,
+                    y: 30.0,
+                    z: 5.0,
+                },
+                2.0,
+                true,
+            )
+            .expect("radius query");
+        assert_eq!(radius.maps.len(), 1);
+        assert_eq!(radius.entities.len(), 1);
+
+        let path =
+            std::env::temp_dir().join(format!("ragelab-world-index-v4-{}.bin", std::process::id()));
+        let _ = fs::remove_file(&path);
+        index.save(&path, true).expect("save world index");
+        let loaded = GtaRpfAssetIndex::load(&path).expect("load world index");
+        assert_eq!(loaded.world_children(0x1000), &[0x2000]);
+        assert_eq!(
+            loaded
+                .query_world_radius(
+                    GtaRpfWorldPoint {
+                        x: 25.0,
+                        y: 30.0,
+                        z: 5.0,
+                    },
+                    2.0,
+                    true,
+                )
+                .expect("loaded radius query")
+                .entities
+                .len(),
+            1
+        );
+        fs::remove_file(path).expect("remove world index fixture");
+    }
+
+    #[test]
+    fn world_frustum_filters_box_candidates_without_rpf_io() {
+        let mut index = empty_index();
+        insert_world_map_winner(
+            &mut index,
+            0x3000,
+            world_record(
+                20,
+                "inside.ymap",
+                0x3000,
+                None,
+                Some(world_bounds([-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])),
+                Some(GtaRpfWorldPoint {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                }),
+            ),
+        );
+        insert_world_map_winner(
+            &mut index,
+            0x4000,
+            world_record(
+                20,
+                "outside.ymap",
+                0x4000,
+                None,
+                Some(world_bounds([50.0, 50.0, -5.0], [60.0, 60.0, 5.0])),
+                Some(GtaRpfWorldPoint {
+                    x: 55.0,
+                    y: 55.0,
+                    z: 0.0,
+                }),
+            ),
+        );
+        index.rebuild_world_acceleration();
+
+        let frustum = GtaRpfWorldFrustum {
+            broadphase_bounds: world_bounds([-100.0, -100.0, -100.0], [100.0, 100.0, 100.0]),
+            planes: [
+                GtaRpfWorldPlane {
+                    normal: GtaRpfWorldPoint {
+                        x: 1.0,
+                        y: 0.0,
+                        z: 0.0,
+                    },
+                    distance: 10.0,
+                },
+                GtaRpfWorldPlane {
+                    normal: GtaRpfWorldPoint {
+                        x: -1.0,
+                        y: 0.0,
+                        z: 0.0,
+                    },
+                    distance: 10.0,
+                },
+                GtaRpfWorldPlane {
+                    normal: GtaRpfWorldPoint {
+                        x: 0.0,
+                        y: 1.0,
+                        z: 0.0,
+                    },
+                    distance: 10.0,
+                },
+                GtaRpfWorldPlane {
+                    normal: GtaRpfWorldPoint {
+                        x: 0.0,
+                        y: -1.0,
+                        z: 0.0,
+                    },
+                    distance: 10.0,
+                },
+                GtaRpfWorldPlane {
+                    normal: GtaRpfWorldPoint {
+                        x: 0.0,
+                        y: 0.0,
+                        z: 1.0,
+                    },
+                    distance: 10.0,
+                },
+                GtaRpfWorldPlane {
+                    normal: GtaRpfWorldPoint {
+                        x: 0.0,
+                        y: 0.0,
+                        z: -1.0,
+                    },
+                    distance: 10.0,
+                },
+            ],
+        };
+        let report = index
+            .query_world_frustum(frustum, true)
+            .expect("frustum query");
+        assert_eq!(report.maps.len(), 1);
+        assert_eq!(report.maps[0].map_hash, 0x3000);
+        assert_eq!(report.entities.len(), 1);
+        assert_eq!(report.entities[0].map_hash, 0x3000);
+    }
+
+    #[test]
+    fn ytyp_winner_preserves_dependency_relationships() {
+        let mut index = empty_index();
+        insert_ytyp_winner(
+            &mut index,
+            0x9000,
+            GtaRpfYtypRecord {
+                provider: locator(10, "old.ytyp"),
+                file_name_hash: 0x9000,
+                name_hash: Some(0x9000),
+                dependencies: vec![1],
+                archetype_hashes: vec![2],
+            },
+        );
+        insert_ytyp_winner(
+            &mut index,
+            0x9000,
+            GtaRpfYtypRecord {
+                provider: locator(30, "new.ytyp"),
+                file_name_hash: 0x9000,
+                name_hash: Some(0x9000),
+                dependencies: vec![3, 4],
+                archetype_hashes: vec![5, 6],
+            },
+        );
+        let candidates = index.ytyp_candidates(0x9000);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].provider.entry, "new.ytyp");
+        assert_eq!(candidates[0].dependencies, vec![3, 4]);
+        assert_eq!(candidates[0].archetype_hashes, vec![5, 6]);
     }
 
     #[test]
