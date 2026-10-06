@@ -1283,6 +1283,18 @@ impl OrbitCamera {
         }
     }
 
+    fn look(&mut self, delta_x: f32, delta_y: f32) {
+        let eye = self.eye();
+        self.orbit(delta_x, delta_y);
+        let cos_pitch = self.pitch.cos();
+        let eye_direction = Vec3::new(
+            cos_pitch * self.yaw.cos(),
+            cos_pitch * self.yaw.sin(),
+            self.pitch.sin(),
+        );
+        self.target = eye - eye_direction * self.distance;
+    }
+
     fn pan(&mut self, delta_x: f32, delta_y: f32) {
         if !delta_x.is_finite() || !delta_y.is_finite() {
             return;
@@ -1542,6 +1554,12 @@ impl SurfaceRenderer {
     pub fn orbit(&mut self, delta_x: f32, delta_y: f32) {
         if let Some(camera) = self.camera.as_mut() {
             camera.orbit(delta_x, delta_y);
+        }
+    }
+
+    pub fn look(&mut self, delta_x: f32, delta_y: f32) {
+        if let Some(camera) = self.camera.as_mut() {
+            camera.look(delta_x, delta_y);
         }
     }
 
@@ -2299,6 +2317,9 @@ mod tests {
         assert!(initial.distance > 0.0);
 
         camera.orbit(0.2, -0.15);
+        let orbit_eye = camera.eye();
+        camera.look(-0.1, 0.08);
+        assert!((camera.eye() - orbit_eye).length() < 1.0e-4);
         camera.pan(0.1, -0.05);
         camera.zoom(-0.5);
         camera.fly(1.0, -0.25, 0.5);
