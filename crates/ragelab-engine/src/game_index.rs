@@ -196,6 +196,17 @@ impl GtaRpfWorldBounds {
             && point.z <= self.max.z
     }
 
+    pub fn center(self) -> Option<GtaRpfWorldPoint> {
+        if !self.is_valid() {
+            return None;
+        }
+        Some(GtaRpfWorldPoint {
+            x: (self.min.x + self.max.x) * 0.5,
+            y: (self.min.y + self.max.y) * 0.5,
+            z: (self.min.z + self.max.z) * 0.5,
+        })
+    }
+
     pub fn distance_squared_to_point(self, point: GtaRpfWorldPoint) -> f32 {
         if !self.is_valid() || !point.is_finite() {
             return f32::INFINITY;
@@ -396,6 +407,53 @@ pub struct GtaRpfWorldQueryReport {
     pub maps: Vec<GtaRpfWorldMapHit>,
     pub entities: Vec<GtaRpfWorldEntityHit>,
     pub candidate_map_keys: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GtaRpfBrowserResultKind {
+    Ymap,
+    Archetype,
+    Asset,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GtaRpfArchetypeBrowserResolution {
+    pub archetype_hash: u32,
+    pub provider: GtaRpfIndexLocator,
+    pub asset_kind: Option<GtaRpfAssetKind>,
+    pub asset_hash: Option<u32>,
+    pub asset_provider: Option<GtaRpfIndexLocator>,
+    pub texture_dictionary_hash: Option<u32>,
+    pub physics_dictionary_hash: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GtaRpfBrowserSearchResult {
+    pub kind: GtaRpfBrowserResultKind,
+    pub hash: u32,
+    pub label: String,
+    pub provider: GtaRpfIndexLocator,
+    pub asset_kind: Option<GtaRpfAssetKind>,
+    pub asset_hash: Option<u32>,
+    pub asset_provider: Option<GtaRpfIndexLocator>,
+    pub map_hash: Option<u32>,
+    pub entity_index: Option<u32>,
+    pub position: Option<GtaRpfWorldPoint>,
+    pub bounds: Option<GtaRpfWorldBounds>,
+    pub entity_count: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GtaRpfBrowserSearchReport {
+    pub schema: &'static str,
+    pub schema_version: u32,
+    pub query: String,
+    pub results: Vec<GtaRpfBrowserSearchResult>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -733,6 +791,251 @@ impl GtaRpfAssetIndex {
             .get(&parent_hash)
             .map(Vec::as_slice)
             .unwrap_or(&[])
+    }
+
+    pub fn archetype_browser_resolution(
+        &self,
+        archetype_hash: u32,
+    ) -> Option<GtaRpfArchetypeBrowserResolution> {
+        let [record] = self.archetype_candidates(archetype_hash) else {
+            return None;
+        };
+        Some(self.browser_resolution_from_record(archetype_hash, record))
+    }
+
+    pub fn search_browser(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<GtaRpfBrowserSearchReport, io::Error> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "browser search query must not be empty",
+            ));
+        }
+        if !(1..=200).contains(&limit) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "browser search limit must be within 1..=200",
+            ));
+        }
+        let exact_hash = parse_browser_hash(query);
+        if exact_hash.is_none() && query.chars().count() < 2 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "browser text search requires at least two characters",
+            ));
+        }
+
+        let needle = query.to_ascii_lowercase();
+        let mut candidates = Vec::<(u8, GtaRpfBrowserSearchResult)>::new();
+        let mut overflow = false;
+
+        if let Some(hash) = exact_hash {
+            for record in self.world_map_candidates(hash) {
+                candidates.push((0, self.browser_map_result(hash, record)));
+            }
+            for record in self.archetype_candidates(hash) {
+                candidates.push((1, self.browser_archetype_result(hash, record)));
+            }
+            for kind in browser_asset_kinds() {
+                for provider in self.file_candidates(kind, hash) {
+                    candidates.push((2, browser_asset_result(kind, hash, provider)));
+                }
+            }
+        }
+
+        let mut map_matches = 0_usize;
+        'maps: for (map_hash, winner) in &self.world_maps {
+            for record in &winner.candidates {
+                if browser_locator_matches(&record.provider, &needle) {
+                    candidates.push((10, self.browser_map_result(*map_hash, record)));
+                    map_matches += 1;
+                    if map_matches >= limit {
+                        overflow = true;
+                        break 'maps;
+                    }
+                }
+            }
+        }
+
+        let mut archetype_matches = 0_usize;
+        'archetypes: for (archetype_hash, winner) in &self.archetypes {
+            for record in &winner.candidates {
+                let matches_provider = browser_locator_matches(&record.provider, &needle);
+                let matches_asset = primary_asset_key(record).is_some_and(|(kind, hash)| {
+                    self.file_candidates(kind, hash)
+                        .iter()
+                        .any(|provider| browser_locator_matches(provider, &needle))
+                });
+                if matches_provider || matches_asset {
+                    candidates.push((11, self.browser_archetype_result(*archetype_hash, record)));
+                    archetype_matches += 1;
+                    if archetype_matches >= limit {
+                        overflow = true;
+                        break 'archetypes;
+                    }
+                }
+            }
+        }
+
+        let mut asset_matches = 0_usize;
+        'assets: for ((kind, hash), winner) in &self.files {
+            if !browser_asset_kinds().contains(kind) {
+                continue;
+            }
+            for provider in &winner.candidates {
+                if browser_locator_matches(provider, &needle) {
+                    candidates.push((12, browser_asset_result(*kind, *hash, provider)));
+                    asset_matches += 1;
+                    if asset_matches >= limit {
+                        overflow = true;
+                        break 'assets;
+                    }
+                }
+            }
+        }
+
+        candidates.sort_by(|(left_score, left), (right_score, right)| {
+            left_score
+                .cmp(right_score)
+                .then_with(|| left.kind.cmp(&right.kind))
+                .then_with(|| {
+                    left.label
+                        .to_ascii_lowercase()
+                        .cmp(&right.label.to_ascii_lowercase())
+                })
+                .then_with(|| left.hash.cmp(&right.hash))
+                .then_with(|| left.provider.cmp(&right.provider))
+        });
+
+        let mut seen = BTreeSet::new();
+        let mut results = Vec::new();
+        for (_, result) in candidates {
+            let key = (
+                result.kind,
+                result.hash,
+                result.provider.clone(),
+                result.map_hash,
+                result.entity_index,
+            );
+            if !seen.insert(key) {
+                continue;
+            }
+            if results.len() >= limit {
+                overflow = true;
+                break;
+            }
+            results.push(result);
+        }
+
+        Ok(GtaRpfBrowserSearchReport {
+            schema: "ragelab.gta.browser-search",
+            schema_version: 1,
+            query: query.to_string(),
+            results,
+            truncated: overflow,
+        })
+    }
+
+    fn browser_resolution_from_record(
+        &self,
+        archetype_hash: u32,
+        record: &GtaRpfArchetypeRecord,
+    ) -> GtaRpfArchetypeBrowserResolution {
+        let primary = primary_asset_key(record);
+        let asset_provider = primary.and_then(|(kind, hash)| {
+            let [provider] = self.file_candidates(kind, hash) else {
+                return None;
+            };
+            Some(provider.clone())
+        });
+        GtaRpfArchetypeBrowserResolution {
+            archetype_hash,
+            provider: record.provider.clone(),
+            asset_kind: primary.map(|(kind, _)| kind),
+            asset_hash: primary.map(|(_, hash)| hash),
+            asset_provider,
+            texture_dictionary_hash: record.texture_dictionary_hash,
+            physics_dictionary_hash: record.physics_dictionary_hash,
+        }
+    }
+
+    fn browser_map_result(
+        &self,
+        map_hash: u32,
+        record: &GtaRpfWorldMapRecord,
+    ) -> GtaRpfBrowserSearchResult {
+        GtaRpfBrowserSearchResult {
+            kind: GtaRpfBrowserResultKind::Ymap,
+            hash: map_hash,
+            label: browser_locator_label(&record.provider),
+            provider: record.provider.clone(),
+            asset_kind: None,
+            asset_hash: None,
+            asset_provider: None,
+            map_hash: Some(map_hash),
+            entity_index: None,
+            position: record
+                .entities
+                .first()
+                .map(|entity| entity.position)
+                .or_else(|| {
+                    record
+                        .effective_bounds()
+                        .and_then(GtaRpfWorldBounds::center)
+                }),
+            bounds: record.effective_bounds(),
+            entity_count: Some(record.entities.len()),
+        }
+    }
+
+    fn browser_archetype_result(
+        &self,
+        archetype_hash: u32,
+        record: &GtaRpfArchetypeRecord,
+    ) -> GtaRpfBrowserSearchResult {
+        let resolution = self.browser_resolution_from_record(archetype_hash, record);
+        let occurrence = self.first_archetype_occurrence(archetype_hash);
+        let label = resolution
+            .asset_provider
+            .as_ref()
+            .map(browser_locator_label)
+            .unwrap_or_else(|| format!("archetype 0x{archetype_hash:08X}"));
+        GtaRpfBrowserSearchResult {
+            kind: GtaRpfBrowserResultKind::Archetype,
+            hash: archetype_hash,
+            label,
+            provider: resolution.provider.clone(),
+            asset_kind: resolution.asset_kind,
+            asset_hash: resolution.asset_hash,
+            asset_provider: resolution.asset_provider,
+            map_hash: occurrence.map(|(map_hash, _, _)| map_hash),
+            entity_index: occurrence.map(|(_, entity, _)| entity.index),
+            position: occurrence.map(|(_, entity, _)| entity.position),
+            bounds: occurrence.and_then(|(_, _, record)| record.effective_bounds()),
+            entity_count: None,
+        }
+    }
+
+    fn first_archetype_occurrence(
+        &self,
+        archetype_hash: u32,
+    ) -> Option<(u32, &GtaRpfWorldEntityRecord, &GtaRpfWorldMapRecord)> {
+        for (map_hash, winner) in &self.world_maps {
+            for record in &winner.candidates {
+                if let Some(entity) = record
+                    .entities
+                    .iter()
+                    .find(|entity| entity.archetype_hash == archetype_hash)
+                {
+                    return Some((*map_hash, entity, record));
+                }
+            }
+        }
+        None
     }
 
     pub fn query_world_box(
@@ -1483,6 +1786,77 @@ fn insert_texture_parent_winner(index: &mut GtaRpfAssetIndex, record: GtaRpfText
     }
 }
 
+fn browser_asset_kinds() -> [GtaRpfAssetKind; 5] {
+    [
+        GtaRpfAssetKind::Ydr,
+        GtaRpfAssetKind::Ydd,
+        GtaRpfAssetKind::Ytd,
+        GtaRpfAssetKind::Ybn,
+        GtaRpfAssetKind::Yft,
+    ]
+}
+
+fn browser_locator_matches(locator: &GtaRpfIndexLocator, needle: &str) -> bool {
+    locator.entry.to_ascii_lowercase().contains(needle)
+        || locator
+            .archive_relative
+            .to_ascii_lowercase()
+            .contains(needle)
+        || locator
+            .nested
+            .iter()
+            .any(|entry| entry.to_ascii_lowercase().contains(needle))
+}
+
+fn browser_locator_label(locator: &GtaRpfIndexLocator) -> String {
+    Path::new(&locator.entry)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(&locator.entry)
+        .to_string()
+}
+
+fn browser_asset_result(
+    kind: GtaRpfAssetKind,
+    hash: u32,
+    provider: &GtaRpfIndexLocator,
+) -> GtaRpfBrowserSearchResult {
+    GtaRpfBrowserSearchResult {
+        kind: GtaRpfBrowserResultKind::Asset,
+        hash,
+        label: browser_locator_label(provider),
+        provider: provider.clone(),
+        asset_kind: Some(kind),
+        asset_hash: Some(hash),
+        asset_provider: Some(provider.clone()),
+        map_hash: None,
+        entity_index: None,
+        position: None,
+        bounds: None,
+        entity_count: None,
+    }
+}
+
+fn parse_browser_hash(query: &str) -> Option<u32> {
+    let trimmed = query.trim();
+    if let Some(value) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        return u32::from_str_radix(value, 16).ok();
+    }
+    if trimmed.chars().all(|value| value.is_ascii_digit()) {
+        return trimmed.parse::<u32>().ok();
+    }
+    if trimmed.len() <= 8
+        && trimmed.chars().all(|value| value.is_ascii_hexdigit())
+        && trimmed.chars().any(|value| value.is_ascii_alphabetic())
+    {
+        return u32::from_str_radix(trimmed, 16).ok();
+    }
+    None
+}
+
 fn primary_asset_key(archetype: &GtaRpfArchetypeRecord) -> Option<(GtaRpfAssetKind, u32)> {
     let kind = archetype.asset_kind?;
     let hash = if kind == GtaRpfAssetKind::Ydd {
@@ -1658,6 +2032,95 @@ mod tests {
             world_cells: BTreeMap::new(),
             world_global_maps: Vec::new(),
         }
+    }
+
+    #[test]
+    fn browser_search_resolves_map_archetype_asset_and_teleport_target() {
+        let mut index = empty_index();
+        let map_hash = 0x11223344;
+        let archetype_hash = 0xAABBCCDD;
+        let asset_hash = 0xDEADBEEF;
+        insert_world_map_winner(
+            &mut index,
+            map_hash,
+            world_record(
+                10,
+                "levels/patins_blockout.ymap",
+                map_hash,
+                None,
+                Some(world_bounds([0.0, 10.0, 20.0], [20.0, 30.0, 40.0])),
+                Some(GtaRpfWorldPoint {
+                    x: 10.0,
+                    y: 20.0,
+                    z: 30.0,
+                }),
+            ),
+        );
+        insert_file_winner(
+            &mut index,
+            GtaRpfAssetKind::Ydr,
+            asset_hash,
+            locator(10, "props/patins_board.ydr"),
+        );
+        insert_archetype_winner(
+            &mut index,
+            archetype_hash,
+            GtaRpfArchetypeRecord {
+                provider: locator(10, "types/patins.ytyp"),
+                provider_ytyp_hash: Some(0x99887766),
+                asset_kind: Some(GtaRpfAssetKind::Ydr),
+                asset_name_hash: Some(asset_hash),
+                drawable_dictionary_hash: None,
+                texture_dictionary_hash: Some(0x12345678),
+                physics_dictionary_hash: Some(0x87654321),
+            },
+        );
+
+        let report = index.search_browser("patins", 10).expect("browser search");
+        assert!(!report.truncated);
+        assert!(report
+            .results
+            .iter()
+            .any(|result| result.kind == GtaRpfBrowserResultKind::Ymap && result.hash == map_hash));
+        let archetype = report
+            .results
+            .iter()
+            .find(|result| {
+                result.kind == GtaRpfBrowserResultKind::Archetype && result.hash == archetype_hash
+            })
+            .expect("archetype result");
+        assert_eq!(
+            archetype.position,
+            Some(GtaRpfWorldPoint {
+                x: 10.0,
+                y: 20.0,
+                z: 30.0
+            })
+        );
+        assert_eq!(archetype.asset_hash, Some(asset_hash));
+        assert_eq!(
+            archetype
+                .asset_provider
+                .as_ref()
+                .map(|provider| provider.entry.as_str()),
+            Some("props/patins_board.ydr")
+        );
+        assert!(report.results.iter().any(|result| {
+            result.kind == GtaRpfBrowserResultKind::Asset && result.hash == asset_hash
+        }));
+
+        let exact = index
+            .search_browser("0xAABBCCDD", 10)
+            .expect("hash browser search");
+        assert!(exact.results.iter().any(|result| {
+            result.kind == GtaRpfBrowserResultKind::Archetype
+                && result.hash == archetype_hash
+                && result.position.is_some()
+        }));
+
+        let limited = index.search_browser("patins", 1).expect("limited search");
+        assert_eq!(limited.results.len(), 1);
+        assert!(limited.truncated);
     }
 
     #[test]

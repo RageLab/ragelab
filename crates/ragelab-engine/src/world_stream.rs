@@ -17,10 +17,10 @@ use serde::Serialize;
 
 use crate::{
     assemble_ymap_scene, build_scene_render_package, merge_render_packages,
-    mount_loaded_game_index_for_archetypes, GtaRpfAssetIndex, GtaRpfIndexLocator,
-    GtaRpfWorldBounds, GtaRpfWorldFrustum, GtaRpfWorldMapHit, GtaRpfWorldMapRecord,
-    GtaRpfWorldPoint, RenderPackage, RenderPackageOptions, RenderPackageSummary, RenderSceneRoot,
-    SceneAssemblyOptions, SceneGameIndexSource,
+    mount_loaded_game_index_for_archetypes, GtaRpfArchetypeBrowserResolution, GtaRpfAssetIndex,
+    GtaRpfIndexLocator, GtaRpfWorldBounds, GtaRpfWorldEntityRecord, GtaRpfWorldFrustum,
+    GtaRpfWorldMapHit, GtaRpfWorldMapRecord, GtaRpfWorldPoint, RenderPackage, RenderPackageOptions,
+    RenderPackageSummary, RenderSceneRoot, SceneAssemblyOptions, SceneGameIndexSource,
 };
 
 pub const WORLD_STREAM_SCHEMA_VERSION: u32 = 1;
@@ -118,6 +118,26 @@ pub struct WorldStreamChunkError {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WorldStreamActiveEntity {
+    pub entity: GtaRpfWorldEntityRecord,
+    pub render_node_index: Option<u32>,
+    pub resolution: Option<GtaRpfArchetypeBrowserResolution>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorldStreamActiveMap {
+    pub map_hash: u32,
+    pub provider: GtaRpfIndexLocator,
+    pub parent_hash: Option<u32>,
+    pub flags: Option<u32>,
+    pub content_flags: Option<u32>,
+    pub bounds: Option<GtaRpfWorldBounds>,
+    pub entities: Vec<WorldStreamActiveEntity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorldStreamReport {
     pub schema: &'static str,
     pub schema_version: u32,
@@ -130,6 +150,7 @@ pub struct WorldStreamReport {
     pub visible_maps: usize,
     pub active_maps: usize,
     pub active_entities: usize,
+    pub active_chunks: Vec<WorldStreamActiveMap>,
     pub overlay_packages: usize,
     pub overlay_suppressed_maps: usize,
     pub ambiguous_maps: usize,
@@ -513,6 +534,54 @@ impl WorldStreamingRuntime {
             .iter()
             .filter(|candidate| candidate.visible && self.active.contains(&candidate.key))
             .count();
+        let mut active_chunks = Vec::with_capacity(final_order.len());
+        let mut merged_node_base = 0_u32;
+        for key in &final_order {
+            let Some(record) = self.unique_record(key) else {
+                continue;
+            };
+            let Some(chunk) = self.cache.get(key) else {
+                continue;
+            };
+            let node_by_entity = chunk
+                .package
+                .descriptor
+                .scene
+                .instances
+                .iter()
+                .map(|instance| {
+                    (
+                        (instance.entity_index, instance.archetype_hash),
+                        merged_node_base.saturating_add(instance.node_index),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            active_chunks.push(WorldStreamActiveMap {
+                map_hash: key.map_hash,
+                provider: record.provider.clone(),
+                parent_hash: record.parent_hash,
+                flags: record.flags,
+                content_flags: record.content_flags,
+                bounds: record.effective_bounds(),
+                entities: record
+                    .entities
+                    .iter()
+                    .cloned()
+                    .map(|entity| WorldStreamActiveEntity {
+                        render_node_index: node_by_entity
+                            .get(&(entity.index, entity.archetype_hash))
+                            .copied(),
+                        resolution: self
+                            .index
+                            .archetype_browser_resolution(entity.archetype_hash),
+                        entity,
+                    })
+                    .collect(),
+            });
+            merged_node_base = merged_node_base.saturating_add(
+                u32::try_from(chunk.package.descriptor.scene.instances.len()).unwrap_or(u32::MAX),
+            );
+        }
 
         Ok(WorldStreamUpdate {
             report: WorldStreamReport {
@@ -527,6 +596,7 @@ impl WorldStreamingRuntime {
                 visible_maps,
                 active_maps: self.active.len(),
                 active_entities,
+                active_chunks,
                 overlay_packages: self.overlay_packages.len(),
                 overlay_suppressed_maps,
                 ambiguous_maps,
