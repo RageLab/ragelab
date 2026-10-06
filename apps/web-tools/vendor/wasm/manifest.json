@@ -1,0 +1,35 @@
+﻿{
+    "schema":  "ragelab.wasm.package",
+    "schemaVersion":  1,
+    "target":  "wasm32-unknown-unknown",
+    "bindgenTarget":  "web",
+    "crate":  "ragelab-wasm",
+    "package":  "@ragelab/wasm",
+    "files":  [
+                  {
+                      "name":  "package.json",
+                      "bytes":  308,
+                      "sha256":  "83c476750ab6e0e40457d2285da7998f724ffffc63997fb7781304cde977d5d6"
+                  },
+                  {
+                      "name":  "ragelab_wasm.d.ts",
+                      "bytes":  6486,
+                      "sha256":  "9cf97fdd36d9e94990f22dbcc22aa3ff742c21d783823015f330bff7f0e8fe29"
+                  },
+                  {
+                      "name":  "ragelab_wasm.js",
+                      "bytes":  33808,
+                      "sha256":  "665021593c3d76029f65f8549205e0dbc37d1f78134914c3b46fb4c84c5de60b"
+                  },
+                  {
+                      "name":  "ragelab_wasm_bg.wasm",
+                      "bytes":  602255,
+                      "sha256":  "58b8bca8080df52a79732afebcc876a43a0a85f07c093c8888086a652b4681b5"
+                  },
+                  {
+                      "name":  "ragelab_wasm_bg.wasm.d.ts",
+                      "bytes":  3020,
+                      "sha256":  "790b3e2923d0bae170c00ece1ceeea6ab31986ec9d90053911fbb26ee3df3482"
+                  }
+              ]
+}

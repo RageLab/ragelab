@@ -1,0 +1,21 @@
+{
+  "name": "@ragelab/web-tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "wasm:sync": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ../../scripts/build-wasm.ps1 -OutDir apps/web-tools/vendor/wasm",
+    "dev": "vite",
+    "check": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build",
+    "test:browser": "playwright test"
+  },
+  "dependencies": {
+    "@ragelab/wasm": "file:./vendor/wasm"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.1",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.7"
+  }
+}

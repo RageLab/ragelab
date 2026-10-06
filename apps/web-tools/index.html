@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RageLab Web Tools</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">RageLab · Web Tools</p>
+          <h1>YTD Texture Viewer / Editor</h1>
+        </div>
+        <span id="core-status" class="badge">Initializing Rust/WASM…</span>
+      </header>
+
+      <section id="drop-zone" class="drop-zone" aria-label="Open YTD">
+        <div>
+          <strong>Drop a user-supplied .ytd here</strong>
+          <p>Browser-only. No GTA install, RPF, keys or local bridge required.</p>
+        </div>
+        <div class="actions">
+          <label class="button primary">
+            Open YTD
+            <input id="asset-input" type="file" accept=".ytd,application/octet-stream" hidden />
+          </label>
+          <button id="fixture-button" class="button" type="button">Load synthetic fixture</button>
+        </div>
+      </section>
+
+      <div id="error-panel" class="message error" role="alert" hidden></div>
+      <div id="success-panel" class="message success" role="status" hidden></div>
+
+      <main class="workspace">
+        <section class="panel browser-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Dictionary</p>
+              <h2 id="asset-name">No YTD loaded</h2>
+            </div>
+            <span id="texture-count" class="badge muted">0 textures</span>
+          </div>
+          <div class="table-wrap">
+            <table id="texture-table">
+              <thead>
+                <tr>
+                  <th>Name / hash</th>
+                  <th>Format</th>
+                  <th>Size</th>
+                  <th>Mips</th>
+                  <th>Edit</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel preview-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Preview</p>
+              <h2 id="selected-name">Select a texture</h2>
+            </div>
+            <span id="preview-dimensions" class="badge muted">—</span>
+          </div>
+
+          <div class="preview-toolbar">
+            <label>
+              Mip
+              <select id="mip-select" disabled></select>
+            </label>
+            <div id="channel-controls" class="segmented" aria-label="Texture channels">
+              <button type="button" data-channel="rgba" class="active">RGBA</button>
+              <button type="button" data-channel="rgb">RGB</button>
+              <button type="button" data-channel="r">R</button>
+              <button type="button" data-channel="g">G</button>
+              <button type="button" data-channel="b">B</button>
+              <button type="button" data-channel="a">A</button>
+            </div>
+          </div>
+
+          <div class="canvas-shell">
+            <canvas id="texture-canvas" width="1" height="1"></canvas>
+          </div>
+
+          <dl id="texture-details" class="details"></dl>
+
+          <div class="actions editor-actions">
+            <button id="export-button" class="button" type="button" disabled>Export top mip PNG</button>
+            <label id="replace-label" class="button">
+              Replace from PNG
+              <input id="replace-input" type="file" accept="image/png,.png" hidden disabled />
+            </label>
+            <button id="reset-button" class="button" type="button" disabled>Reset</button>
+            <button id="download-button" class="button primary" type="button" disabled>
+              Download rebuilt YTD
+            </button>
+          </div>
+
+          <div class="write-status">
+            <span>Write policy</span>
+            <strong id="write-policy">No texture selected</strong>
+            <span>Semantic reopen</span>
+            <strong id="semantic-status">Not run</strong>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
