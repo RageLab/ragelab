@@ -9,6 +9,115 @@ export interface ModelMaterialResolution {
   texture: ResolvedModelTexture | null;
 }
 
+export interface BuiltModelObject {
+  group: THREE.Group;
+  materials: Map<number, THREE.MeshBasicMaterial>;
+  textures: THREE.DataTexture[];
+}
+
+export function buildModelObject(
+  packet: ModelPacketData,
+  resolutions: ModelMaterialResolution[],
+  wireframe = false,
+): BuiltModelObject {
+  const group = new THREE.Group();
+  const materials = new Map<number, THREE.MeshBasicMaterial>();
+  const textures: THREE.DataTexture[] = [];
+
+  for (const resolution of resolutions) {
+    const texture = resolution.texture ? makeResolvedTexture(resolution.texture) : null;
+    if (texture) textures.push(texture);
+    materials.set(
+      resolution.shaderIndex,
+      new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        map: texture,
+        side: THREE.DoubleSide,
+        wireframe,
+      }),
+    );
+  }
+
+  for (const primitive of packet.metadata.primitives) {
+    if (primitive.topology !== "triangleList") continue;
+
+    const geometry = new THREE.BufferGeometry();
+    const positionStart = primitive.positionFloatOffset;
+    const positionEnd = positionStart + primitive.vertexCount * 3;
+    geometry.setAttribute(
+      "position",
+      new THREE.BufferAttribute(packet.positions.subarray(positionStart, positionEnd), 3),
+    );
+
+    if (primitive.normalFloatOffset !== null) {
+      const normalStart = primitive.normalFloatOffset;
+      const normalEnd = normalStart + primitive.vertexCount * 3;
+      geometry.setAttribute(
+        "normal",
+        new THREE.BufferAttribute(packet.normals.subarray(normalStart, normalEnd), 3),
+      );
+    }
+
+    if (primitive.uvFloatOffset !== null) {
+      const uvStart = primitive.uvFloatOffset;
+      const uvEnd = uvStart + primitive.vertexCount * 2;
+      geometry.setAttribute(
+        "uv",
+        new THREE.BufferAttribute(packet.uv0.subarray(uvStart, uvEnd), 2),
+      );
+    }
+
+    const indexStart = primitive.indexOffset;
+    const indexEnd = indexStart + primitive.indexCount;
+    geometry.setIndex(
+      new THREE.BufferAttribute(packet.indices.subarray(indexStart, indexEnd), 1),
+    );
+    geometry.computeBoundingSphere();
+
+    let material =
+      primitive.shaderIndex !== null ? materials.get(primitive.shaderIndex) : undefined;
+    if (!material) {
+      material = new THREE.MeshBasicMaterial({
+        color: 0xb7c1d1,
+        side: THREE.DoubleSide,
+        wireframe,
+      });
+      materials.set(-(primitive.index + 1), material);
+    }
+
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = `primitive-${primitive.index}`;
+    mesh.userData.primitiveIndex = primitive.index;
+    mesh.userData.shaderIndex = primitive.shaderIndex;
+    group.add(mesh);
+  }
+
+  return { group, materials, textures };
+}
+
+export function disposeModelObject(object: BuiltModelObject): void {
+  object.group.traverse((child) => {
+    if (child instanceof THREE.Mesh) child.geometry.dispose();
+  });
+  for (const material of object.materials.values()) material.dispose();
+  for (const texture of object.textures) texture.dispose();
+}
+
+function makeResolvedTexture(resolved: ResolvedModelTexture): THREE.DataTexture {
+  const { width, height } = resolved.metadata;
+  const texture = new THREE.DataTexture(
+    Uint8Array.from(resolved.rgba),
+    width,
+    height,
+    THREE.RGBAFormat,
+    THREE.UnsignedByteType,
+  );
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.flipY = false;
+  texture.needsUpdate = true;
+  return texture;
+}
+
 export class ModelViewer {
   readonly canvas: HTMLCanvasElement;
 
@@ -21,8 +130,7 @@ export class ModelViewer {
   private grid: THREE.GridHelper | null = null;
   private boundsHelper: THREE.Box3Helper | null = null;
   private metadata: ModelMetadata | null = null;
-  private materialByShader = new Map<number, THREE.MeshBasicMaterial>();
-  private textureObjects: THREE.DataTexture[] = [];
+  private builtObject: BuiltModelObject | null = null;
   private gridVisible = true;
   private wireframe = false;
   private boundsVisible = false;
@@ -61,73 +169,8 @@ export class ModelViewer {
   setModel(packet: ModelPacketData, resolutions: ModelMaterialResolution[]): void {
     this.clearModel();
     this.metadata = packet.metadata;
-
-    for (const resolution of resolutions) {
-      const texture = resolution.texture ? this.makeTexture(resolution.texture) : null;
-      const material = new THREE.MeshBasicMaterial({
-        color: 0xffffff,
-        map: texture,
-        side: THREE.DoubleSide,
-        wireframe: this.wireframe,
-      });
-      this.materialByShader.set(resolution.shaderIndex, material);
-    }
-
-    for (const primitive of packet.metadata.primitives) {
-      if (primitive.topology !== "triangleList") continue;
-
-      const geometry = new THREE.BufferGeometry();
-      const positionStart = primitive.positionFloatOffset;
-      const positionEnd = positionStart + primitive.vertexCount * 3;
-      geometry.setAttribute(
-        "position",
-        new THREE.BufferAttribute(packet.positions.subarray(positionStart, positionEnd), 3),
-      );
-
-      if (primitive.normalFloatOffset !== null) {
-        const normalStart = primitive.normalFloatOffset;
-        const normalEnd = normalStart + primitive.vertexCount * 3;
-        geometry.setAttribute(
-          "normal",
-          new THREE.BufferAttribute(packet.normals.subarray(normalStart, normalEnd), 3),
-        );
-      }
-
-      if (primitive.uvFloatOffset !== null) {
-        const uvStart = primitive.uvFloatOffset;
-        const uvEnd = uvStart + primitive.vertexCount * 2;
-        geometry.setAttribute(
-          "uv",
-          new THREE.BufferAttribute(packet.uv0.subarray(uvStart, uvEnd), 2),
-        );
-      }
-
-      const indexStart = primitive.indexOffset;
-      const indexEnd = indexStart + primitive.indexCount;
-      geometry.setIndex(
-        new THREE.BufferAttribute(packet.indices.subarray(indexStart, indexEnd), 1),
-      );
-      geometry.computeBoundingSphere();
-
-      const material =
-        (primitive.shaderIndex !== null
-          ? this.materialByShader.get(primitive.shaderIndex)
-          : undefined) ?? new THREE.MeshBasicMaterial({
-          color: 0xb7c1d1,
-          side: THREE.DoubleSide,
-          wireframe: this.wireframe,
-        });
-      if (primitive.shaderIndex === null || !this.materialByShader.has(primitive.shaderIndex)) {
-        this.materialByShader.set(-(primitive.index + 1), material);
-      }
-
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.name = `primitive-${primitive.index}`;
-      mesh.userData.primitiveIndex = primitive.index;
-      mesh.userData.shaderIndex = primitive.shaderIndex;
-      this.root.add(mesh);
-    }
-
+    this.builtObject = buildModelObject(packet, resolutions, this.wireframe);
+    this.root.add(this.builtObject.group);
     this.rebuildHelpers();
     this.setView("auto");
   }
@@ -167,7 +210,7 @@ export class ModelViewer {
 
   setWireframe(enabled: boolean): void {
     this.wireframe = enabled;
-    for (const material of this.materialByShader.values()) {
+    for (const material of this.builtObject?.materials.values() ?? []) {
       material.wireframe = enabled;
       material.needsUpdate = true;
     }
@@ -200,22 +243,6 @@ export class ModelViewer {
     this.renderer.dispose();
   }
 
-  private makeTexture(resolved: ResolvedModelTexture): THREE.DataTexture {
-    const { width, height } = resolved.metadata;
-    const texture = new THREE.DataTexture(
-      Uint8Array.from(resolved.rgba),
-      width,
-      height,
-      THREE.RGBAFormat,
-      THREE.UnsignedByteType,
-    );
-    texture.colorSpace = THREE.SRGBColorSpace;
-    texture.flipY = false;
-    texture.needsUpdate = true;
-    this.textureObjects.push(texture);
-    return texture;
-  }
-
   private rebuildHelpers(): void {
     if (!this.metadata) return;
 
@@ -236,14 +263,11 @@ export class ModelViewer {
   }
 
   private clearModel(): void {
-    for (const child of [...this.root.children]) {
-      if (child instanceof THREE.Mesh) child.geometry.dispose();
-      this.root.remove(child);
+    if (this.builtObject) {
+      this.root.remove(this.builtObject.group);
+      disposeModelObject(this.builtObject);
+      this.builtObject = null;
     }
-    for (const material of this.materialByShader.values()) material.dispose();
-    this.materialByShader.clear();
-    for (const texture of this.textureObjects) texture.dispose();
-    this.textureObjects = [];
 
     if (this.grid) {
       this.scene.remove(this.grid);

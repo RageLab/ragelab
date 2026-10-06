@@ -197,3 +197,115 @@ canvas { image-rendering: pixelated; max-width: 100%; max-height: 520px; min-wid
     height: 540px;
   }
 }
+
+.ymap-workspace {
+  display: grid;
+  grid-template-columns: minmax(270px, .58fr) minmax(520px, 1.25fr) minmax(280px, .62fr);
+  gap: 16px;
+  align-items: start;
+}
+.ymap-browser-panel,
+.ymap-inspector-panel {
+  min-width: 0;
+}
+.ymap-browser-panel > p {
+  padding: 12px 18px;
+  color: #8fa0b7;
+  font-size: 12px;
+  border-bottom: 1px solid #253043;
+}
+.ymap-entity-list {
+  max-height: 68vh;
+  overflow: auto;
+}
+.ymap-entity-row {
+  --entity-depth: 0;
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  gap: 8px;
+  padding: 9px 12px 9px calc(12px + var(--entity-depth) * 14px);
+  border: 0;
+  border-bottom: 1px solid #1f2938;
+  background: transparent;
+  color: #d7e0ec;
+  text-align: left;
+  cursor: pointer;
+  font-size: 11px;
+}
+.ymap-entity-row:hover,
+.ymap-entity-row.selected {
+  background: #182437;
+}
+.ymap-entity-row span:first-child {
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.ymap-entity-row span:last-child {
+  color: #8191a7;
+}
+.ymap-preview-panel {
+  overflow: hidden;
+}
+.ymap-canvas-shell {
+  height: min(68vh, 720px);
+}
+.ymap-inspector-panel {
+  padding-bottom: 16px;
+}
+.ymap-inspector-panel > p {
+  padding: 0 18px 16px;
+  color: #8191a7;
+  font-size: 12px;
+}
+.ymap-inspector-panel .details {
+  grid-template-columns: max-content minmax(0, 1fr);
+  padding-top: 4px;
+}
+.ymap-edit-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 0 18px 14px;
+}
+.ymap-edit-grid label {
+  display: grid;
+  gap: 5px;
+  color: #8191a7;
+  font-size: 11px;
+}
+.ymap-edit-grid input {
+  min-width: 0;
+  width: 100%;
+  padding: 6px 7px;
+  border: 1px solid #34445a;
+  border-radius: 6px;
+  background: #121b27;
+  color: #e7ecf3;
+}
+#ymap-apply-button,
+#ymap-download-button {
+  margin: 0 18px 14px;
+}
+.ymap-write-status {
+  margin-bottom: 12px;
+}
+@media (max-width: 1250px) {
+  .ymap-workspace {
+    grid-template-columns: minmax(260px, .7fr) minmax(520px, 1.3fr);
+  }
+  .ymap-inspector-panel {
+    grid-column: 1 / -1;
+  }
+}
+@media (max-width: 900px) {
+  .ymap-workspace {
+    grid-template-columns: 1fr;
+  }
+  .ymap-inspector-panel {
+    grid-column: auto;
+  }
+  .ymap-canvas-shell {
+    height: 520px;
+  }
+}

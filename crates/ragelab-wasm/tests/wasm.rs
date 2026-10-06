@@ -1,19 +1,20 @@
 #![cfg(target_arch = "wasm32")]
 
-use js_sys::{Array, Reflect};
+use js_sys::{Array, Object, Reflect, Uint8Array};
 use ragelab_resource::Rsc7Resource;
 use ragelab_wasm::{
     capabilities, inspect_ydd, inspect_ydr_materials, inspect_yft, inspect_ymap, inspect_ytd,
-    inspect_ytyp, validate_asset, wasm_export_ytd_texture_png, wasm_replace_ytd_texture_png,
-    ydd_model, ydd_rebind_texture, ydr_embedded_texture, ydr_embedded_texture_by_name, ydr_model,
-    ydr_rebind_texture, yft_model, ymap_set_flags, ytd_texture, ytd_texture_by_name,
-    ytd_texture_mip,
+    inspect_ytyp, resolve_supplied_ymap_scene, validate_asset, wasm_export_ytd_texture_png,
+    wasm_replace_ytd_texture_png, ydd_model, ydd_rebind_texture, ydr_embedded_texture,
+    ydr_embedded_texture_by_name, ydr_model, ydr_rebind_texture, yft_model, ymap_set_flags,
+    ytd_texture, ytd_texture_by_name, ytd_texture_mip,
 };
 use ragelab_yft::YFT_LEGACY_VERSION;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_test::*;
 
 const YMAP: &[u8] = include_bytes!("../../../fixtures/synthetic/stream/simple.ymap");
+const SIMPLE_YTYP: &[u8] = include_bytes!("../../../fixtures/synthetic/simple.ytyp");
 const YTYP: &[u8] = include_bytes!("../../../fixtures/synthetic/mlo.ytyp");
 const YDR: &[u8] = include_bytes!("../../../fixtures/synthetic/ydr/simple.ydr");
 const EDITABLE_YDR: &[u8] = include_bytes!("../../../fixtures/synthetic/ydr/editable.ydr");
@@ -31,6 +32,19 @@ fn synthetic_yft_without_drawable() -> Vec<u8> {
 
 fn field(value: &JsValue, name: &str) -> JsValue {
     Reflect::get(value, &JsValue::from_str(name)).expect("JS field")
+}
+
+fn supplied_file(name: &str, bytes: &[u8]) -> JsValue {
+    let object = Object::new();
+    Reflect::set(
+        &object,
+        &JsValue::from_str("name"),
+        &JsValue::from_str(name),
+    )
+    .expect("set supplied name");
+    let payload = Uint8Array::from(bytes);
+    Reflect::set(&object, &JsValue::from_str("bytes"), &payload).expect("set supplied bytes");
+    object.into()
 }
 
 #[wasm_bindgen_test]
@@ -172,6 +186,67 @@ fn ytd_mip_binding_decodes_declared_level_and_fails_closed_out_of_bounds() {
     assert_eq!(
         field(&error, "code").as_string().as_deref(),
         Some("indexOutOfBounds")
+    );
+}
+
+#[wasm_bindgen_test]
+fn supplied_ymap_scene_resolves_only_explicit_dependencies_and_fails_closed() {
+    let supplied = Array::new();
+    supplied.push(&supplied_file("simple.ytyp", SIMPLE_YTYP));
+    supplied.push(&supplied_file("test_drawable.ydr", YDR));
+
+    let report =
+        resolve_supplied_ymap_scene(YMAP, supplied.into()).expect("resolve supplied scene");
+    assert_eq!(
+        field(&report, "schema").as_string().as_deref(),
+        Some("ragelab.wasm.supplied-ymap-scene")
+    );
+    let entities = Array::from(&field(&report, "entities"));
+    assert_eq!(entities.length(), 1);
+    let entity = entities.get(0);
+    let resolution = field(&entity, "resolution");
+    assert!(!resolution.is_null() && !resolution.is_undefined());
+    assert_eq!(
+        field(&resolution, "modelFormat").as_string().as_deref(),
+        Some("ydr")
+    );
+    assert_eq!(
+        field(&resolution, "modelDependencyIndex").as_f64(),
+        Some(1.0)
+    );
+    assert_eq!(Array::from(&field(&report, "diagnostics")).length(), 0);
+
+    let missing_provider =
+        resolve_supplied_ymap_scene(YMAP, Array::new().into()).expect("missing provider report");
+    let diagnostics = Array::from(&field(&missing_provider, "diagnostics"));
+    assert_eq!(diagnostics.length(), 1);
+    assert_eq!(
+        field(&diagnostics.get(0), "code").as_string().as_deref(),
+        Some("providerMissing")
+    );
+
+    let missing_model = Array::new();
+    missing_model.push(&supplied_file("simple.ytyp", SIMPLE_YTYP));
+    let missing_model =
+        resolve_supplied_ymap_scene(YMAP, missing_model.into()).expect("missing model report");
+    let diagnostics = Array::from(&field(&missing_model, "diagnostics"));
+    assert_eq!(diagnostics.length(), 1);
+    assert_eq!(
+        field(&diagnostics.get(0), "code").as_string().as_deref(),
+        Some("assetMissing")
+    );
+
+    let ambiguous = Array::new();
+    ambiguous.push(&supplied_file("simple.ytyp", SIMPLE_YTYP));
+    ambiguous.push(&supplied_file("duplicate.ytyp", SIMPLE_YTYP));
+    ambiguous.push(&supplied_file("test_drawable.ydr", YDR));
+    let ambiguous =
+        resolve_supplied_ymap_scene(YMAP, ambiguous.into()).expect("ambiguous provider report");
+    let diagnostics = Array::from(&field(&ambiguous, "diagnostics"));
+    assert_eq!(diagnostics.length(), 1);
+    assert_eq!(
+        field(&diagnostics.get(0), "code").as_string().as_deref(),
+        Some("providerAmbiguous")
     );
 }
 

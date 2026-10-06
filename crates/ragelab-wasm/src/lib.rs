@@ -1,4 +1,4 @@
-use js_sys::{Float32Array, Uint32Array, Uint8Array};
+use js_sys::{Array, Float32Array, Reflect, Uint32Array, Uint8Array};
 use ragelab_authoring::{
     export_ytd_texture_png, replace_ytd_texture_from_png, ydd_material_authoring_report,
     ydr_material_authoring_report, ytd_texture_authoring_report,
@@ -12,7 +12,7 @@ use ragelab_ymap::{
     apply_ymap_edit_command, Quat as YmapQuat, Vec3 as YmapVec3, Ymap, YmapEditCommand,
 };
 use ragelab_ytd::{Ytd, YtdDictionary};
-use ragelab_ytyp::{ArchetypeKind, AssetType, Ytyp};
+use ragelab_ytyp::{Archetype, ArchetypeKind, AssetType, Ytyp};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -126,6 +126,69 @@ struct YtypReport {
     dependencies: Vec<String>,
     archetypes: Vec<YtypArchetypeReport>,
     mlos: Vec<YtypMloReport>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SuppliedCatalogEntryReport {
+    index: usize,
+    name: String,
+    format: String,
+    name_hash: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SuppliedModelResolutionReport {
+    ytyp_dependency_index: usize,
+    archetype_index: usize,
+    model_dependency_index: usize,
+    model_format: String,
+    drawable_index: Option<usize>,
+    asset_hash: String,
+    texture_dictionary_hash: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SuppliedSceneEntityReport {
+    index: usize,
+    archetype_hash: String,
+    position: [f32; 3],
+    rotation: [f32; 4],
+    scale_xy: Option<f32>,
+    scale_z: Option<f32>,
+    flags: u32,
+    parent_index: Option<i32>,
+    resolution: Option<SuppliedModelResolutionReport>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SuppliedSceneDiagnostic {
+    entity_index: Option<usize>,
+    code: &'static str,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SuppliedYmapSceneReport {
+    schema: &'static str,
+    schema_version: u32,
+    ymap: YmapReport,
+    catalog: Vec<SuppliedCatalogEntryReport>,
+    entities: Vec<SuppliedSceneEntityReport>,
+    diagnostics: Vec<SuppliedSceneDiagnostic>,
+}
+
+#[derive(Debug)]
+struct SuppliedFile {
+    index: usize,
+    name: String,
+    format: String,
+    name_hash: u32,
+    bytes: Vec<u8>,
 }
 
 #[derive(Debug, Serialize)]
@@ -394,6 +457,123 @@ pub fn inspect_ymap(bytes: &[u8]) -> Result<JsValue, JsValue> {
 pub fn inspect_ytyp(bytes: &[u8]) -> Result<JsValue, JsValue> {
     let ytyp = Ytyp::from_bytes(bytes).map_err(|e| wasm_error("ytyp", "parseFailed", e))?;
     to_js(&ytyp_report(&ytyp))
+}
+
+#[wasm_bindgen(js_name = resolveSuppliedYmapScene)]
+pub fn resolve_supplied_ymap_scene(
+    ymap_bytes: &[u8],
+    supplied: JsValue,
+) -> Result<JsValue, JsValue> {
+    let ymap = Ymap::from_bytes(ymap_bytes).map_err(|e| wasm_error("ymap", "parseFailed", e))?;
+    let files = parse_supplied_files(&supplied)?;
+
+    let mut ytyps = Vec::<(usize, Ytyp)>::new();
+    for file in &files {
+        match file.format.as_str() {
+            "ytyp" => ytyps.push((
+                file.index,
+                Ytyp::from_bytes(&file.bytes).map_err(|e| {
+                    wasm_error("ytyp", "parseFailed", format!("{}: {e}", file.name))
+                })?,
+            )),
+            "ydr" => {
+                YdrDocument::from_bytes(&file.bytes)
+                    .map_err(|e| wasm_error("ydr", "parseFailed", format!("{}: {e}", file.name)))?;
+            }
+            "ydd" => {
+                YddDictionary::from_bytes(&file.bytes)
+                    .map_err(|e| wasm_error("ydd", "parseFailed", format!("{}: {e}", file.name)))?;
+            }
+            "yft" => {
+                YftDocument::from_bytes(&file.bytes)
+                    .map_err(|e| wasm_error("yft", "parseFailed", format!("{}: {e}", file.name)))?;
+            }
+            "ytd" => {
+                YtdDictionary::from_bytes(&file.bytes)
+                    .map_err(|e| wasm_error("ytd", "parseFailed", format!("{}: {e}", file.name)))?;
+            }
+            _ => unreachable!("parse_supplied_files validates extensions"),
+        }
+    }
+
+    let mut diagnostics = Vec::new();
+    let mut entities = Vec::with_capacity(ymap.entities.len());
+    for (entity_index, entity) in ymap.entities.iter().enumerate() {
+        let archetype_hash = entity.archetype_name.0;
+        let mut providers = Vec::new();
+        for (dependency_index, ytyp) in &ytyps {
+            for (archetype_index, archetype) in ytyp.archetypes.iter().enumerate() {
+                if archetype.name.0 == archetype_hash {
+                    providers.push((*dependency_index, archetype_index, archetype));
+                }
+            }
+        }
+
+        let resolution = if providers.is_empty() {
+            diagnostics.push(SuppliedSceneDiagnostic {
+                entity_index: Some(entity_index),
+                code: "providerMissing",
+                message: format!("no supplied YTYP defines archetype 0x{archetype_hash:08X}"),
+            });
+            None
+        } else if providers.len() != 1 {
+            diagnostics.push(SuppliedSceneDiagnostic {
+                entity_index: Some(entity_index),
+                code: "providerAmbiguous",
+                message: format!(
+                    "archetype 0x{archetype_hash:08X} has {} supplied YTYP providers",
+                    providers.len()
+                ),
+            });
+            None
+        } else {
+            let (ytyp_dependency_index, archetype_index, archetype) = providers[0];
+            resolve_supplied_model(
+                entity_index,
+                ytyp_dependency_index,
+                archetype_index,
+                archetype,
+                &files,
+                &mut diagnostics,
+            )
+        };
+
+        entities.push(SuppliedSceneEntityReport {
+            index: entity_index,
+            archetype_hash: hex_hash(archetype_hash),
+            position: ymap_vec3_array(entity.position),
+            rotation: [
+                entity.rotation.x,
+                entity.rotation.y,
+                entity.rotation.z,
+                entity.rotation.w,
+            ],
+            scale_xy: entity.scale_xy,
+            scale_z: entity.scale_z,
+            flags: entity.flags,
+            parent_index: entity.parent_index,
+            resolution,
+        });
+    }
+
+    let catalog = files
+        .iter()
+        .map(|file| SuppliedCatalogEntryReport {
+            index: file.index,
+            name: file.name.clone(),
+            format: file.format.clone(),
+            name_hash: hex_hash(file.name_hash),
+        })
+        .collect();
+
+    to_js(&SuppliedYmapSceneReport {
+        schema: "ragelab.wasm.supplied-ymap-scene",
+        schema_version: API_SCHEMA_VERSION,
+        ymap: ymap_report(&ymap),
+        catalog,
+        entities,
+        diagnostics,
+    })
 }
 
 #[wasm_bindgen(js_name = inspectYtd)]
@@ -907,6 +1087,285 @@ pub fn ydd_rebind_texture(
         .to_bytes()
         .map_err(|e| wasm_error("ydd", "semanticReopenFailed", e))?;
     Ok(Uint8Array::from(output.as_slice()))
+}
+
+fn parse_supplied_files(value: &JsValue) -> Result<Vec<SuppliedFile>, JsValue> {
+    if !Array::is_array(value) {
+        return Err(wasm_error(
+            "ymap",
+            "invalidDependencySet",
+            "supplied dependency set must be a JavaScript array",
+        ));
+    }
+
+    let array = Array::from(value);
+    let mut files = Vec::with_capacity(array.length() as usize);
+    for (index, item) in array.iter().enumerate() {
+        let name = Reflect::get(&item, &JsValue::from_str("name"))
+            .map_err(|_| {
+                wasm_error(
+                    "ymap",
+                    "invalidDependency",
+                    format!("supplied dependency {index} has no readable name"),
+                )
+            })?
+            .as_string()
+            .ok_or_else(|| {
+                wasm_error(
+                    "ymap",
+                    "invalidDependency",
+                    format!("supplied dependency {index} name must be a string"),
+                )
+            })?;
+        let bytes_value = Reflect::get(&item, &JsValue::from_str("bytes")).map_err(|_| {
+            wasm_error(
+                "ymap",
+                "invalidDependency",
+                format!("supplied dependency {index} has no readable bytes"),
+            )
+        })?;
+        if !bytes_value.is_instance_of::<Uint8Array>() {
+            return Err(wasm_error(
+                "ymap",
+                "invalidDependency",
+                format!("supplied dependency {index} bytes must be Uint8Array"),
+            ));
+        }
+        let bytes = Uint8Array::new(&bytes_value).to_vec();
+
+        let leaf = name.rsplit(['/', '\\']).next().unwrap_or(&name);
+        let (stem, extension) = leaf.rsplit_once('.').ok_or_else(|| {
+            wasm_error(
+                "ymap",
+                "unsupportedDependency",
+                format!("supplied dependency {name:?} has no supported extension"),
+            )
+        })?;
+        if stem.is_empty() {
+            return Err(wasm_error(
+                "ymap",
+                "invalidDependency",
+                format!("supplied dependency {name:?} has an empty asset stem"),
+            ));
+        }
+        let format = extension.to_ascii_lowercase();
+        if !matches!(format.as_str(), "ytyp" | "ydr" | "ydd" | "yft" | "ytd") {
+            return Err(wasm_error(
+                "ymap",
+                "unsupportedDependency",
+                format!("supplied dependency {name:?} has unsupported .{format} extension"),
+            ));
+        }
+
+        let name_hash = joaat(stem);
+        files.push(SuppliedFile {
+            index,
+            name,
+            format,
+            name_hash,
+            bytes,
+        });
+    }
+    Ok(files)
+}
+
+fn resolve_supplied_model(
+    entity_index: usize,
+    ytyp_dependency_index: usize,
+    archetype_index: usize,
+    archetype: &Archetype,
+    files: &[SuppliedFile],
+    diagnostics: &mut Vec<SuppliedSceneDiagnostic>,
+) -> Option<SuppliedModelResolutionReport> {
+    let archetype_hash = archetype.name.0;
+    let texture_dictionary_hash = archetype.texture_dictionary.map(|value| hex_hash(value.0));
+
+    let missing_asset_name = |expected: &'static str| SuppliedSceneDiagnostic {
+        entity_index: Some(entity_index),
+        code: "assetNameMissing",
+        message: format!(
+            "supplied YTYP archetype 0x{archetype_hash:08X} declares {expected} without assetName"
+        ),
+    };
+
+    match archetype.asset_type {
+        AssetType::Drawable => {
+            let Some(asset_hash) = archetype.asset_name.map(|value| value.0) else {
+                diagnostics.push(missing_asset_name("Drawable"));
+                return None;
+            };
+            resolve_unique_supplied_asset(
+                entity_index,
+                ytyp_dependency_index,
+                archetype_index,
+                archetype_hash,
+                asset_hash,
+                "ydr",
+                None,
+                texture_dictionary_hash,
+                files,
+                diagnostics,
+            )
+        }
+        AssetType::Fragment => {
+            let Some(asset_hash) = archetype.asset_name.map(|value| value.0) else {
+                diagnostics.push(missing_asset_name("Fragment"));
+                return None;
+            };
+            let resolution = resolve_unique_supplied_asset(
+                entity_index,
+                ytyp_dependency_index,
+                archetype_index,
+                archetype_hash,
+                asset_hash,
+                "yft",
+                None,
+                texture_dictionary_hash,
+                files,
+                diagnostics,
+            )?;
+            let file = &files[resolution.model_dependency_index];
+            match YftDocument::from_bytes(&file.bytes) {
+                Ok(document) if document.main_drawable.is_some() => Some(resolution),
+                Ok(_) => {
+                    diagnostics.push(SuppliedSceneDiagnostic {
+                        entity_index: Some(entity_index),
+                        code: "unsupportedAsset",
+                        message: format!(
+                            "YFT {:?} has no pristine main drawable available for preview",
+                            file.name
+                        ),
+                    });
+                    None
+                }
+                Err(error) => {
+                    diagnostics.push(SuppliedSceneDiagnostic {
+                        entity_index: Some(entity_index),
+                        code: "assetUnreadable",
+                        message: format!("YFT {:?} could not be parsed: {error}", file.name),
+                    });
+                    None
+                }
+            }
+        }
+        AssetType::DrawableDictionary => {
+            let Some(entry_hash) = archetype.asset_name.map(|value| value.0) else {
+                diagnostics.push(missing_asset_name("DrawableDictionary"));
+                return None;
+            };
+            let Some(dictionary_hash) = archetype.drawable_dictionary.map(|value| value.0) else {
+                diagnostics.push(SuppliedSceneDiagnostic {
+                    entity_index: Some(entity_index),
+                    code: "drawableDictionaryMissing",
+                    message: format!(
+                        "archetype 0x{archetype_hash:08X} declares DrawableDictionary but no drawableDictionary hash"
+                    ),
+                });
+                return None;
+            };
+            let resolution = resolve_unique_supplied_asset(
+                entity_index,
+                ytyp_dependency_index,
+                archetype_index,
+                archetype_hash,
+                dictionary_hash,
+                "ydd",
+                None,
+                texture_dictionary_hash,
+                files,
+                diagnostics,
+            )?;
+            let file = &files[resolution.model_dependency_index];
+            let dictionary = match YddDictionary::from_bytes(&file.bytes) {
+                Ok(dictionary) => dictionary,
+                Err(error) => {
+                    diagnostics.push(SuppliedSceneDiagnostic {
+                        entity_index: Some(entity_index),
+                        code: "dictionaryUnreadable",
+                        message: format!("YDD {:?} could not be parsed: {error}", file.name),
+                    });
+                    return None;
+                }
+            };
+            let Some(entry) = dictionary.entry_by_hash(entry_hash) else {
+                diagnostics.push(SuppliedSceneDiagnostic {
+                    entity_index: Some(entity_index),
+                    code: "dictionaryEntryMissing",
+                    message: format!(
+                        "YDD {:?} does not contain drawable entry 0x{entry_hash:08X} required by archetype 0x{archetype_hash:08X}",
+                        file.name
+                    ),
+                });
+                return None;
+            };
+            Some(SuppliedModelResolutionReport {
+                drawable_index: Some(entry.index),
+                asset_hash: hex_hash(entry_hash),
+                ..resolution
+            })
+        }
+        AssetType::Uninitialized | AssetType::Assetless | AssetType::Unknown(_) => {
+            diagnostics.push(SuppliedSceneDiagnostic {
+                entity_index: Some(entity_index),
+                code: "unsupportedAssetType",
+                message: format!(
+                    "archetype 0x{archetype_hash:08X} asset type {} is not renderable from supplied model files",
+                    asset_type_name(archetype.asset_type)
+                ),
+            });
+            None
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_unique_supplied_asset(
+    entity_index: usize,
+    ytyp_dependency_index: usize,
+    archetype_index: usize,
+    archetype_hash: u32,
+    asset_hash: u32,
+    format: &'static str,
+    drawable_index: Option<usize>,
+    texture_dictionary_hash: Option<String>,
+    files: &[SuppliedFile],
+    diagnostics: &mut Vec<SuppliedSceneDiagnostic>,
+) -> Option<SuppliedModelResolutionReport> {
+    let candidates = files
+        .iter()
+        .filter(|file| file.format == format && file.name_hash == asset_hash)
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        diagnostics.push(SuppliedSceneDiagnostic {
+            entity_index: Some(entity_index),
+            code: "assetMissing",
+            message: format!(
+                "{format} asset 0x{asset_hash:08X} declared by archetype 0x{archetype_hash:08X} has no supplied candidate"
+            ),
+        });
+        return None;
+    }
+    if candidates.len() != 1 {
+        diagnostics.push(SuppliedSceneDiagnostic {
+            entity_index: Some(entity_index),
+            code: "assetAmbiguous",
+            message: format!(
+                "{format} asset 0x{asset_hash:08X} declared by archetype 0x{archetype_hash:08X} has {} supplied candidates",
+                candidates.len()
+            ),
+        });
+        return None;
+    }
+
+    Some(SuppliedModelResolutionReport {
+        ytyp_dependency_index,
+        archetype_index,
+        model_dependency_index: candidates[0].index,
+        model_format: format.to_string(),
+        drawable_index,
+        asset_hash: hex_hash(asset_hash),
+        texture_dictionary_hash,
+    })
 }
 
 fn texture_index_by_name(

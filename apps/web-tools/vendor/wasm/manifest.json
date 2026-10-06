@@ -13,23 +13,23 @@
                   },
                   {
                       "name":  "ragelab_wasm.d.ts",
-                      "bytes":  7870,
-                      "sha256":  "1494cad8784e9eb16a4be5ce5f9c3ba6bc92f53d9f0183aee2614da9308d1efc"
+                      "bytes":  8101,
+                      "sha256":  "daa9521211ea824dc13a466232416dca06802447aed21afb6a24f2bb566346c2"
                   },
                   {
                       "name":  "ragelab_wasm.js",
-                      "bytes":  40062,
-                      "sha256":  "9853e40ad26ef69abf64790a61bf1ea653c7c3e8bb8c011df03277e2767f6c70"
+                      "bytes":  42855,
+                      "sha256":  "a215fe0eec67d311e767a75c96e627d27cb406641dc9327a896ae7f75fb70a51"
                   },
                   {
                       "name":  "ragelab_wasm_bg.wasm",
-                      "bytes":  610637,
-                      "sha256":  "afc3022ef0348b97138cdd1e818e90bbc46a4fd7546f512cf99bc52c6579b96d"
+                      "bytes":  635425,
+                      "sha256":  "90184868cf55d031950dfb8e92df60d94325e2ccce3e818dd18e840129ca9784"
                   },
                   {
                       "name":  "ragelab_wasm_bg.wasm.d.ts",
-                      "bytes":  3711,
-                      "sha256":  "4e80583b2bce1adc6d72d87a88880a0b67835adbce0bbba6610fb7e6efc4f926"
+                      "bytes":  3860,
+                      "sha256":  "1b90ffe045f0d8c69ddafa5a91f5292f84546ad66c32de9db0e65ed8c27ff534"
                   }
               ]
 }

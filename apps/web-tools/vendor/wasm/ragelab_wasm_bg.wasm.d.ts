@@ -14,6 +14,7 @@ export const capabilities: (a: number) => void;
 export const validateAsset: (a: number, b: number, c: number, d: number, e: number) => void;
 export const inspectYmap: (a: number, b: number, c: number) => void;
 export const inspectYtyp: (a: number, b: number, c: number) => void;
+export const resolveSuppliedYmapScene: (a: number, b: number, c: number, d: number) => void;
 export const inspectYtd: (a: number, b: number, c: number) => void;
 export const inspectYdrMaterials: (a: number, b: number, c: number) => void;
 export const inspectYddMaterials: (a: number, b: number, c: number) => void;
@@ -43,4 +44,5 @@ export const yddRebindShader: (a: number, b: number, c: number, d: number, e: nu
 export const yddRebindTexture: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => void;
 export const __wbindgen_malloc: (a: number, b: number) => number;
 export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+export const __wbindgen_exn_store: (a: number) => void;
 export const __wbindgen_add_to_stack_pointer: (a: number) => number;

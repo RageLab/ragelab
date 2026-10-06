@@ -4,6 +4,7 @@ import type { ChannelMode } from "./components/texture-preview";
 import { renderTexture } from "./components/texture-preview";
 import { YtdDocument } from "./ytd-document";
 import { createModelTool, type ModelToolDebugSnapshot } from "./model-tool";
+import { createYmapTool, type YmapToolDebugSnapshot } from "./ymap-tool";
 
 const q = <T extends Element>(selector: string): T => {
   const element = document.querySelector<T>(selector);
@@ -34,11 +35,14 @@ const semanticStatus = q<HTMLElement>("#semantic-status");
 const channelControls = q<HTMLElement>("#channel-controls");
 const ytdToolButton = q<HTMLButtonElement>("#tool-ytd");
 const modelToolButton = q<HTMLButtonElement>("#tool-model");
+const ymapToolButton = q<HTMLButtonElement>("#tool-ymap");
 const ytdToolPanel = q<HTMLElement>("#ytd-tool");
 const modelToolPanel = q<HTMLElement>("#model-tool");
+const ymapToolPanel = q<HTMLElement>("#ymap-tool");
 
 let documentState: YtdDocument | null = null;
 let modelTool: ReturnType<typeof createModelTool> | null = null;
+let ymapTool: ReturnType<typeof createYmapTool> | null = null;
 let selectedTexture = 0;
 let selectedMip = 0;
 let channel: ChannelMode = "rgba";
@@ -306,32 +310,45 @@ function ensureModelTool(): void {
   });
 }
 
-function selectTool(tool: "ytd" | "model"): void {
+function ensureYmapTool(): void {
+  ymapTool ??= createYmapTool({
+    onError: setError,
+    onSuccess: setSuccess,
+  });
+}
+
+function selectTool(tool: "ytd" | "model" | "ymap"): void {
+  const isYtd = tool === "ytd";
   const isModel = tool === "model";
-  ytdToolPanel.hidden = isModel;
+  const isYmap = tool === "ymap";
+  ytdToolPanel.hidden = !isYtd;
   modelToolPanel.hidden = !isModel;
-  ytdToolButton.classList.toggle("active", !isModel);
+  ymapToolPanel.hidden = !isYmap;
+  ytdToolButton.classList.toggle("active", isYtd);
   modelToolButton.classList.toggle("active", isModel);
-  ytdToolButton.setAttribute("aria-pressed", String(!isModel));
+  ymapToolButton.classList.toggle("active", isYmap);
+  ytdToolButton.setAttribute("aria-pressed", String(isYtd));
   modelToolButton.setAttribute("aria-pressed", String(isModel));
+  ymapToolButton.setAttribute("aria-pressed", String(isYmap));
   clearMessages();
-  if (isModel) {
-    try {
-      ensureModelTool();
-    } catch (error) {
-      setError(error);
-    }
+  try {
+    if (isModel) ensureModelTool();
+    if (isYmap) ensureYmapTool();
+  } catch (error) {
+    setError(error);
   }
 }
 
 ytdToolButton.addEventListener("click", () => selectTool("ytd"));
 modelToolButton.addEventListener("click", () => selectTool("model"));
+ymapToolButton.addEventListener("click", () => selectTool("ymap"));
 
 declare global {
   interface Window {
     __ragelabWebTools?: {
       probeMip(textureIndex: number, mipIndex: number): ReturnType<typeof probeMipError>;
       modelSnapshot(): ModelToolDebugSnapshot | null;
+      ymapSnapshot(): YmapToolDebugSnapshot | null;
     };
   }
 }
@@ -350,6 +367,9 @@ async function boot(): Promise<void> {
         },
         modelSnapshot() {
           return modelTool?.debugSnapshot() ?? null;
+        },
+        ymapSnapshot() {
+          return ymapTool?.debugSnapshot() ?? null;
         },
       };
     }

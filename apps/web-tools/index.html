@@ -22,6 +22,9 @@
         <button id="tool-model" class="tool-tab" type="button" aria-pressed="false">
           YDR / YDD / YFT Model Preview
         </button>
+        <button id="tool-ymap" class="tool-tab" type="button" aria-pressed="false">
+          YMAP Scene Preview
+        </button>
       </nav>
 
       <div id="error-panel" class="message error" role="alert" hidden></div>
@@ -228,6 +231,120 @@
             <div id="model-canvas-shell" class="model-canvas-shell"></div>
             <p class="viewport-help">Left drag orbit · wheel zoom · right drag pan · Z-up source coordinates</p>
           </section>
+        </main>
+      </section>
+
+      <section id="ymap-tool" hidden>
+        <section id="ymap-drop-zone" class="drop-zone" aria-label="Open YMAP scene">
+          <div>
+            <strong>Drop a user-supplied .ymap with optional dependencies</strong>
+            <p>Only supplied YTYP/YDR/YDD/YFT/YTD files participate. No filesystem scan, GTA install or keys.</p>
+          </div>
+          <div class="actions">
+            <label class="button primary">
+              Open YMAP
+              <input id="ymap-input" type="file" accept=".ymap,application/octet-stream" hidden />
+            </label>
+            <label class="button">
+              Set dependencies
+              <input
+                id="ymap-dependency-input"
+                type="file"
+                accept=".ytyp,.ydr,.ydd,.yft,.ytd,application/octet-stream"
+                multiple
+                hidden
+              />
+            </label>
+            <button id="ymap-fixture-button" class="button" type="button">Load synthetic scene</button>
+          </div>
+        </section>
+
+        <section class="dependency-bar panel">
+          <div>
+            <p class="eyebrow">Supplied-only catalog</p>
+            <strong>Rust/WASM dependency resolver</strong>
+            <p>Input order is deterministic. Missing and ambiguous providers fail closed.</p>
+          </div>
+          <div id="ymap-dependency-list" class="dependency-list">No supplied dependencies.</div>
+        </section>
+
+        <main class="ymap-workspace">
+          <section class="panel ymap-browser-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">YMAP hierarchy</p>
+                <h2 id="ymap-asset-name">No YMAP loaded</h2>
+              </div>
+            </div>
+            <p id="ymap-summary">Open a YMAP and optionally supply its local dependencies.</p>
+            <div id="ymap-entity-list" class="ymap-entity-list"></div>
+          </section>
+
+          <section class="panel ymap-preview-panel">
+            <div class="preview-toolbar model-toolbar">
+              <label>
+                View
+                <select id="ymap-view-select">
+                  <option value="auto">Auto</option>
+                  <option value="isometric">Isometric</option>
+                  <option value="front">Front</option>
+                  <option value="back">Back</option>
+                  <option value="left">Left</option>
+                  <option value="right">Right</option>
+                  <option value="top">Top</option>
+                </select>
+              </label>
+              <label class="toggle"><input id="ymap-grid-toggle" type="checkbox" checked /> Grid</label>
+              <label class="toggle"><input id="ymap-wire-toggle" type="checkbox" /> Wireframe</label>
+              <label class="toggle"><input id="ymap-bounds-toggle" type="checkbox" /> Bounds</label>
+              <button id="ymap-focus-button" class="button" type="button" disabled>Focus selected</button>
+              <label class="toggle">
+                <input id="ymap-isolate-toggle" type="checkbox" disabled /> Isolate selected
+              </label>
+            </div>
+            <div id="ymap-canvas-shell" class="model-canvas-shell ymap-canvas-shell"></div>
+            <p id="ymap-bounds" class="viewport-help">No scene bounds.</p>
+          </section>
+
+          <aside class="panel ymap-inspector-panel">
+            <div class="subheading">
+              <p class="eyebrow">Entity inspector</p>
+              <h2>Selection</h2>
+            </div>
+            <p id="ymap-inspector-empty">Select a resolved or unresolved entity.</p>
+            <div id="ymap-inspector" hidden>
+              <dl class="details">
+                <dt>Index</dt><dd id="ymap-inspector-index"></dd>
+                <dt>Archetype</dt><dd id="ymap-inspector-archetype"></dd>
+                <dt>Resolution</dt><dd id="ymap-inspector-resolution"></dd>
+                <dt>Parent</dt><dd id="ymap-inspector-parent"></dd>
+              </dl>
+              <div class="ymap-edit-grid">
+                <label>X <input id="ymap-position-x" type="number" step="any" /></label>
+                <label>Y <input id="ymap-position-y" type="number" step="any" /></label>
+                <label>Z <input id="ymap-position-z" type="number" step="any" /></label>
+                <label>Flags <input id="ymap-flags" type="number" min="0" step="1" /></label>
+              </div>
+              <button id="ymap-apply-button" class="button" type="button" disabled>
+                Apply safe metadata edit
+              </button>
+            </div>
+
+            <div class="subheading">
+              <p class="eyebrow">Diagnostics</p>
+            </div>
+            <div id="ymap-diagnostics" class="diagnostics ok">
+              Open a YMAP to resolve supplied dependencies.
+            </div>
+
+            <div class="write-status ymap-write-status">
+              <span>Semantic reopen</span>
+              <strong id="ymap-semantic-status">Original bytes</strong>
+            </div>
+            <button id="ymap-download-button" class="button primary" type="button" disabled>
+              Download edited YMAP
+            </button>
+          </aside>
         </main>
       </section>
     </div>

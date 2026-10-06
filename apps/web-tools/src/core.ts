@@ -2,8 +2,10 @@ import init, {
   exportYtdTexturePng,
   inspectYdd,
   inspectYft,
+  inspectYmap,
   inspectYtd,
   replaceYtdTexturePng,
+  resolveSuppliedYmapScene,
   validateAsset,
   yddEmbeddedTextureByName,
   yddModel,
@@ -11,6 +13,8 @@ import init, {
   ydrModel,
   yftEmbeddedTextureByName,
   yftModel,
+  ymapSetFlags,
+  ymapSetTransform,
   ytdTextureByName,
   ytdTextureMip,
 } from "@ragelab/wasm";
@@ -18,8 +22,10 @@ import {
   isModelMetadata,
   isTextureMetadata,
   isTextureReport,
+  isSuppliedYmapSceneReport,
   isYddInspectReport,
   isYftInspectReport,
+  isYmapInspectReport,
   type DiffuseResolution,
   type ModelDependency,
   type ModelFormat,
@@ -29,8 +35,10 @@ import {
   type TextureAuthoringReport,
   type TexturePacketLike,
   type TexturePacketMetadata,
+  type SuppliedYmapSceneReport,
   type YddInspectReport,
   type YftInspectReport,
+  type YmapInspectReport,
   wasmError,
 } from "./contracts";
 
@@ -114,6 +122,69 @@ export function modelPacket(
   } finally {
     packet.free?.();
   }
+}
+
+export function inspectYmapBytes(bytes: Uint8Array): YmapInspectReport {
+  const report = inspectYmap(bytes);
+  if (!isYmapInspectReport(report)) {
+    throw new Error("Rust/WASM returned an invalid YMAP report");
+  }
+  return report;
+}
+
+export function resolveSuppliedScene(
+  ymapBytes: Uint8Array,
+  dependencies: ModelDependency[],
+): SuppliedYmapSceneReport {
+  const report = resolveSuppliedYmapScene(
+    ymapBytes,
+    dependencies.map((dependency) => ({
+      name: dependency.name,
+      bytes: dependency.bytes,
+    })),
+  );
+  if (!isSuppliedYmapSceneReport(report)) {
+    throw new Error("Rust/WASM returned an invalid supplied YMAP scene report");
+  }
+  return report;
+}
+
+function validateEditedYmap(bytes: Uint8Array): YmapInspectReport {
+  const validation = validateAsset("ymap", bytes) as { valid?: unknown };
+  if (validation?.valid !== true) {
+    throw new Error("edited YMAP semantic reopen did not return valid=true");
+  }
+  return inspectYmapBytes(bytes);
+}
+
+export function setYmapEntityFlags(
+  bytes: Uint8Array,
+  entityIndex: number,
+  flags: number,
+): { bytes: Uint8Array; report: YmapInspectReport } {
+  const candidate = new Uint8Array(ymapSetFlags(bytes, entityIndex, flags));
+  return { bytes: candidate, report: validateEditedYmap(candidate) };
+}
+
+export function setYmapEntityTransform(
+  bytes: Uint8Array,
+  entityIndex: number,
+  position: [number, number, number],
+  rotation: [number, number, number, number],
+  scaleXY: number | null,
+  scaleZ: number | null,
+): { bytes: Uint8Array; report: YmapInspectReport } {
+  const candidate = new Uint8Array(
+    ymapSetTransform(
+      bytes,
+      entityIndex,
+      new Float32Array(position),
+      new Float32Array(rotation),
+      scaleXY,
+      scaleZ,
+    ),
+  );
+  return { bytes: candidate, report: validateEditedYmap(candidate) };
 }
 
 export function inspectYddBytes(bytes: Uint8Array): YddInspectReport {

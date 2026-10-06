@@ -152,6 +152,68 @@ export interface YftInspectReport {
   hasMainDrawable: boolean;
 }
 
+export interface YmapEntityReport {
+  index: number;
+  archetypeHash: string;
+  position: [number, number, number];
+  rotation: [number, number, number, number];
+  scaleXY: number | null;
+  scaleZ: number | null;
+  flags: number;
+  parentIndex: number | null;
+}
+
+export interface YmapInspectReport {
+  schema: "ragelab.wasm.ymap";
+  schemaVersion: number;
+  nameHash: string | null;
+  parentHash: string | null;
+  flags: number | null;
+  contentFlags: number | null;
+  physicsDictionaries: string[];
+  entitiesExtentsMin: [number, number, number] | null;
+  entitiesExtentsMax: [number, number, number] | null;
+  streamingExtentsMin: [number, number, number] | null;
+  streamingExtentsMax: [number, number, number] | null;
+  entities: YmapEntityReport[];
+}
+
+export interface SuppliedCatalogEntry {
+  index: number;
+  name: string;
+  format: "ytyp" | "ydr" | "ydd" | "yft" | "ytd";
+  nameHash: string;
+}
+
+export interface SuppliedModelResolution {
+  ytypDependencyIndex: number;
+  archetypeIndex: number;
+  modelDependencyIndex: number;
+  modelFormat: ModelFormat;
+  drawableIndex: number | null;
+  assetHash: string;
+  textureDictionaryHash: string | null;
+}
+
+export interface SuppliedSceneEntity extends YmapEntityReport {
+  resolution: SuppliedModelResolution | null;
+}
+
+export interface SuppliedSceneDiagnostic {
+  entityIndex: number | null;
+  code: string;
+  message: string;
+}
+
+export interface SuppliedYmapSceneReport {
+  schema: "ragelab.wasm.supplied-ymap-scene";
+  schemaVersion: number;
+  ymap: YmapInspectReport;
+  catalog: SuppliedCatalogEntry[];
+  entities: SuppliedSceneEntity[];
+  diagnostics: SuppliedSceneDiagnostic[];
+}
+
 export interface ModelDependency {
   name: string;
   bytes: Uint8Array;
@@ -217,6 +279,22 @@ export function isYftInspectReport(value: unknown): value is YftInspectReport {
   if (!value || typeof value !== "object") return false;
   const report = value as Partial<YftInspectReport>;
   return report.schema === "ragelab.wasm.yft" && typeof report.hasMainDrawable === "boolean";
+}
+
+export function isYmapInspectReport(value: unknown): value is YmapInspectReport {
+  if (!value || typeof value !== "object") return false;
+  const report = value as Partial<YmapInspectReport>;
+  return report.schema === "ragelab.wasm.ymap" && Array.isArray(report.entities);
+}
+
+export function isSuppliedYmapSceneReport(value: unknown): value is SuppliedYmapSceneReport {
+  if (!value || typeof value !== "object") return false;
+  const report = value as Partial<SuppliedYmapSceneReport>;
+  return report.schema === "ragelab.wasm.supplied-ymap-scene"
+    && isYmapInspectReport(report.ymap)
+    && Array.isArray(report.catalog)
+    && Array.isArray(report.entities)
+    && Array.isArray(report.diagnostics);
 }
 
 export function wasmError(error: unknown): WasmErrorReport {

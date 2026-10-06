@@ -4,6 +4,7 @@ export function capabilities(): any;
 export function validateAsset(format: string, bytes: Uint8Array): any;
 export function inspectYmap(bytes: Uint8Array): any;
 export function inspectYtyp(bytes: Uint8Array): any;
+export function resolveSuppliedYmapScene(ymap_bytes: Uint8Array, supplied: any): any;
 export function inspectYtd(bytes: Uint8Array): any;
 export function inspectYdrMaterials(bytes: Uint8Array): any;
 export function inspectYddMaterials(bytes: Uint8Array): any;
@@ -64,6 +65,7 @@ export interface InitOutput {
   readonly validateAsset: (a: number, b: number, c: number, d: number, e: number) => void;
   readonly inspectYmap: (a: number, b: number, c: number) => void;
   readonly inspectYtyp: (a: number, b: number, c: number) => void;
+  readonly resolveSuppliedYmapScene: (a: number, b: number, c: number, d: number) => void;
   readonly inspectYtd: (a: number, b: number, c: number) => void;
   readonly inspectYdrMaterials: (a: number, b: number, c: number) => void;
   readonly inspectYddMaterials: (a: number, b: number, c: number) => void;
@@ -93,6 +95,7 @@ export interface InitOutput {
   readonly yddRebindTexture: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => void;
   readonly __wbindgen_malloc: (a: number, b: number) => number;
   readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+  readonly __wbindgen_exn_store: (a: number) => void;
   readonly __wbindgen_add_to_stack_pointer: (a: number) => number;
 }
 
