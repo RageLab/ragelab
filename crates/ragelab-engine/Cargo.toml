@@ -8,8 +8,8 @@ rust-version.workspace = true
 [dependencies]
 base64 = "0.22"
 bincode = "1.3"
-png = "0.17"
 ragelab-assets = { path = "../ragelab-assets" }
+ragelab-authoring = { path = "../ragelab-authoring" }
 ragelab-hash = { path = "../ragelab-hash" }
 ragelab-meta = { path = "../ragelab-meta" }
 ragelab-resource = { path = "../ragelab-resource" }

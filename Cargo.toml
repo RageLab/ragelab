@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ragelab-hash",
     "crates/ragelab-assets",
+    "crates/ragelab-authoring",
     "crates/ragelab-engine",
     "crates/ragelab-render",
     "crates/ragelab-rpf",
@@ -18,6 +19,7 @@ members = [
     "crates/ragelab-yft",
     "crates/ragelab-ydd",
     "crates/ragelab-ybn",
+    "crates/ragelab-wasm",
     "apps/ragelab",
 ]
 

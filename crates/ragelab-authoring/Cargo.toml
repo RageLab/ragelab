@@ -1,0 +1,16 @@
+[package]
+name = "ragelab-authoring"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+png = "0.17"
+ragelab-ydd = { path = "../ragelab-ydd" }
+ragelab-ydr = { path = "../ragelab-ydr" }
+ragelab-ytd = { path = "../ragelab-ytd" }
+serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,15 @@
+{
+  "name": "@ragelab/wasm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "module": "./ragelab_wasm.js",
+  "types": "./ragelab_wasm.d.ts",
+  "files": [
+    "ragelab_wasm.js",
+    "ragelab_wasm.d.ts",
+    "ragelab_wasm_bg.wasm",
+    "ragelab_wasm_bg.wasm.d.ts"
+  ],
+  "sideEffects": false
+}
