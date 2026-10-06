@@ -1,16 +1,36 @@
 import init, {
   exportYtdTexturePng,
+  inspectYdd,
+  inspectYft,
   inspectYtd,
   replaceYtdTexturePng,
   validateAsset,
+  yddEmbeddedTextureByName,
+  yddModel,
+  ydrEmbeddedTextureByName,
+  ydrModel,
+  yftEmbeddedTextureByName,
+  yftModel,
+  ytdTextureByName,
   ytdTextureMip,
 } from "@ragelab/wasm";
 import {
+  isModelMetadata,
   isTextureMetadata,
   isTextureReport,
+  isYddInspectReport,
+  isYftInspectReport,
+  type DiffuseResolution,
+  type ModelDependency,
+  type ModelFormat,
+  type ModelPacketData,
+  type ModelPacketLike,
+  type ResolvedModelTexture,
   type TextureAuthoringReport,
   type TexturePacketLike,
   type TexturePacketMetadata,
+  type YddInspectReport,
+  type YftInspectReport,
   wasmError,
 } from "./contracts";
 
@@ -44,6 +64,143 @@ export function textureMip(
 
 export function exportTopMipPng(bytes: Uint8Array, textureIndex: number): Uint8Array {
   return exportYtdTexturePng(bytes, textureIndex);
+}
+
+function copyTexturePacket(
+  packet: TexturePacketLike,
+  source: ResolvedModelTexture["source"],
+  sourceName: string,
+): ResolvedModelTexture {
+  try {
+    const metadata = packet.metadata();
+    if (!isTextureMetadata(metadata)) {
+      throw new Error("Rust/WASM returned invalid texture metadata");
+    }
+    return {
+      metadata,
+      rgba: new Uint8Array(packet.rgba()),
+      source,
+      sourceName,
+    };
+  } finally {
+    packet.free?.();
+  }
+}
+
+export function modelPacket(
+  format: ModelFormat,
+  bytes: Uint8Array,
+  drawableIndex = 0,
+): ModelPacketData {
+  const packet = (
+    format === "ydr"
+      ? ydrModel(bytes)
+      : format === "ydd"
+        ? yddModel(bytes, drawableIndex)
+        : yftModel(bytes)
+  ) as ModelPacketLike;
+  try {
+    const metadata = packet.metadata();
+    if (!isModelMetadata(metadata)) {
+      throw new Error("Rust/WASM returned invalid model metadata");
+    }
+    return {
+      metadata,
+      positions: new Float32Array(packet.positions()),
+      normals: new Float32Array(packet.normals()),
+      uv0: new Float32Array(packet.uv0()),
+      indices: new Uint32Array(packet.indices()),
+    };
+  } finally {
+    packet.free?.();
+  }
+}
+
+export function inspectYddBytes(bytes: Uint8Array): YddInspectReport {
+  const report = inspectYdd(bytes);
+  if (!isYddInspectReport(report)) {
+    throw new Error("Rust/WASM returned an invalid YDD report");
+  }
+  return report;
+}
+
+export function inspectYftBytes(bytes: Uint8Array): YftInspectReport {
+  const report = inspectYft(bytes);
+  if (!isYftInspectReport(report)) {
+    throw new Error("Rust/WASM returned an invalid YFT report");
+  }
+  return report;
+}
+
+function embeddedDiffuse(
+  format: ModelFormat,
+  bytes: Uint8Array,
+  drawableIndex: number,
+  name: string,
+): TexturePacketLike {
+  if (format === "ydr") return ydrEmbeddedTextureByName(bytes, name) as TexturePacketLike;
+  if (format === "ydd") {
+    return yddEmbeddedTextureByName(bytes, drawableIndex, name) as TexturePacketLike;
+  }
+  return yftEmbeddedTextureByName(bytes, name) as TexturePacketLike;
+}
+
+export function resolveDiffuseTexture(
+  format: ModelFormat,
+  modelBytes: Uint8Array,
+  drawableIndex: number,
+  diffuseName: string,
+  dependencies: ModelDependency[],
+): DiffuseResolution {
+  const diagnostics: string[] = [];
+
+  try {
+    return {
+      texture: copyTexturePacket(
+        embeddedDiffuse(format, modelBytes, drawableIndex, diffuseName),
+        "embedded",
+        "embedded TextureDictionary",
+      ),
+      diagnostics,
+    };
+  } catch (error) {
+    const report = wasmError(error);
+    if (report.code !== "missingDependency" && report.code !== "textureNotFound") {
+      return {
+        texture: null,
+        diagnostics: [`embedded:${report.code}: ${report.message}`],
+      };
+    }
+  }
+
+  for (const dependency of dependencies) {
+    try {
+      return {
+        texture: copyTexturePacket(
+          ytdTextureByName(dependency.bytes, diffuseName) as TexturePacketLike,
+          "dependency",
+          dependency.name,
+        ),
+        diagnostics,
+      };
+    } catch (error) {
+      const report = wasmError(error);
+      if (report.code === "parseFailed") {
+        diagnostics.push(`${dependency.name}:parseFailed: ${report.message}`);
+        continue;
+      }
+      if (report.code === "textureNotFound") {
+        continue;
+      }
+      diagnostics.push(`${dependency.name}:${report.code}: ${report.message}`);
+      return { texture: null, diagnostics };
+    }
+  }
+
+  diagnostics.push(
+    `textureNotFound: ${JSON.stringify(diffuseName)} was not found in embedded data or supplied YTD dependencies`,
+  );
+  return { texture: null, diagnostics };
 }
 
 export function replaceTexturePng(

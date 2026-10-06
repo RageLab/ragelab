@@ -11,10 +11,12 @@
     "test:browser": "playwright test"
   },
   "dependencies": {
-    "@ragelab/wasm": "file:./vendor/wasm"
+    "@ragelab/wasm": "file:./vendor/wasm",
+    "three": "^0.186.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.55.1",
+    "@types/three": "^0.186.0",
     "typescript": "^5.9.3",
     "vite": "^7.1.7"
   }

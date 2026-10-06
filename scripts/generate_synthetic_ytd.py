@@ -7,6 +7,7 @@ constructed from scratch and contains no Rockstar/third-party asset data.
 
 from __future__ import annotations
 
+import argparse
 import struct
 import zlib
 from pathlib import Path
@@ -43,11 +44,11 @@ def pack_list_header(buffer: bytearray, offset: int, pointer: int, count: int, c
     struct.pack_into("<QHHI", buffer, offset, pointer, count, capacity, 0)
 
 
-def build() -> bytes:
+def build(texture_name: str = TEXTURE_NAME) -> bytes:
     system = bytearray(512)
     graphics = bytearray(512)
 
-    name_hash = joaat(TEXTURE_NAME)
+    name_hash = joaat(texture_name)
 
     # TextureDictionary / ResourceFileBase.
     struct.pack_into("<IIQ", system, 0x00, 0, 1, SYSTEM_BASE + PAGES_INFO_OFFSET)
@@ -74,7 +75,7 @@ def build() -> bytes:
     struct.pack_into("<B", system, TEXTURE_OFFSET + 0x5D, 1)  # one mip level
     struct.pack_into("<Q", system, TEXTURE_OFFSET + 0x70, GRAPHICS_BASE)
 
-    encoded_name = TEXTURE_NAME.encode("ascii") + b"\0"
+    encoded_name = texture_name.encode("ascii") + b"\0"
     system[NAME_OFFSET : NAME_OFFSET + len(encoded_name)] = encoded_name
 
     # 4x4 RGBA8 top mip: deterministic gradient-like pixels.
@@ -97,11 +98,16 @@ def build() -> bytes:
 
 
 def main() -> None:
-    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    data = build()
-    OUTPUT.write_bytes(data)
-    print(f"synthetic YTD: {OUTPUT}")
-    print(f"size={len(data)} bytes texture={TEXTURE_NAME} hash=0x{joaat(TEXTURE_NAME):08X}")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--name", default=TEXTURE_NAME, help="Synthetic texture name")
+    parser.add_argument("--output", type=Path, default=OUTPUT, help="Output YTD path")
+    args = parser.parse_args()
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    data = build(args.name)
+    args.output.write_bytes(data)
+    print(f"synthetic YTD: {args.output}")
+    print(f"size={len(data)} bytes texture={args.name} hash=0x{joaat(args.name):08X}")
 
 
 if __name__ == "__main__":

@@ -5,8 +5,9 @@ use ragelab_resource::Rsc7Resource;
 use ragelab_wasm::{
     capabilities, inspect_ydd, inspect_ydr_materials, inspect_yft, inspect_ymap, inspect_ytd,
     inspect_ytyp, validate_asset, wasm_export_ytd_texture_png, wasm_replace_ytd_texture_png,
-    ydd_model, ydd_rebind_texture, ydr_embedded_texture, ydr_model, ydr_rebind_texture, yft_model,
-    ymap_set_flags, ytd_texture, ytd_texture_mip,
+    ydd_model, ydd_rebind_texture, ydr_embedded_texture, ydr_embedded_texture_by_name, ydr_model,
+    ydr_rebind_texture, yft_model, ymap_set_flags, ytd_texture, ytd_texture_by_name,
+    ytd_texture_mip,
 };
 use ragelab_yft::YFT_LEGACY_VERSION;
 use wasm_bindgen::JsValue;
@@ -110,6 +111,34 @@ fn ydr_embedded_texture_packet_matches_proven_diffuse_binding() {
         field(&error, "code").as_string().as_deref(),
         Some("indexOutOfBounds")
     );
+
+    let by_name = ydr_embedded_texture_by_name(EMBEDDED_YDR, "embedded_diff").expect("name lookup");
+    assert_eq!(
+        field(&by_name.metadata().expect("metadata"), "name")
+            .as_string()
+            .as_deref(),
+        Some("embedded_diff")
+    );
+
+    let missing = match ydr_embedded_texture_by_name(EMBEDDED_YDR, "not_present") {
+        Ok(_) => panic!("unknown embedded texture name must fail closed"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        field(&missing, "code").as_string().as_deref(),
+        Some("textureNotFound")
+    );
+}
+
+#[wasm_bindgen_test]
+fn ytd_name_lookup_uses_core_name_or_hash_semantics() {
+    let indexed = ytd_texture(YTD, 0).expect("indexed YTD texture");
+    let metadata = indexed.metadata().expect("YTD metadata");
+    let name = field(&metadata, "name")
+        .as_string()
+        .expect("fixture texture name");
+    let named = ytd_texture_by_name(YTD, &name).expect("lookup YTD by Core name/hash semantics");
+    assert_eq!(named.rgba().to_vec(), indexed.rgba().to_vec());
 }
 
 #[wasm_bindgen_test]

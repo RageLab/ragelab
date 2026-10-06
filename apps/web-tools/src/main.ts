@@ -3,6 +3,7 @@ import { initCore, probeMipError, wasmError } from "./core";
 import type { ChannelMode } from "./components/texture-preview";
 import { renderTexture } from "./components/texture-preview";
 import { YtdDocument } from "./ytd-document";
+import { createModelTool, type ModelToolDebugSnapshot } from "./model-tool";
 
 const q = <T extends Element>(selector: string): T => {
   const element = document.querySelector<T>(selector);
@@ -31,8 +32,13 @@ const downloadButton = q<HTMLButtonElement>("#download-button");
 const writePolicy = q<HTMLElement>("#write-policy");
 const semanticStatus = q<HTMLElement>("#semantic-status");
 const channelControls = q<HTMLElement>("#channel-controls");
+const ytdToolButton = q<HTMLButtonElement>("#tool-ytd");
+const modelToolButton = q<HTMLButtonElement>("#tool-model");
+const ytdToolPanel = q<HTMLElement>("#ytd-tool");
+const modelToolPanel = q<HTMLElement>("#model-tool");
 
 let documentState: YtdDocument | null = null;
+let modelTool: ReturnType<typeof createModelTool> | null = null;
 let selectedTexture = 0;
 let selectedMip = 0;
 let channel: ChannelMode = "rgba";
@@ -293,10 +299,39 @@ downloadButton.addEventListener("click", () => {
   downloadBytes(documentState.bytes, `${stem}-rebuilt.ytd`, "application/octet-stream");
 });
 
+function ensureModelTool(): void {
+  modelTool ??= createModelTool({
+    onError: setError,
+    onSuccess: setSuccess,
+  });
+}
+
+function selectTool(tool: "ytd" | "model"): void {
+  const isModel = tool === "model";
+  ytdToolPanel.hidden = isModel;
+  modelToolPanel.hidden = !isModel;
+  ytdToolButton.classList.toggle("active", !isModel);
+  modelToolButton.classList.toggle("active", isModel);
+  ytdToolButton.setAttribute("aria-pressed", String(!isModel));
+  modelToolButton.setAttribute("aria-pressed", String(isModel));
+  clearMessages();
+  if (isModel) {
+    try {
+      ensureModelTool();
+    } catch (error) {
+      setError(error);
+    }
+  }
+}
+
+ytdToolButton.addEventListener("click", () => selectTool("ytd"));
+modelToolButton.addEventListener("click", () => selectTool("model"));
+
 declare global {
   interface Window {
     __ragelabWebTools?: {
       probeMip(textureIndex: number, mipIndex: number): ReturnType<typeof probeMipError>;
+      modelSnapshot(): ModelToolDebugSnapshot | null;
     };
   }
 }
@@ -312,6 +347,9 @@ async function boot(): Promise<void> {
             return { ok: false, code: "noDocument", message: "No YTD loaded" };
           }
           return probeMipError(documentState.bytes, textureIndex, mipIndex);
+        },
+        modelSnapshot() {
+          return modelTool?.debugSnapshot() ?? null;
         },
       };
     }

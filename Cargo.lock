@@ -932,6 +932,7 @@ version = "0.1.0"
 dependencies = [
  "js-sys",
  "ragelab-authoring",
+ "ragelab-hash",
  "ragelab-meta",
  "ragelab-resource",
  "ragelab-ydd",

@@ -12,6 +12,7 @@ OUTPUT_DIR = ROOT / "fixtures" / "synthetic" / "ydr"
 SIMPLE_OUTPUT = OUTPUT_DIR / "simple.ydr"
 EDITABLE_OUTPUT = OUTPUT_DIR / "editable.ydr"
 EMBEDDED_OUTPUT = OUTPUT_DIR / "embedded.ydr"
+EXTERNAL_OUTPUT = OUTPUT_DIR / "external-diffuse.ydr"
 
 SYSTEM_BASE = 0x50000000
 SYSTEM_SIZE = 2048
@@ -39,7 +40,7 @@ def write_f32(buffer: bytearray, offset: int, value: float) -> None:
     struct.pack_into("<f", buffer, offset, value)
 
 
-def generate(*, editable: bool = False, embedded: bool = False) -> bytes:
+def generate(*, editable: bool = False, embedded: bool = False, external: bool = False) -> bytes:
     system = bytearray(SYSTEM_SIZE)
 
     # Drawable root.
@@ -134,6 +135,8 @@ def generate(*, editable: bool = False, embedded: bool = False) -> bytes:
         add_editable_shader_layout(system)
     if embedded:
         add_embedded_diffuse_layout(system)
+    if external:
+        add_external_diffuse_layout(system)
 
     compressor = zlib.compressobj(level=6, wbits=-15)
     compressed = compressor.compress(bytes(system)) + compressor.flush()
@@ -195,6 +198,30 @@ def add_embedded_diffuse_layout(system: bytearray) -> None:
     system[0x640:0x648] = bytes([0x00, 0xF8, 0x00, 0x00, 0, 0, 0, 0])
 
 
+def add_external_diffuse_layout(system: bytearray) -> None:
+    """Add one proven diffuse shader whose texture must come from an external YTD."""
+
+    write_u64(system, 0x10, pointer(0x380))
+    write_u64(system, 0x380 + 0x10, pointer(0x3C0))
+    write_u16(system, 0x380 + 0x18, 1)
+    write_u16(system, 0x380 + 0x1A, 1)
+    write_u64(system, 0x3C0, pointer(0x3D0))
+
+    write_u64(system, 0x3D0, pointer(0x400))
+    write_u32(system, 0x3D0 + 0x08, 0x1111_2222)
+    system[0x3D0 + 0x10] = 1
+    write_u32(system, 0x3D0 + 0x18, 0x3333_4444)
+    system[0x3D0 + 0x27] = 1
+    system[0x400] = 0
+    write_u64(system, 0x408, pointer(0x440))
+    write_u32(system, 0x410, 0xF1FE_2B71)
+    write_u64(system, 0x440 + 0x28, pointer(0x500))
+    system[0x500:0x50D] = b"test_diffuse\0"
+
+    write_u64(system, 0x0F0 + 0x20, pointer(0x4C0))
+    write_u16(system, 0x4C0, 0)
+
+
 def add_editable_shader_layout(system: bytearray) -> None:
     """Add two existing shaders and two compatible texture bindings."""
 
@@ -240,6 +267,7 @@ def main() -> None:
         (SIMPLE_OUTPUT, dict(editable=False, embedded=False)),
         (EDITABLE_OUTPUT, dict(editable=True, embedded=False)),
         (EMBEDDED_OUTPUT, dict(editable=False, embedded=True)),
+        (EXTERNAL_OUTPUT, dict(editable=False, embedded=False, external=True)),
     ]
     for output, options in variants:
         output.write_bytes(generate(**options))

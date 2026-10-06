@@ -58,6 +58,115 @@ export interface TexturePacketMetadata {
 export interface TexturePacketLike {
   metadata(): unknown;
   rgba(): Uint8Array;
+  free?(): void;
+}
+
+export type ModelFormat = "ydr" | "ydd" | "yft";
+
+export interface ModelBounds {
+  center: [number, number, number];
+  radius: number;
+  min: [number, number, number];
+  max: [number, number, number];
+}
+
+export interface ModelShaderTextureReference {
+  parameterHash: string;
+  textureName: string | null;
+}
+
+export interface ModelShaderMetadata {
+  index: number;
+  nameHash: string;
+  fileHash: string;
+  diffuseTextureName: string | null;
+  textureReferences: ModelShaderTextureReference[];
+}
+
+export interface ModelPrimitiveMetadata {
+  index: number;
+  modelIndex: number;
+  geometryIndex: number;
+  shaderIndex: number | null;
+  topology: string;
+  positionFloatOffset: number;
+  vertexCount: number;
+  normalFloatOffset: number | null;
+  uvFloatOffset: number | null;
+  indexOffset: number;
+  indexCount: number;
+}
+
+export interface ModelMetadata {
+  schema: "ragelab.wasm.model";
+  schemaVersion: number;
+  format: ModelFormat;
+  selectorIndex: number | null;
+  selectorHash: string | null;
+  selectorName: string | null;
+  name: string | null;
+  lod: string;
+  coordinateConvention: string;
+  bounds: ModelBounds;
+  primitiveCount: number;
+  vertexCount: number;
+  indexCount: number;
+  embeddedTextureCount: number;
+  shaders: ModelShaderMetadata[];
+  primitives: ModelPrimitiveMetadata[];
+}
+
+export interface ModelPacketLike {
+  metadata(): unknown;
+  positions(): Float32Array;
+  normals(): Float32Array;
+  uv0(): Float32Array;
+  indices(): Uint32Array;
+  free?(): void;
+}
+
+export interface ModelPacketData {
+  metadata: ModelMetadata;
+  positions: Float32Array;
+  normals: Float32Array;
+  uv0: Float32Array;
+  indices: Uint32Array;
+}
+
+export interface YddEntryReport {
+  index: number;
+  nameHash: string;
+  name: string | null;
+}
+
+export interface YddInspectReport {
+  schema: "ragelab.wasm.ydd";
+  schemaVersion: number;
+  entries: YddEntryReport[];
+}
+
+export interface YftInspectReport {
+  schema: "ragelab.wasm.yft";
+  schemaVersion: number;
+  name: string | null;
+  hasMainDrawable: boolean;
+}
+
+export interface ModelDependency {
+  name: string;
+  bytes: Uint8Array;
+}
+
+export interface ResolvedModelTexture {
+  metadata: TexturePacketMetadata;
+  rgba: Uint8Array;
+  source: "embedded" | "dependency";
+  sourceName: string;
+}
+
+export interface DiffuseResolution {
+  texture: ResolvedModelTexture | null;
+  diagnostics: string[];
 }
 
 export interface WasmErrorReport {
@@ -84,6 +193,30 @@ export function isTextureMetadata(value: unknown): value is TexturePacketMetadat
     && typeof metadata.mipIndex === "number"
     && typeof metadata.width === "number"
     && typeof metadata.height === "number";
+}
+
+export function isModelMetadata(value: unknown): value is ModelMetadata {
+  if (!value || typeof value !== "object") return false;
+  const metadata = value as Partial<ModelMetadata>;
+  return metadata.schema === "ragelab.wasm.model"
+    && (metadata.format === "ydr" || metadata.format === "ydd" || metadata.format === "yft")
+    && typeof metadata.primitiveCount === "number"
+    && typeof metadata.vertexCount === "number"
+    && typeof metadata.indexCount === "number"
+    && Array.isArray(metadata.shaders)
+    && Array.isArray(metadata.primitives);
+}
+
+export function isYddInspectReport(value: unknown): value is YddInspectReport {
+  if (!value || typeof value !== "object") return false;
+  const report = value as Partial<YddInspectReport>;
+  return report.schema === "ragelab.wasm.ydd" && Array.isArray(report.entries);
+}
+
+export function isYftInspectReport(value: unknown): value is YftInspectReport {
+  if (!value || typeof value !== "object") return false;
+  const report = value as Partial<YftInspectReport>;
+  return report.schema === "ragelab.wasm.yft" && typeof report.hasMainDrawable === "boolean";
 }
 
 export function wasmError(error: unknown): WasmErrorReport {

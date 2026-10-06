@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 js-sys = "=0.3.77"
 ragelab-authoring = { path = "../ragelab-authoring" }
+ragelab-hash = { path = "../ragelab-hash" }
 ragelab-meta = { path = "../ragelab-meta" }
 ragelab-ymap = { path = "../ragelab-ymap" }
 ragelab-ytyp = { path = "../ragelab-ytyp" }

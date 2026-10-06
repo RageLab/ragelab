@@ -10,103 +10,226 @@
       <header class="topbar">
         <div>
           <p class="eyebrow">RageLab · Web Tools</p>
-          <h1>YTD Texture Viewer / Editor</h1>
+          <h1>Portable Legacy asset tools</h1>
         </div>
         <span id="core-status" class="badge">Initializing Rust/WASM…</span>
       </header>
 
-      <section id="drop-zone" class="drop-zone" aria-label="Open YTD">
-        <div>
-          <strong>Drop a user-supplied .ytd here</strong>
-          <p>Browser-only. No GTA install, RPF, keys or local bridge required.</p>
-        </div>
-        <div class="actions">
-          <label class="button primary">
-            Open YTD
-            <input id="asset-input" type="file" accept=".ytd,application/octet-stream" hidden />
-          </label>
-          <button id="fixture-button" class="button" type="button">Load synthetic fixture</button>
-        </div>
-      </section>
+      <nav class="tool-tabs" aria-label="Web tools">
+        <button id="tool-ytd" class="tool-tab active" type="button" aria-pressed="true">
+          YTD Texture Viewer / Editor
+        </button>
+        <button id="tool-model" class="tool-tab" type="button" aria-pressed="false">
+          YDR / YDD / YFT Model Preview
+        </button>
+      </nav>
 
       <div id="error-panel" class="message error" role="alert" hidden></div>
       <div id="success-panel" class="message success" role="status" hidden></div>
 
-      <main class="workspace">
-        <section class="panel browser-panel">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">Dictionary</p>
-              <h2 id="asset-name">No YTD loaded</h2>
-            </div>
-            <span id="texture-count" class="badge muted">0 textures</span>
+      <section id="ytd-tool">
+        <section id="drop-zone" class="drop-zone" aria-label="Open YTD">
+          <div>
+            <strong>Drop a user-supplied .ytd here</strong>
+            <p>Browser-only. No GTA install, RPF, keys or local bridge required.</p>
           </div>
-          <div class="table-wrap">
-            <table id="texture-table">
-              <thead>
-                <tr>
-                  <th>Name / hash</th>
-                  <th>Format</th>
-                  <th>Size</th>
-                  <th>Mips</th>
-                  <th>Edit</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
+          <div class="actions">
+            <label class="button primary">
+              Open YTD
+              <input id="asset-input" type="file" accept=".ytd,application/octet-stream" hidden />
+            </label>
+            <button id="fixture-button" class="button" type="button">Load synthetic fixture</button>
           </div>
         </section>
 
-        <section class="panel preview-panel">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">Preview</p>
-              <h2 id="selected-name">Select a texture</h2>
+        <main class="workspace">
+          <section class="panel browser-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Dictionary</p>
+                <h2 id="asset-name">No YTD loaded</h2>
+              </div>
+              <span id="texture-count" class="badge muted">0 textures</span>
             </div>
-            <span id="preview-dimensions" class="badge muted">—</span>
-          </div>
-
-          <div class="preview-toolbar">
-            <label>
-              Mip
-              <select id="mip-select" disabled></select>
-            </label>
-            <div id="channel-controls" class="segmented" aria-label="Texture channels">
-              <button type="button" data-channel="rgba" class="active">RGBA</button>
-              <button type="button" data-channel="rgb">RGB</button>
-              <button type="button" data-channel="r">R</button>
-              <button type="button" data-channel="g">G</button>
-              <button type="button" data-channel="b">B</button>
-              <button type="button" data-channel="a">A</button>
+            <div class="table-wrap">
+              <table id="texture-table">
+                <thead>
+                  <tr>
+                    <th>Name / hash</th>
+                    <th>Format</th>
+                    <th>Size</th>
+                    <th>Mips</th>
+                    <th>Edit</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
             </div>
+          </section>
+
+          <section class="panel preview-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Preview</p>
+                <h2 id="selected-name">Select a texture</h2>
+              </div>
+              <span id="preview-dimensions" class="badge muted">—</span>
+            </div>
+
+            <div class="preview-toolbar">
+              <label>
+                Mip
+                <select id="mip-select" disabled></select>
+              </label>
+              <div id="channel-controls" class="segmented" aria-label="Texture channels">
+                <button type="button" data-channel="rgba" class="active">RGBA</button>
+                <button type="button" data-channel="rgb">RGB</button>
+                <button type="button" data-channel="r">R</button>
+                <button type="button" data-channel="g">G</button>
+                <button type="button" data-channel="b">B</button>
+                <button type="button" data-channel="a">A</button>
+              </div>
+            </div>
+
+            <div class="canvas-shell">
+              <canvas id="texture-canvas" width="1" height="1"></canvas>
+            </div>
+
+            <dl id="texture-details" class="details"></dl>
+
+            <div class="actions editor-actions">
+              <button id="export-button" class="button" type="button" disabled>Export top mip PNG</button>
+              <label id="replace-label" class="button">
+                Replace from PNG
+                <input id="replace-input" type="file" accept="image/png,.png" hidden disabled />
+              </label>
+              <button id="reset-button" class="button" type="button" disabled>Reset</button>
+              <button id="download-button" class="button primary" type="button" disabled>
+                Download rebuilt YTD
+              </button>
+            </div>
+
+            <div class="write-status">
+              <span>Write policy</span>
+              <strong id="write-policy">No texture selected</strong>
+              <span>Semantic reopen</span>
+              <strong id="semantic-status">Not run</strong>
+            </div>
+          </section>
+        </main>
+      </section>
+
+      <section id="model-tool" hidden>
+        <section id="model-drop-zone" class="drop-zone" aria-label="Open model">
+          <div>
+            <strong>Drop a user-supplied .ydr, .ydd or .yft here</strong>
+            <p>Geometry/material identity comes from Rust/WASM typed packets. Three.js only renders them.</p>
           </div>
-
-          <div class="canvas-shell">
-            <canvas id="texture-canvas" width="1" height="1"></canvas>
-          </div>
-
-          <dl id="texture-details" class="details"></dl>
-
-          <div class="actions editor-actions">
-            <button id="export-button" class="button" type="button" disabled>Export top mip PNG</button>
-            <label id="replace-label" class="button">
-              Replace from PNG
-              <input id="replace-input" type="file" accept="image/png,.png" hidden disabled />
+          <div class="actions">
+            <label class="button primary">
+              Open model
+              <input
+                id="model-input"
+                type="file"
+                accept=".ydr,.ydd,.yft,application/octet-stream"
+                hidden
+              />
             </label>
-            <button id="reset-button" class="button" type="button" disabled>Reset</button>
-            <button id="download-button" class="button primary" type="button" disabled>
-              Download rebuilt YTD
-            </button>
-          </div>
-
-          <div class="write-status">
-            <span>Write policy</span>
-            <strong id="write-policy">No texture selected</strong>
-            <span>Semantic reopen</span>
-            <strong id="semantic-status">Not run</strong>
+            <button id="model-fixture-embedded" class="button" type="button">Embedded YDR fixture</button>
+            <button id="model-fixture-ydd" class="button" type="button">YDD fixture</button>
           </div>
         </section>
-      </main>
+
+        <section class="dependency-bar panel">
+          <div>
+            <p class="eyebrow">Optional dependencies</p>
+            <strong>Caller-supplied YTD dictionaries</strong>
+            <p>Embedded textures win; supplied YTDs are searched in the selected file order.</p>
+          </div>
+          <label class="button">
+            Set YTD dependencies
+            <input
+              id="model-dependency-input"
+              type="file"
+              accept=".ytd,application/octet-stream"
+              multiple
+              hidden
+            />
+          </label>
+          <div id="model-dependency-list" class="dependency-list"></div>
+        </section>
+
+        <main class="model-workspace">
+          <section class="panel model-info-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Model</p>
+                <h2 id="model-asset-name">No model loaded</h2>
+              </div>
+            </div>
+            <div class="model-meta">
+              <p id="model-summary">Open a YDR, YDD drawable or pristine YFT main drawable.</p>
+              <label id="model-drawable-wrap" hidden>
+                YDD drawable
+                <select id="model-drawable-select"></select>
+              </label>
+            </div>
+
+            <div class="subheading">
+              <p class="eyebrow">Proven diffuse bindings</p>
+              <h2>Materials</h2>
+            </div>
+            <div class="table-wrap model-materials">
+              <table id="model-material-table">
+                <thead>
+                  <tr>
+                    <th>Shader</th>
+                    <th>Diffuse</th>
+                    <th>Source</th>
+                    <th>Texture</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+
+            <div class="subheading">
+              <p class="eyebrow">Diagnostics</p>
+            </div>
+            <div id="model-diagnostics" class="diagnostics ok">
+              No unresolved proven diffuse bindings.
+            </div>
+          </section>
+
+          <section class="panel model-preview-panel">
+            <div class="preview-toolbar model-toolbar">
+              <label>
+                View
+                <select id="model-view-select">
+                  <option value="auto">Auto</option>
+                  <option value="isometric">Isometric</option>
+                  <option value="front">Front</option>
+                  <option value="back">Back</option>
+                  <option value="left">Left</option>
+                  <option value="right">Right</option>
+                  <option value="top">Top</option>
+                </select>
+              </label>
+              <label class="toggle"><input id="model-grid-toggle" type="checkbox" checked /> Grid</label>
+              <label class="toggle"><input id="model-wire-toggle" type="checkbox" /> Wireframe</label>
+              <label class="toggle"><input id="model-bounds-toggle" type="checkbox" /> Bounds</label>
+              <button id="model-turntable-button" class="button" type="button" aria-pressed="false" disabled>
+                Turntable
+              </button>
+              <button id="model-screenshot-button" class="button primary" type="button" disabled>
+                Screenshot PNG
+              </button>
+            </div>
+            <div id="model-canvas-shell" class="model-canvas-shell"></div>
+            <p class="viewport-help">Left drag orbit · wheel zoom · right drag pan · Z-up source coordinates</p>
+          </section>
+        </main>
+      </section>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
