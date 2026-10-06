@@ -16,7 +16,7 @@ use wgpu::util::DeviceExt;
 
 use crate::{
     CameraSnapshot, GpuCacheBudget, OffscreenOptions, PickResult, Projection, RenderError,
-    RenderResult, RenderView, RenderedImage, ViewportOptions, ViewportStats,
+    RenderResult, RenderView, RenderedImage, TransformGizmoMode, ViewportOptions, ViewportStats,
 };
 
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -118,6 +118,38 @@ fn fs_line() -> @location(0) vec4<f32> {
 }
 "#;
 
+const GIZMO_SHADER: &str = r#"
+struct Camera {
+    view_proj: mat4x4<f32>,
+    light_dir: vec4<f32>,
+    camera_pos: vec4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> camera: Camera;
+
+struct GizmoVertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+@vertex
+fn vs_gizmo(
+    @location(0) position: vec3<f32>,
+    @location(1) color: vec4<f32>,
+) -> GizmoVertexOutput {
+    var output: GizmoVertexOutput;
+    output.position = camera.view_proj * vec4<f32>(position, 1.0);
+    output.color = color;
+    return output;
+}
+
+@fragment
+fn fs_gizmo(input: GizmoVertexOutput) -> @location(0) vec4<f32> {
+    return input.color;
+}
+"#;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CameraUniform {
@@ -132,6 +164,13 @@ struct ModelUniform {
     model: [[f32; 4]; 4],
     normal: [[f32; 4]; 4],
     style: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable, PartialEq)]
+struct GizmoVertex {
+    position: [f32; 3],
+    color: [f32; 4],
 }
 
 struct ModelBinding {
@@ -1364,12 +1403,14 @@ pub struct SurfaceRenderer {
     depth_view: wgpu::TextureView,
     mesh_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
+    gizmo_pipeline: wgpu::RenderPipeline,
     options: ViewportOptions,
     package: Option<RenderPackage>,
     draws: Vec<DrawInstance>,
     world_bounds: Option<Aabb>,
     camera: Option<OrbitCamera>,
     selected_node_index: Option<u32>,
+    gizmo_mode: Option<TransformGizmoMode>,
     hidden_node_indices: HashSet<u32>,
     show_base_game: bool,
     show_local_overlays: bool,
@@ -1432,7 +1473,7 @@ impl SurfaceRenderer {
         surface.configure(&gpu.device, &config);
         let (depth_texture, depth_view) =
             create_depth_target(&gpu.device, options.width, options.height);
-        let (mesh_pipeline, line_pipeline) = create_pipelines_for_format(
+        let (mesh_pipeline, line_pipeline, gizmo_pipeline) = create_pipelines_for_format(
             &gpu.device,
             &gpu.camera_layout,
             &gpu.model_layout,
@@ -1448,12 +1489,14 @@ impl SurfaceRenderer {
             depth_view,
             mesh_pipeline,
             line_pipeline,
+            gizmo_pipeline,
             options,
             package: None,
             draws: Vec::new(),
             world_bounds: None,
             camera: None,
             selected_node_index: None,
+            gizmo_mode: None,
             hidden_node_indices: HashSet::new(),
             show_base_game: true,
             show_local_overlays: true,
@@ -1516,12 +1559,16 @@ impl SurfaceRenderer {
         } else {
             OrbitCamera::fit(world_bounds, self.options.projection)
         };
+        let selected_node_index = preserve_camera
+            .then_some(self.selected_node_index)
+            .flatten()
+            .filter(|selected| draws.iter().any(|draw| draw.node_index == Some(*selected)));
         let gpu_budget_overflow = self.gpu.evict_to_budget(&package, self.gpu_cache_budget);
         self.package = Some(package);
         self.draws = draws;
         self.world_bounds = Some(world_bounds);
         self.camera = Some(camera);
-        self.selected_node_index = None;
+        self.selected_node_index = selected_node_index;
         self.hidden_node_indices.clear();
         self.gpu_budget_overflow = gpu_budget_overflow;
         self.scene_load_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -1556,6 +1603,10 @@ impl SurfaceRenderer {
         self.options.grid = grid;
         self.options.wireframe = wireframe;
         self.options.bounds = bounds;
+    }
+
+    pub fn set_gizmo_mode(&mut self, mode: Option<TransformGizmoMode>) {
+        self.gizmo_mode = mode;
     }
 
     pub fn orbit(&mut self, delta_x: f32, delta_y: f32) {
@@ -1781,6 +1832,32 @@ impl SurfaceRenderer {
                     usage: wgpu::BufferUsages::VERTEX,
                 })
         });
+        let gizmo_vertices =
+            self.gizmo_mode
+                .and_then(|mode| {
+                    let selected = self.selected_node_index?;
+                    let draw = self.draws.iter().find(|draw| {
+                        draw.node_index == Some(selected) && self.draw_visible(draw)
+                    })?;
+                    let center = draw.world_bounds.center();
+                    let distance = (camera.eye() - center).length().max(0.1);
+                    let size = draw
+                        .world_bounds
+                        .radius()
+                        .max(distance * 0.08)
+                        .clamp(0.15, distance * 0.3);
+                    Some(build_transform_gizmo_vertices(center, size, mode))
+                })
+                .unwrap_or_default();
+        let gizmo_buffer = (!gizmo_vertices.is_empty()).then(|| {
+            self.gpu
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("RageLab transform gizmo lines"),
+                    contents: bytemuck::cast_slice(&gizmo_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
 
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
@@ -1884,6 +1961,12 @@ impl SurfaceRenderer {
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..overlay_vertices.len() as u32, 0..1);
             }
+
+            if let Some(buffer) = gizmo_buffer.as_ref() {
+                pass.set_pipeline(&self.gizmo_pipeline);
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..gizmo_vertices.len() as u32, 0..1);
+            }
         }
 
         self.gpu.queue.submit(Some(encoder.finish()));
@@ -1923,7 +2006,11 @@ fn create_pipelines_for_format(
     model_layout: &wgpu::BindGroupLayout,
     material_layout: &wgpu::BindGroupLayout,
     format: wgpu::TextureFormat,
-) -> (wgpu::RenderPipeline, wgpu::RenderPipeline) {
+) -> (
+    wgpu::RenderPipeline,
+    wgpu::RenderPipeline,
+    wgpu::RenderPipeline,
+) {
     let mesh_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("RageLab native mesh shader"),
         source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(MESH_SHADER)),
@@ -1931,6 +2018,10 @@ fn create_pipelines_for_format(
     let line_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("RageLab native line shader"),
         source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(LINE_SHADER)),
+    });
+    let gizmo_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("RageLab native gizmo shader"),
+        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(GIZMO_SHADER)),
     });
     let mesh_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("RageLab native mesh pipeline layout"),
@@ -1942,10 +2033,17 @@ fn create_pipelines_for_format(
         bind_group_layouts: &[camera_layout, model_layout],
         push_constant_ranges: &[],
     });
+    let gizmo_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("RageLab native gizmo pipeline layout"),
+        bind_group_layouts: &[camera_layout],
+        push_constant_ranges: &[],
+    });
     const POSITION_ATTRIBUTES: [wgpu::VertexAttribute; 1] =
         wgpu::vertex_attr_array![0 => Float32x3];
     const NORMAL_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![1 => Float32x3];
     const UV_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![2 => Float32x2];
+    const GIZMO_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
+        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4];
 
     let mesh_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("RageLab native mesh pipeline"),
@@ -2047,7 +2145,45 @@ fn create_pipelines_for_format(
         cache: None,
     });
 
-    (mesh_pipeline, line_pipeline)
+    let gizmo_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("RageLab native gizmo pipeline"),
+        layout: Some(&gizmo_layout),
+        vertex: wgpu::VertexState {
+            module: &gizmo_shader,
+            entry_point: "vs_gizmo",
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<GizmoVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &GIZMO_ATTRIBUTES,
+            }],
+            compilation_options: Default::default(),
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::LineList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &gizmo_shader,
+            entry_point: "fs_gizmo",
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        multiview: None,
+        cache: None,
+    });
+
+    (mesh_pipeline, line_pipeline, gizmo_pipeline)
 }
 
 fn ray_aabb(origin: Vec3, direction: Vec3, bounds: Aabb) -> Option<f32> {
@@ -2388,6 +2524,77 @@ fn build_overlay_vertices(bounds: Aabb, options: OffscreenOptions) -> Vec<[f32; 
     vertices
 }
 
+fn build_transform_gizmo_vertices(
+    center: Vec3,
+    size: f32,
+    mode: TransformGizmoMode,
+) -> Vec<GizmoVertex> {
+    const X_COLOR: [f32; 4] = [0.96, 0.22, 0.18, 1.0];
+    const Y_COLOR: [f32; 4] = [0.28, 0.86, 0.34, 1.0];
+    const Z_COLOR: [f32; 4] = [0.22, 0.48, 1.0, 1.0];
+    let size = size.max(0.001);
+    let axes = [
+        (Vec3::X, Vec3::Y, Vec3::Z, X_COLOR),
+        (Vec3::Y, Vec3::Z, Vec3::X, Y_COLOR),
+        (Vec3::Z, Vec3::X, Vec3::Y, Z_COLOR),
+    ];
+    let mut vertices = Vec::new();
+
+    match mode {
+        TransformGizmoMode::Translate => {
+            for (axis, side_a, side_b, color) in axes {
+                let tip = center + axis * size;
+                push_gizmo_line(&mut vertices, center, tip, color);
+                let back = tip - axis * (size * 0.18);
+                let wing = size * 0.08;
+                for offset in [side_a * wing, -side_a * wing, side_b * wing, -side_b * wing] {
+                    push_gizmo_line(&mut vertices, tip, back + offset, color);
+                }
+            }
+        }
+        TransformGizmoMode::Rotate => {
+            const SEGMENTS: usize = 48;
+            let radius = size * 0.78;
+            for (_axis, side_a, side_b, color) in axes {
+                for segment in 0..SEGMENTS {
+                    let a0 = segment as f32 * std::f32::consts::TAU / SEGMENTS as f32;
+                    let a1 = (segment + 1) as f32 * std::f32::consts::TAU / SEGMENTS as f32;
+                    let p0 = center + (side_a * a0.cos() + side_b * a0.sin()) * radius;
+                    let p1 = center + (side_a * a1.cos() + side_b * a1.sin()) * radius;
+                    push_gizmo_line(&mut vertices, p0, p1, color);
+                }
+            }
+        }
+        TransformGizmoMode::Scale => {
+            for (axis, side_a, side_b, color) in axes {
+                let tip = center + axis * size;
+                push_gizmo_line(&mut vertices, center, tip, color);
+                let marker = size * 0.075;
+                let a = tip + side_a * marker + side_b * marker;
+                let b = tip - side_a * marker + side_b * marker;
+                let c = tip - side_a * marker - side_b * marker;
+                let d = tip + side_a * marker - side_b * marker;
+                for (from, to) in [(a, b), (b, c), (c, d), (d, a)] {
+                    push_gizmo_line(&mut vertices, from, to, color);
+                }
+            }
+        }
+    }
+
+    vertices
+}
+
+fn push_gizmo_line(vertices: &mut Vec<GizmoVertex>, from: Vec3, to: Vec3, color: [f32; 4]) {
+    vertices.push(GizmoVertex {
+        position: from.to_array(),
+        color,
+    });
+    vertices.push(GizmoVertex {
+        position: to.to_array(),
+        color,
+    });
+}
+
 fn nice_grid_spacing(target: f32) -> f32 {
     if !target.is_finite() || target <= 0.0 {
         return 1.0;
@@ -2447,6 +2654,24 @@ mod tests {
         assert!(draw_visibility(Some(1), true, &hidden, false, true));
         assert!(!draw_visibility(Some(1), true, &hidden, true, false));
         assert!(draw_visibility(None, false, &hidden, true, true));
+    }
+
+    #[test]
+    fn transform_gizmo_geometry_is_deterministic_per_mode() {
+        let center = Vec3::new(10.0, -5.0, 2.0);
+        let translate = build_transform_gizmo_vertices(center, 2.0, TransformGizmoMode::Translate);
+        let rotate = build_transform_gizmo_vertices(center, 2.0, TransformGizmoMode::Rotate);
+        let scale = build_transform_gizmo_vertices(center, 2.0, TransformGizmoMode::Scale);
+
+        assert_eq!(translate.len(), 30);
+        assert_eq!(rotate.len(), 288);
+        assert_eq!(scale.len(), 30);
+        assert_eq!(translate[0].position, center.to_array());
+        assert_eq!(translate[1].position, (center + Vec3::X * 2.0).to_array());
+        assert_eq!(translate[0].color, [0.96, 0.22, 0.18, 1.0]);
+        assert!(rotate
+            .iter()
+            .all(|vertex| vertex.position.iter().all(|value| value.is_finite())));
     }
 
     #[test]

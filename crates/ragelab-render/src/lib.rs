@@ -116,6 +116,33 @@ impl Projection {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TransformGizmoMode {
+    Translate,
+    Rotate,
+    Scale,
+}
+
+impl TransformGizmoMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "translate" | "move" => Some(Self::Translate),
+            "rotate" => Some(Self::Rotate),
+            "scale" => Some(Self::Scale),
+            _ => None,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Translate => "translate",
+            Self::Rotate => "rotate",
+            Self::Scale => "scale",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OffscreenOptions {
