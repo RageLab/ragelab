@@ -9,12 +9,12 @@ use ragelab_assets::{parse_gtxd_rbf, TextureParentRelationship};
 use ragelab_hash::joaat;
 use ragelab_rpf::{GtaKeyStore, GtaKeys, Rpf7Archive, RpfEntryLocator};
 use ragelab_ymap::{Vec3 as YmapVec3, Ymap};
-use ragelab_ytyp::{AssetType, Ytyp};
+use ragelab_ytyp::{AssetType, MloDef, MloEntity, Vec3 as YtypVec3, Ytyp};
 use serde::{Deserialize, Serialize};
 
 use crate::gta_rpf_archive_order;
 
-const GTA_RPF_INDEX_SCHEMA_VERSION: u32 = 4;
+const GTA_RPF_INDEX_SCHEMA_VERSION: u32 = 5;
 const WORLD_SPATIAL_CELL_SIZE: f32 = 512.0;
 const WORLD_SPATIAL_MAX_CELLS_PER_MAP: i64 = 4_096;
 const WORLD_SPATIAL_MAX_QUERY_CELLS: i64 = 16_384;
@@ -251,6 +251,66 @@ pub struct GtaRpfWorldEntityRecord {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GtaRpfMloEntityRecord {
+    pub index: u32,
+    pub archetype_hash: u32,
+    pub position: GtaRpfWorldPoint,
+    pub rotation: [f32; 4],
+    pub scale_xy: Option<f32>,
+    pub scale_z: Option<f32>,
+    pub flags: u32,
+    pub parent_index: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GtaRpfMloRoomRecord {
+    pub index: u32,
+    pub name: String,
+    pub bounds: GtaRpfWorldBounds,
+    pub flags: u32,
+    pub portal_count: u32,
+    pub floor_id: i32,
+    pub attached_objects: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GtaRpfMloPortalRecord {
+    pub index: u32,
+    pub room_from: u32,
+    pub room_to: u32,
+    pub flags: u32,
+    pub mirror_priority: u32,
+    pub opacity: u32,
+    pub audio_occlusion: u32,
+    pub corners: Vec<GtaRpfWorldPoint>,
+    pub attached_objects: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GtaRpfMloEntitySetRecord {
+    pub index: u32,
+    pub name_hash: u32,
+    pub locations: Vec<i32>,
+    pub entities: Vec<GtaRpfMloEntityRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GtaRpfMloRecord {
+    pub provider: GtaRpfIndexLocator,
+    pub archetype_hash: u32,
+    pub bounds: GtaRpfWorldBounds,
+    pub entities: Vec<GtaRpfMloEntityRecord>,
+    pub rooms: Vec<GtaRpfMloRoomRecord>,
+    pub portals: Vec<GtaRpfMloPortalRecord>,
+    pub entity_sets: Vec<GtaRpfMloEntitySetRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GtaRpfWorldMapRecord {
     pub provider: GtaRpfIndexLocator,
     pub file_name_hash: u32,
@@ -283,6 +343,33 @@ pub struct GtaRpfYtypRecord {
     pub name_hash: Option<u32>,
     pub dependencies: Vec<u32>,
     pub archetype_hashes: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MloWinnerSet {
+    load_rank: u32,
+    candidates: Vec<GtaRpfMloRecord>,
+}
+
+impl MloWinnerSet {
+    fn insert(&mut self, load_rank: u32, candidate: GtaRpfMloRecord) {
+        if load_rank > self.load_rank {
+            self.load_rank = load_rank;
+            self.candidates.clear();
+            self.candidates.push(candidate);
+            return;
+        }
+        if load_rank == self.load_rank
+            && !self
+                .candidates
+                .iter()
+                .any(|existing| existing.provider == candidate.provider)
+        {
+            self.candidates.push(candidate);
+            self.candidates
+                .sort_by(|left, right| left.provider.cmp(&right.provider));
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -503,6 +590,7 @@ pub struct GtaRpfAssetIndex {
     fingerprint: GtaRpfInstallationFingerprint,
     files: BTreeMap<(GtaRpfAssetKind, u32), WinnerSet<GtaRpfIndexLocator>>,
     archetypes: BTreeMap<u32, WinnerSet<GtaRpfArchetypeRecord>>,
+    mlos: BTreeMap<u32, MloWinnerSet>,
     texture_parents: BTreeMap<u32, WinnerSet<GtaRpfTextureParentRecord>>,
     ytyps: BTreeMap<u32, WinnerSet<GtaRpfYtypRecord>>,
     world_maps: BTreeMap<u32, WorldMapWinnerSet>,
@@ -526,6 +614,10 @@ pub struct GtaRpfIndexBuildReport {
     pub parsed_gtxd_files: usize,
     pub archetypes: usize,
     pub ytyp_records: usize,
+    pub mlo_records: usize,
+    pub mlo_entities: usize,
+    pub mlo_rooms: usize,
+    pub mlo_portals: usize,
     pub world_maps: usize,
     pub world_entities: usize,
     pub file_keys: usize,
@@ -543,6 +635,24 @@ pub struct GtaRpfIndexCacheReport {
     pub cache_hit: bool,
     pub fingerprint: GtaRpfInstallationFingerprint,
     pub build: Option<GtaRpfIndexBuildReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GtaRpfMloValidationReport {
+    pub schema: &'static str,
+    pub schema_version: u32,
+    pub archetype_hash: u32,
+    pub provider: GtaRpfIndexLocator,
+    pub indexed_entities: usize,
+    pub indexed_rooms: usize,
+    pub indexed_portals: usize,
+    pub indexed_entity_sets: usize,
+    pub source_entities: usize,
+    pub source_rooms: usize,
+    pub source_portals: usize,
+    pub source_entity_sets: usize,
+    pub exact_match: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -650,6 +760,7 @@ impl GtaRpfAssetIndex {
             fingerprint,
             files: BTreeMap::new(),
             archetypes: BTreeMap::new(),
+            mlos: BTreeMap::new(),
             texture_parents: BTreeMap::new(),
             ytyps: BTreeMap::new(),
             world_maps: BTreeMap::new(),
@@ -702,6 +813,10 @@ impl GtaRpfAssetIndex {
                 parsed_gtxd_files: scan.parsed_gtxd_files,
                 archetypes: index.archetypes.len(),
                 ytyp_records: index.ytyps.len(),
+                mlo_records: index.mlos.len(),
+                mlo_entities: scan.mlo_entities,
+                mlo_rooms: scan.mlo_rooms,
+                mlo_portals: scan.mlo_portals,
                 world_maps: index.world_maps.len(),
                 world_entities: scan.world_entities,
                 file_keys: index.files.len(),
@@ -763,6 +878,97 @@ impl GtaRpfAssetIndex {
             .get(&hash)
             .map(|winner| winner.candidates.as_slice())
             .unwrap_or(&[])
+    }
+
+    pub fn mlo_candidates(&self, archetype_hash: u32) -> &[GtaRpfMloRecord] {
+        self.mlos
+            .get(&archetype_hash)
+            .map(|winner| winner.candidates.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn representative_mlo_hash(&self) -> Option<u32> {
+        self.mlos
+            .iter()
+            .filter_map(|(hash, winner)| {
+                let [record] = winner.candidates.as_slice() else {
+                    return None;
+                };
+                if record.entities.is_empty()
+                    || record.rooms.is_empty()
+                    || record.portals.is_empty()
+                {
+                    return None;
+                }
+                Some((
+                    record.entities.len() + record.rooms.len() + record.portals.len(),
+                    *hash,
+                ))
+            })
+            .max_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)))
+            .map(|(_, hash)| hash)
+    }
+
+    pub fn validate_mlo_provider(
+        &self,
+        archetype_hash: u32,
+        game_root: &Path,
+        keys_path: &Path,
+    ) -> Result<GtaRpfMloValidationReport, io::Error> {
+        let [record] = self.mlo_candidates(archetype_hash) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("MLO 0x{archetype_hash:08X} is missing or ambiguous in the selected index"),
+            ));
+        };
+        let locator = record.provider.materialize(game_root, keys_path);
+        let bytes = locator.read().map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{}: MLO provider read failed: {error}",
+                    locator.provenance()
+                ),
+            )
+        })?;
+        let ytyp = Ytyp::from_bytes(&bytes).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{}: MLO provider parse failed: {error}",
+                    locator.provenance()
+                ),
+            )
+        })?;
+        let source = ytyp
+            .mlos
+            .iter()
+            .find(|mlo| mlo.archetype_name.0 == archetype_hash)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{}: provider does not contain MLO 0x{archetype_hash:08X}",
+                        locator.provenance()
+                    ),
+                )
+            })?;
+        let normalized = mlo_record(record.provider.clone(), source);
+        Ok(GtaRpfMloValidationReport {
+            schema: "ragelab.gta.mlo-validation",
+            schema_version: GTA_RPF_INDEX_SCHEMA_VERSION,
+            archetype_hash,
+            provider: record.provider.clone(),
+            indexed_entities: record.entities.len(),
+            indexed_rooms: record.rooms.len(),
+            indexed_portals: record.portals.len(),
+            indexed_entity_sets: record.entity_sets.len(),
+            source_entities: source.entities.len(),
+            source_rooms: source.rooms.len(),
+            source_portals: source.portals.len(),
+            source_entity_sets: source.entity_sets.len(),
+            exact_match: normalized == *record,
+        })
     }
 
     pub fn texture_parent_candidates(&self, child_hash: u32) -> &[GtaRpfTextureParentRecord] {
@@ -1249,7 +1455,19 @@ impl GtaRpfAssetIndex {
     }
 
     pub fn plan_for_archetypes(&self, hashes: impl IntoIterator<Item = u32>) -> GtaRpfIndexPlan {
-        let requested = hashes.into_iter().collect::<BTreeSet<_>>();
+        let mut requested = hashes.into_iter().collect::<BTreeSet<_>>();
+        let mut pending = requested.iter().copied().collect::<Vec<_>>();
+        while let Some(hash) = pending.pop() {
+            let [mlo] = self.mlo_candidates(hash) else {
+                continue;
+            };
+            for entity in &mlo.entities {
+                if requested.insert(entity.archetype_hash) {
+                    pending.push(entity.archetype_hash);
+                }
+            }
+        }
+
         let mut provider_entries = BTreeSet::new();
         let mut provider_hashes = BTreeMap::<GtaRpfIndexLocator, BTreeSet<u32>>::new();
         let mut asset_entries = BTreeSet::new();
@@ -1392,6 +1610,9 @@ struct ScanCounters {
     nested_archives: usize,
     indexed_files: usize,
     parsed_ytyps: usize,
+    mlo_entities: usize,
+    mlo_rooms: usize,
+    mlo_portals: usize,
     parsed_ymaps: usize,
     parsed_gtxd_files: usize,
     world_entities: usize,
@@ -1586,6 +1807,22 @@ fn scan_archive(
             },
         );
 
+        for mlo in &ytyp.mlos {
+            counters.mlo_entities += mlo.entities.len()
+                + mlo
+                    .entity_sets
+                    .iter()
+                    .map(|set| set.entities.len())
+                    .sum::<usize>();
+            counters.mlo_rooms += mlo.rooms.len();
+            counters.mlo_portals += mlo.portals.len();
+            insert_mlo_winner(
+                index,
+                mlo.archetype_name.0,
+                mlo_record(locator.clone(), mlo),
+            );
+        }
+
         for archetype in ytyp.archetypes {
             let asset_kind = match archetype.asset_type {
                 AssetType::Fragment => Some(GtaRpfAssetKind::Yft),
@@ -1604,6 +1841,89 @@ fn scan_archive(
             };
             insert_archetype_winner(index, archetype.name.0, record);
         }
+    }
+}
+
+fn mlo_record(provider: GtaRpfIndexLocator, mlo: &MloDef) -> GtaRpfMloRecord {
+    GtaRpfMloRecord {
+        provider,
+        archetype_hash: mlo.archetype_name.0,
+        bounds: GtaRpfWorldBounds {
+            min: world_point_from_ytyp(&mlo.bounds_min),
+            max: world_point_from_ytyp(&mlo.bounds_max),
+        },
+        entities: mlo.entities.iter().map(mlo_entity_record).collect(),
+        rooms: mlo
+            .rooms
+            .iter()
+            .map(|room| GtaRpfMloRoomRecord {
+                index: mlo_index(room.index),
+                name: room.name.clone(),
+                bounds: GtaRpfWorldBounds {
+                    min: world_point_from_ytyp(&room.bounds_min),
+                    max: world_point_from_ytyp(&room.bounds_max),
+                },
+                flags: room.flags,
+                portal_count: room.portal_count,
+                floor_id: room.floor_id,
+                attached_objects: room.attached_objects.clone(),
+            })
+            .collect(),
+        portals: mlo
+            .portals
+            .iter()
+            .map(|portal| GtaRpfMloPortalRecord {
+                index: mlo_index(portal.index),
+                room_from: portal.room_from,
+                room_to: portal.room_to,
+                flags: portal.flags,
+                mirror_priority: portal.mirror_priority,
+                opacity: portal.opacity,
+                audio_occlusion: portal.audio_occlusion,
+                corners: portal.corners.iter().map(world_point_from_ytyp).collect(),
+                attached_objects: portal.attached_objects.clone(),
+            })
+            .collect(),
+        entity_sets: mlo
+            .entity_sets
+            .iter()
+            .map(|set| GtaRpfMloEntitySetRecord {
+                index: mlo_index(set.index),
+                name_hash: set.name.0,
+                locations: set.locations.clone(),
+                entities: set.entities.iter().map(mlo_entity_record).collect(),
+            })
+            .collect(),
+    }
+}
+
+fn mlo_entity_record(entity: &MloEntity) -> GtaRpfMloEntityRecord {
+    GtaRpfMloEntityRecord {
+        index: mlo_index(entity.index),
+        archetype_hash: entity.archetype_name.0,
+        position: world_point_from_ytyp(&entity.position),
+        rotation: [
+            entity.rotation.x,
+            entity.rotation.y,
+            entity.rotation.z,
+            entity.rotation.w,
+        ],
+        scale_xy: entity.scale_xy,
+        scale_z: entity.scale_z,
+        flags: entity.flags,
+        parent_index: entity.parent_index,
+    }
+}
+
+fn mlo_index(index: usize) -> u32 {
+    u32::try_from(index).expect("META MLO array indices are u16-bounded")
+}
+
+fn world_point_from_ytyp(point: &YtypVec3) -> GtaRpfWorldPoint {
+    GtaRpfWorldPoint {
+        x: point.x,
+        y: point.y,
+        z: point.z,
     }
 }
 
@@ -1680,6 +2000,22 @@ fn insert_world_map_winner(index: &mut GtaRpfAssetIndex, hash: u32, record: GtaR
             index.world_maps.insert(
                 hash,
                 WorldMapWinnerSet {
+                    load_rank,
+                    candidates: vec![record],
+                },
+            );
+        }
+    }
+}
+
+fn insert_mlo_winner(index: &mut GtaRpfAssetIndex, hash: u32, record: GtaRpfMloRecord) {
+    let load_rank = record.provider.load_rank;
+    match index.mlos.get_mut(&hash) {
+        Some(winner) => winner.insert(load_rank, record),
+        None => {
+            index.mlos.insert(
+                hash,
+                MloWinnerSet {
                     load_rank,
                     candidates: vec![record],
                 },
@@ -2025,6 +2361,7 @@ mod tests {
             },
             files: BTreeMap::new(),
             archetypes: BTreeMap::new(),
+            mlos: BTreeMap::new(),
             texture_parents: BTreeMap::new(),
             ytyps: BTreeMap::new(),
             world_maps: BTreeMap::new(),
@@ -2127,7 +2464,8 @@ mod tests {
     fn load_rejects_previous_world_index_schema() {
         let index = empty_index();
         let mut bytes = bincode::serialize(&index).expect("serialize world index");
-        bytes[..4].copy_from_slice(&3_u32.to_le_bytes());
+        let previous = GTA_RPF_INDEX_SCHEMA_VERSION - 1;
+        bytes[..4].copy_from_slice(&previous.to_le_bytes());
 
         let path = std::env::temp_dir().join(format!(
             "ragelab-world-index-old-schema-{}.bin",
@@ -2136,11 +2474,11 @@ mod tests {
         let _ = fs::remove_file(&path);
         fs::write(&path, bytes).expect("write old-schema fixture");
 
-        let error = GtaRpfAssetIndex::load(&path).expect_err("schema v3 must be rejected");
+        let error = GtaRpfAssetIndex::load(&path).expect_err("previous schema must be rejected");
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert!(error
-            .to_string()
-            .contains("unsupported GTA RPF index schema 3; expected 4"));
+        assert!(error.to_string().contains(&format!(
+            "unsupported GTA RPF index schema {previous}; expected {GTA_RPF_INDEX_SCHEMA_VERSION}"
+        )));
 
         fs::remove_file(path).expect("remove old-schema fixture");
     }
@@ -2169,6 +2507,7 @@ mod tests {
             fingerprint: fingerprint.clone(),
             files: BTreeMap::new(),
             archetypes: BTreeMap::new(),
+            mlos: BTreeMap::new(),
             texture_parents: BTreeMap::new(),
             ytyps: BTreeMap::new(),
             world_maps: BTreeMap::new(),
@@ -2537,6 +2876,93 @@ mod tests {
             .contains(&(GtaRpfAssetKind::Ytd, 0x3333)));
         assert!(plan.ambiguous_texture_parents.is_empty());
         assert!(plan.texture_parent_cycles.is_empty());
+    }
+
+    #[test]
+    fn plan_expands_unique_mlo_child_archetypes_for_streaming() {
+        let mut index = empty_index();
+        insert_archetype_winner(
+            &mut index,
+            0xAAAA,
+            GtaRpfArchetypeRecord {
+                provider: locator(10, "mlo.ytyp"),
+                provider_ytyp_hash: Some(0xA001),
+                asset_kind: None,
+                asset_name_hash: None,
+                drawable_dictionary_hash: None,
+                texture_dictionary_hash: None,
+                physics_dictionary_hash: None,
+            },
+        );
+        insert_archetype_winner(
+            &mut index,
+            0xBBBB,
+            GtaRpfArchetypeRecord {
+                provider: locator(10, "child.ytyp"),
+                provider_ytyp_hash: Some(0xB001),
+                asset_kind: Some(GtaRpfAssetKind::Ydr),
+                asset_name_hash: Some(0xCCCC),
+                drawable_dictionary_hash: None,
+                texture_dictionary_hash: None,
+                physics_dictionary_hash: None,
+            },
+        );
+        insert_file_winner(
+            &mut index,
+            GtaRpfAssetKind::Ydr,
+            0xCCCC,
+            locator(10, "child.ydr"),
+        );
+        insert_mlo_winner(
+            &mut index,
+            0xAAAA,
+            GtaRpfMloRecord {
+                provider: locator(10, "mlo.ytyp"),
+                archetype_hash: 0xAAAA,
+                bounds: GtaRpfWorldBounds {
+                    min: GtaRpfWorldPoint {
+                        x: -1.0,
+                        y: -1.0,
+                        z: -1.0,
+                    },
+                    max: GtaRpfWorldPoint {
+                        x: 1.0,
+                        y: 1.0,
+                        z: 1.0,
+                    },
+                },
+                entities: vec![GtaRpfMloEntityRecord {
+                    index: 0,
+                    archetype_hash: 0xBBBB,
+                    position: GtaRpfWorldPoint {
+                        x: 0.0,
+                        y: 0.0,
+                        z: 0.0,
+                    },
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale_xy: Some(1.0),
+                    scale_z: Some(1.0),
+                    flags: 0,
+                    parent_index: None,
+                }],
+                rooms: Vec::new(),
+                portals: Vec::new(),
+                entity_sets: Vec::new(),
+            },
+        );
+
+        let plan = index.plan_for_archetypes([0xAAAA]);
+        assert_eq!(plan.requested_archetypes, 2);
+        assert!(plan.unresolved_archetypes.is_empty());
+        assert_eq!(plan.provider_entries.len(), 2);
+        assert_eq!(plan.asset_entries.len(), 1);
+        assert_eq!(plan.asset_entries[0].entry, "child.ydr");
+        assert!(plan.provider_selections.iter().any(|selection| {
+            selection
+                .archetype_hashes
+                .iter()
+                .any(|hash| *hash == 0xBBBB)
+        }));
     }
 
     #[test]

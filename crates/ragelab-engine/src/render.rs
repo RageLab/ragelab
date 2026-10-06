@@ -11,6 +11,7 @@ use std::{
 
 use ragelab_assets::AssetKind;
 use ragelab_hash::joaat;
+use ragelab_ybn::YbnCollision;
 use ragelab_ymap::Ymap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1086,15 +1087,31 @@ pub(crate) fn build_scene_render_package(
                 assets.push(built);
             }
             AssetKind::Ybn => {
-                builder.diagnostics.push(RenderDiagnostic {
-                    severity: RenderDiagnosticSeverity::Info,
-                    code: "collisionAssetDeferred".into(),
-                    message: "YBN remains dependency-only in render package schema v1".into(),
-                    asset_ref: Some(to_u32(asset.id, "assetRef")?),
-                    node_index: None,
-                    details: None,
-                });
-                assets.push(render_asset_shell(asset, RenderAssetState::Unsupported)?);
+                let input = match prepare_scene_asset_preview_input(asset, options.preview) {
+                    Ok(input) => input,
+                    Err(error) => {
+                        builder.diagnostics.push(RenderDiagnostic {
+                            severity: RenderDiagnosticSeverity::Error,
+                            code: "collisionReadFailed".into(),
+                            message: error.to_string(),
+                            asset_ref: Some(to_u32(asset.id, "assetRef")?),
+                            node_index: None,
+                            details: None,
+                        });
+                        assets.push(render_asset_shell(asset, RenderAssetState::Error)?);
+                        continue;
+                    }
+                };
+                assets.push(builder.build_collision_asset(
+                    to_u32(asset.id, "assetRef")?,
+                    Some(asset.hash),
+                    RenderSourceDescriptor {
+                        source_type: asset.path.source_type().to_string(),
+                        path: asset.path.provenance(),
+                    },
+                    &input.bytes,
+                    options.preview,
+                )?);
             }
             _ => {
                 builder.diagnostics.push(RenderDiagnostic {
@@ -1596,6 +1613,244 @@ impl PackageBuilder {
         })
     }
 
+    fn build_collision_asset(
+        &mut self,
+        asset_ref: u32,
+        hash: Option<u32>,
+        source: RenderSourceDescriptor,
+        bytes: &[u8],
+        options: PreviewOptions,
+    ) -> Result<RenderAssetDescriptor, io::Error> {
+        let collision = match YbnCollision::from_bytes(bytes) {
+            Ok(collision) => collision,
+            Err(error) => {
+                self.diagnostics.push(RenderDiagnostic {
+                    severity: RenderDiagnosticSeverity::Error,
+                    code: "collisionParseFailed".into(),
+                    message: error.to_string(),
+                    asset_ref: Some(asset_ref),
+                    node_index: None,
+                    details: None,
+                });
+                return Ok(RenderAssetDescriptor {
+                    asset_ref,
+                    kind: "YBN".into(),
+                    hash,
+                    source,
+                    selector: None,
+                    state: RenderAssetState::Error,
+                    coordinate_convention: None,
+                    name: None,
+                    lod: None,
+                    bounds: None,
+                    meshes: Vec::new(),
+                    materials: Vec::new(),
+                });
+            }
+        };
+
+        if collision.primitives.is_empty() {
+            if !collision.shape_primitives.is_empty() {
+                self.diagnostics.push(RenderDiagnostic {
+                    severity: RenderDiagnosticSeverity::Info,
+                    code: "collisionShapesInspectOnly".into(),
+                    message: format!(
+                        "{} non-triangle collision shapes remain inspect-only",
+                        collision.shape_primitives.len()
+                    ),
+                    asset_ref: Some(asset_ref),
+                    node_index: None,
+                    details: Some(serde_json::json!({
+                        "shapePrimitives": collision.shape_primitives.len(),
+                        "editableSubset": "existing sphere/capsule/box/cylinder polygon fields only"
+                    })),
+                });
+            }
+            self.diagnostics.push(RenderDiagnostic {
+                severity: RenderDiagnosticSeverity::Info,
+                code: "collisionNoTriangleGeometry".into(),
+                message: "YBN has no bounded triangle geometry eligible for the render package"
+                    .into(),
+                asset_ref: Some(asset_ref),
+                node_index: None,
+                details: None,
+            });
+            return Ok(RenderAssetDescriptor {
+                asset_ref,
+                kind: "YBN".into(),
+                hash,
+                source,
+                selector: None,
+                state: RenderAssetState::Unsupported,
+                coordinate_convention: Some(collision.coordinate_convention.to_string()),
+                name: None,
+                lod: None,
+                bounds: Some(RenderBounds {
+                    center: collision.bounds.center,
+                    radius: collision.bounds.sphere_radius,
+                    min: collision.bounds.min,
+                    max: collision.bounds.max,
+                }),
+                meshes: Vec::new(),
+                materials: Vec::new(),
+            });
+        }
+
+        if collision.positions.len() > options.max_vertices {
+            self.diagnostics.push(RenderDiagnostic {
+                severity: RenderDiagnosticSeverity::Warning,
+                code: "collisionVertexBudgetExceeded".into(),
+                message: format!(
+                    "{} collision vertices exceed max_vertices {}",
+                    collision.positions.len(),
+                    options.max_vertices
+                ),
+                asset_ref: Some(asset_ref),
+                node_index: None,
+                details: None,
+            });
+            return Ok(RenderAssetDescriptor {
+                asset_ref,
+                kind: "YBN".into(),
+                hash,
+                source,
+                selector: None,
+                state: RenderAssetState::Omitted,
+                coordinate_convention: Some(collision.coordinate_convention.to_string()),
+                name: None,
+                lod: None,
+                bounds: Some(RenderBounds {
+                    center: collision.bounds.center,
+                    radius: collision.bounds.sphere_radius,
+                    min: collision.bounds.min,
+                    max: collision.bounds.max,
+                }),
+                meshes: Vec::new(),
+                materials: Vec::new(),
+            });
+        }
+
+        let positions = self.blob.append_f32x3(&collision.positions)?;
+        let mut remaining_indices = options.max_indices;
+        let mut meshes = Vec::new();
+
+        for primitive in collision.primitives.iter().take(options.max_primitives) {
+            if primitive
+                .indices
+                .iter()
+                .any(|index| *index as usize >= collision.positions.len())
+            {
+                self.diagnostics.push(RenderDiagnostic {
+                    severity: RenderDiagnosticSeverity::Error,
+                    code: "invalidCollisionIndex".into(),
+                    message: format!(
+                        "collision child {} has an index outside positions",
+                        primitive.child_index
+                    ),
+                    asset_ref: Some(asset_ref),
+                    node_index: None,
+                    details: None,
+                });
+                continue;
+            }
+            if primitive.indices.len() > remaining_indices {
+                self.diagnostics.push(RenderDiagnostic {
+                    severity: RenderDiagnosticSeverity::Warning,
+                    code: "collisionIndexBudgetExceeded".into(),
+                    message: format!(
+                        "collision child {} omitted because remaining index budget is {}",
+                        primitive.child_index, remaining_indices
+                    ),
+                    asset_ref: Some(asset_ref),
+                    node_index: None,
+                    details: None,
+                });
+                continue;
+            }
+            remaining_indices -= primitive.indices.len();
+            meshes.push(RenderMeshDescriptor {
+                id: to_u32(meshes.len(), "collision mesh id")?,
+                model_index: to_u32(primitive.child_index, "collision child index")?,
+                geometry_index: to_u32(meshes.len(), "collision geometry index")?,
+                topology: "triangles".into(),
+                source_shader_index: None,
+                material_ref: None,
+                positions,
+                normals: None,
+                uv0: None,
+                indices: self.blob.append_u32(&primitive.indices)?,
+            });
+        }
+
+        if collision.primitives.len() > options.max_primitives {
+            self.diagnostics.push(RenderDiagnostic {
+                severity: RenderDiagnosticSeverity::Warning,
+                code: "collisionPrimitiveBudgetExceeded".into(),
+                message: format!(
+                    "{} collision mesh primitives exceed max_primitives {}",
+                    collision.primitives.len(),
+                    options.max_primitives
+                ),
+                asset_ref: Some(asset_ref),
+                node_index: None,
+                details: None,
+            });
+        }
+        if !collision.shape_primitives.is_empty() {
+            self.diagnostics.push(RenderDiagnostic {
+                severity: RenderDiagnosticSeverity::Info,
+                code: "collisionShapesInspectOnly".into(),
+                message: format!(
+                    "{} non-triangle collision shapes remain inspect-only",
+                    collision.shape_primitives.len()
+                ),
+                asset_ref: Some(asset_ref),
+                node_index: None,
+                details: Some(serde_json::json!({
+                    "shapePrimitives": collision.shape_primitives.len(),
+                    "editableSubset": "existing sphere/capsule/box/cylinder polygon fields only"
+                })),
+            });
+        }
+
+        let state = if meshes.is_empty() {
+            RenderAssetState::Unsupported
+        } else {
+            RenderAssetState::Ready
+        };
+        if meshes.is_empty() {
+            self.diagnostics.push(RenderDiagnostic {
+                severity: RenderDiagnosticSeverity::Info,
+                code: "collisionNoTriangleGeometry".into(),
+                message: "YBN has no bounded triangle geometry eligible for the render package"
+                    .into(),
+                asset_ref: Some(asset_ref),
+                node_index: None,
+                details: None,
+            });
+        }
+
+        Ok(RenderAssetDescriptor {
+            asset_ref,
+            kind: "YBN".into(),
+            hash,
+            source,
+            selector: None,
+            state,
+            coordinate_convention: Some(collision.coordinate_convention.to_string()),
+            name: None,
+            lod: None,
+            bounds: Some(RenderBounds {
+                center: collision.bounds.center,
+                radius: collision.bounds.sphere_radius,
+                min: collision.bounds.min,
+                max: collision.bounds.max,
+            }),
+            meshes,
+            materials: Vec::new(),
+        })
+    }
+
     fn add_texture(&mut self, texture: ResolvedDiffuseTexture) -> Result<u32, io::Error> {
         let expected = usize::from(texture.width)
             .checked_mul(usize::from(texture.height))
@@ -1889,6 +2144,72 @@ mod tests {
 
         assert_eq!(from_memory, from_path);
         fs::remove_dir_all(workspace).expect("remove render workspace");
+    }
+
+    #[test]
+    fn mlo_scene_package_expands_explicit_child_and_preserves_collision_relationship() {
+        let workspace = render_workspace();
+        fs::copy(fixture("mlo.ytyp"), workspace.join("mlo.ytyp")).expect("copy MLO YTYP");
+
+        let source_bytes = fs::read(workspace.join("simple.ymap")).expect("read source YMAP");
+        let edited = ragelab_ymap::apply_ymap_edit_command(
+            &source_bytes,
+            &ragelab_ymap::YmapEditCommand::SetProperties {
+                index: 0,
+                archetype_name: Some(ragelab_meta::MetaHash(joaat("v_test_mlo"))),
+                flags: None,
+                parent_index: None,
+            },
+        )
+        .expect("retarget YMAP entity to synthetic MLO");
+
+        let package = workspace_scene_render_package_from_ymap_bytes_with_game_index(
+            &workspace,
+            &workspace.join("mlo_instance.ymap"),
+            &edited,
+            SceneAssetPreviewSources {
+                fallback_roots: &[],
+                rpf_mounts: &[],
+                game_index: None,
+            },
+            SceneAssemblyOptions::default(),
+            RenderPackageOptions::default(),
+        )
+        .expect("build MLO render package");
+
+        assert_eq!(package.descriptor.summary.instances, 2);
+        assert_eq!(package.descriptor.scene.instances.len(), 2);
+
+        let parent = &package.descriptor.scene.instances[0];
+        assert_eq!(parent.archetype_hash, joaat("v_test_mlo"));
+        assert!(parent.asset_ref.is_none(), "MLO root remains assetless");
+        assert!(parent.transform.is_some());
+
+        let child = &package.descriptor.scene.instances[1];
+        assert_eq!(child.archetype_hash, joaat("test_archetype"));
+        let child_asset = child.asset_ref.expect("MLO child drawable assetRef");
+        assert_eq!(
+            package.descriptor.assets[child_asset as usize].kind,
+            AssetKind::Ydr.to_string()
+        );
+        let collision = child
+            .collision
+            .as_ref()
+            .expect("MLO child explicit collision relation");
+        let collision_asset = collision.asset_ref.expect("MLO child collision assetRef");
+        assert_eq!(
+            package.descriptor.assets[collision_asset as usize].kind,
+            AssetKind::Ybn.to_string()
+        );
+        assert!(
+            child.transform.is_some(),
+            "MLO child has composed transform"
+        );
+
+        package
+            .validate()
+            .expect("MLO render package remains canonical");
+        fs::remove_dir_all(workspace).expect("remove MLO render workspace");
     }
 
     #[test]

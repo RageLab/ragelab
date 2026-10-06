@@ -223,6 +223,7 @@ struct DrawInstance {
     model_binding: ModelBinding,
     node_index: Option<u32>,
     local_overlay: bool,
+    collision_overlay: bool,
     world_bounds: Aabb,
 }
 
@@ -1161,6 +1162,7 @@ impl OffscreenRenderer {
                     model_binding: self.create_model_binding(model, [0.0; 4]),
                     node_index: None,
                     local_overlay: false,
+                    collision_overlay: false,
                     world_bounds,
                 });
             }
@@ -1168,18 +1170,6 @@ impl OffscreenRenderer {
         }
 
         for instance in &package.descriptor.scene.instances {
-            let Some(asset_ref) = instance.asset_ref else {
-                continue;
-            };
-            let Some(asset) = package.descriptor.assets.get(asset_ref as usize) else {
-                return Err(RenderError::InvalidInput(format!(
-                    "scene instance {} references missing asset {}",
-                    instance.node_index, asset_ref
-                )));
-            };
-            if asset.state != RenderAssetState::Ready {
-                continue;
-            }
             let transform = instance.transform.ok_or_else(|| {
                 RenderError::Unsupported(format!(
                     "scene instance {} has no proven render transform",
@@ -1209,28 +1199,65 @@ impl OffscreenRenderer {
                 rotation.normalize(),
                 Vec3::from_array(transform.translation),
             );
-            let local_overlay = asset.source.source_type == "loose";
-            let style = [
-                0.0,
-                if emphasize_local && local_overlay {
-                    1.0
-                } else {
-                    0.0
-                },
-                0.0,
-                0.0,
-            ];
-            draws.push(DrawInstance {
-                asset_key: asset_key(asset),
-                model,
-                model_binding: self.create_model_binding(model, style),
-                node_index: Some(instance.node_index),
-                local_overlay,
-                world_bounds: asset_world_bounds(asset, model)?,
-            });
+
+            if let Some(asset_ref) = instance.asset_ref {
+                let Some(asset) = package.descriptor.assets.get(asset_ref as usize) else {
+                    return Err(RenderError::InvalidInput(format!(
+                        "scene instance {} references missing asset {}",
+                        instance.node_index, asset_ref
+                    )));
+                };
+                if asset.state == RenderAssetState::Ready {
+                    let local_overlay = asset.source.source_type == "loose";
+                    let style = [
+                        0.0,
+                        if emphasize_local && local_overlay {
+                            1.0
+                        } else {
+                            0.0
+                        },
+                        0.0,
+                        0.0,
+                    ];
+                    draws.push(DrawInstance {
+                        asset_key: asset_key(asset),
+                        model,
+                        model_binding: self.create_model_binding(model, style),
+                        node_index: Some(instance.node_index),
+                        local_overlay,
+                        collision_overlay: false,
+                        world_bounds: asset_world_bounds(asset, model)?,
+                    });
+                }
+            }
+
+            if let Some(collision_ref) = instance
+                .collision
+                .as_ref()
+                .and_then(|collision| collision.asset_ref)
+            {
+                let Some(asset) = package.descriptor.assets.get(collision_ref as usize) else {
+                    return Err(RenderError::InvalidInput(format!(
+                        "scene instance {} collision references missing asset {}",
+                        instance.node_index, collision_ref
+                    )));
+                };
+                if asset.state == RenderAssetState::Ready {
+                    let local_overlay = asset.source.source_type == "loose";
+                    draws.push(DrawInstance {
+                        asset_key: asset_key(asset),
+                        model,
+                        model_binding: self.create_model_binding(model, [0.0; 4]),
+                        node_index: Some(instance.node_index),
+                        local_overlay,
+                        collision_overlay: true,
+                        world_bounds: asset_world_bounds(asset, model)?,
+                    });
+                }
+            }
         }
 
-        draws.sort_by_key(|draw| draw.local_overlay);
+        draws.sort_by_key(|draw| (draw.local_overlay, draw.collision_overlay));
         Ok(draws)
     }
 }
@@ -1414,6 +1441,7 @@ pub struct SurfaceRenderer {
     hidden_node_indices: HashSet<u32>,
     show_base_game: bool,
     show_local_overlays: bool,
+    show_collision: bool,
     gpu_cache_budget: GpuCacheBudget,
     gpu_budget_overflow: bool,
     scene_load_ms: f64,
@@ -1500,6 +1528,7 @@ impl SurfaceRenderer {
             hidden_node_indices: HashSet::new(),
             show_base_game: true,
             show_local_overlays: true,
+            show_collision: false,
             gpu_cache_budget: GpuCacheBudget::default(),
             gpu_budget_overflow: false,
             scene_load_ms: 0.0,
@@ -1603,6 +1632,10 @@ impl SurfaceRenderer {
         self.options.grid = grid;
         self.options.wireframe = wireframe;
         self.options.bounds = bounds;
+    }
+
+    pub fn set_collision_overlay(&mut self, visible: bool) {
+        self.show_collision = visible;
     }
 
     pub fn set_gizmo_mode(&mut self, mode: Option<TransformGizmoMode>) {
@@ -1721,13 +1754,14 @@ impl SurfaceRenderer {
     }
 
     fn draw_visible(&self, draw: &DrawInstance) -> bool {
-        draw_visibility(
-            draw.node_index,
-            draw.local_overlay,
-            &self.hidden_node_indices,
-            self.show_base_game,
-            self.show_local_overlays,
-        )
+        (!draw.collision_overlay || self.show_collision)
+            && draw_visibility(
+                draw.node_index,
+                draw.local_overlay,
+                &self.hidden_node_indices,
+                self.show_base_game,
+                self.show_local_overlays,
+            )
     }
 
     pub fn select(&mut self, node_index: Option<u32>) {
@@ -1910,7 +1944,7 @@ impl SurfaceRenderer {
             pass.set_bind_group(0, &camera_bind_group, &[]);
             pass.set_pipeline(&self.mesh_pipeline);
             for draw in &self.draws {
-                if !self.draw_visible(draw) {
+                if draw.collision_overlay || !self.draw_visible(draw) {
                     continue;
                 }
                 let asset = self.gpu.asset_cache.get(&draw.asset_key).ok_or_else(|| {
@@ -1931,10 +1965,12 @@ impl SurfaceRenderer {
                 }
             }
 
-            if self.options.wireframe {
+            if self.options.wireframe || self.show_collision {
                 pass.set_pipeline(&self.line_pipeline);
                 for draw in &self.draws {
-                    if !self.draw_visible(draw) {
+                    if !self.draw_visible(draw)
+                        || (!self.options.wireframe && !draw.collision_overlay)
+                    {
                         continue;
                     }
                     let Some(asset) = self.gpu.asset_cache.get(&draw.asset_key) else {

@@ -116,6 +116,85 @@ impl SpatialTransform {
             scale,
         })
     }
+
+    /// Compose a proven child-local transform under this parent transform.
+    /// Scale must be explicit on both sides; no identity scale is inferred.
+    pub fn compose(self, child: Self) -> Option<Self> {
+        let parent_scale = self.scale?;
+        let child_scale = child.scale?;
+        let parent_rotation = normalize_quat(self.rotation)?;
+        let child_rotation = normalize_quat(child.rotation)?;
+
+        let scaled_child = [
+            child.translation[0] * parent_scale[0],
+            child.translation[1] * parent_scale[1],
+            child.translation[2] * parent_scale[2],
+        ];
+        let rotated_child = rotate_vec3(parent_rotation, scaled_child);
+        let translation = [
+            self.translation[0] + rotated_child[0],
+            self.translation[1] + rotated_child[1],
+            self.translation[2] + rotated_child[2],
+        ];
+        let rotation = normalize_quat(mul_quat(parent_rotation, child_rotation))?;
+        let scale = Some([
+            parent_scale[0] * child_scale[0],
+            parent_scale[1] * child_scale[1],
+            parent_scale[2] * child_scale[2],
+        ]);
+        Self::new(translation, rotation, scale)
+    }
+}
+
+fn normalize_quat(value: [f32; 4]) -> Option<[f32; 4]> {
+    if !value.iter().all(|component| component.is_finite()) {
+        return None;
+    }
+    let length_squared = value
+        .iter()
+        .map(|component| component * component)
+        .sum::<f32>();
+    if !length_squared.is_finite() || length_squared <= 1.0e-12 {
+        return None;
+    }
+    let inverse = length_squared.sqrt().recip();
+    Some([
+        value[0] * inverse,
+        value[1] * inverse,
+        value[2] * inverse,
+        value[3] * inverse,
+    ])
+}
+
+fn mul_quat(left: [f32; 4], right: [f32; 4]) -> [f32; 4] {
+    let [lx, ly, lz, lw] = left;
+    let [rx, ry, rz, rw] = right;
+    [
+        lw * rx + lx * rw + ly * rz - lz * ry,
+        lw * ry - lx * rz + ly * rw + lz * rx,
+        lw * rz + lx * ry - ly * rx + lz * rw,
+        lw * rw - lx * rx - ly * ry - lz * rz,
+    ]
+}
+
+fn rotate_vec3(rotation: [f32; 4], value: [f32; 3]) -> [f32; 3] {
+    let [x, y, z, w] = rotation;
+    let qv = [x, y, z];
+    let cross = [
+        qv[1] * value[2] - qv[2] * value[1],
+        qv[2] * value[0] - qv[0] * value[2],
+        qv[0] * value[1] - qv[1] * value[0],
+    ];
+    let second = [
+        qv[1] * cross[2] - qv[2] * cross[1],
+        qv[2] * cross[0] - qv[0] * cross[2],
+        qv[0] * cross[1] - qv[1] * cross[0],
+    ];
+    [
+        value[0] + 2.0 * (w * cross[0] + second[0]),
+        value[1] + 2.0 * (w * cross[1] + second[1]),
+        value[2] + 2.0 * (w * cross[2] + second[2]),
+    ]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -512,6 +591,32 @@ mod tests {
                 archetype_hash: 0xEF3D_BDA5,
             }
         );
+    }
+
+    #[test]
+    fn spatial_transform_compose_preserves_parent_rotation_scale_and_translation() {
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        let parent = SpatialTransform::new(
+            [10.0, 20.0, 30.0],
+            [0.0, 0.0, half, half],
+            Some([2.0, 2.0, 2.0]),
+        )
+        .expect("parent transform");
+        let child =
+            SpatialTransform::new([1.0, 0.0, 3.0], [0.0, 0.0, 0.0, 1.0], Some([0.5, 1.0, 1.5]))
+                .expect("child transform");
+
+        let composed = parent.compose(child).expect("composed transform");
+        assert!((composed.translation[0] - 10.0).abs() < 1.0e-5);
+        assert!((composed.translation[1] - 22.0).abs() < 1.0e-5);
+        assert!((composed.translation[2] - 36.0).abs() < 1.0e-5);
+        assert_eq!(composed.scale, Some([1.0, 2.0, 3.0]));
+        assert!(parent
+            .compose(SpatialTransform {
+                scale: None,
+                ..child
+            })
+            .is_none());
     }
 
     #[test]

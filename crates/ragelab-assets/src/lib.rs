@@ -18,7 +18,7 @@ use ragelab_rpf::{RpfEntryLocator, RpfMount};
 use ragelab_ydd::YddDictionary;
 use ragelab_ymap::Ymap;
 use ragelab_ymf::{ManifestFlags, Ymf, YmfInteriorBounds, YmfMapDependency, YmfYtypDependency};
-use ragelab_ytyp::{Archetype, ArchetypeKind, AssetType, Ytyp};
+use ragelab_ytyp::{Archetype, ArchetypeKind, AssetType, MloDef, Ytyp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AssetKind {
@@ -254,6 +254,14 @@ impl From<PathBuf> for SceneAssetLocator {
 /// scene node must never silently pick one. This contract fails closed unless
 /// provider and renderable identity are uniquely proven by the workspace or a
 /// lower-priority read-only game source.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneMloResolution {
+    pub archetype_hash: u32,
+    pub provider: SceneAssetLocator,
+    pub provider_ytyp_hash: Option<u32>,
+    pub mlo: MloDef,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SceneArchetypeResolution {
     pub archetype_hash: u32,
@@ -1008,6 +1016,108 @@ impl WorkspaceIndex {
             }
         }
         files.into_iter().collect()
+    }
+
+    /// Resolve one MLO archetype through the same provider tier/ambiguity rules
+    /// used by scene assembly. The selected YTYP is reparsed to recover full
+    /// room/portal/entity topology; no alternative provider or proximity lookup
+    /// is attempted.
+    pub fn resolve_scene_mlo(
+        &self,
+        archetype_hash: u32,
+    ) -> Result<Option<SceneMloResolution>, SceneAssetLookupError> {
+        let (provider, provider_ytyp_name, archetype) = if let Some(providers) =
+            self.archetype_providers.get(&archetype_hash)
+        {
+            if providers.len() != 1 {
+                return Err(SceneAssetLookupError {
+                        code: SceneAssetLookupErrorCode::ProviderAmbiguous,
+                        archetype_hash,
+                        provider: None,
+                        expected_kind: None,
+                        hash: None,
+                        message: format!(
+                            "archetype 0x{archetype_hash:08X} has {} local YTYP providers; MLO resolution requires exactly one",
+                            providers.len()
+                        ),
+                    });
+            }
+            let provider = &providers[0];
+            (
+                SceneAssetLocator::Loose(provider.path.clone()),
+                provider.ytyp_name,
+                provider.archetype.clone(),
+            )
+        } else if let Some(providers) = self.scene_rpf_archetype_providers.get(&archetype_hash) {
+            if providers.len() != 1 {
+                return Err(SceneAssetLookupError {
+                        code: SceneAssetLookupErrorCode::ProviderAmbiguous,
+                        archetype_hash,
+                        provider: None,
+                        expected_kind: None,
+                        hash: None,
+                        message: format!(
+                            "archetype 0x{archetype_hash:08X} has {} mounted RPF YTYP providers; MLO resolution requires exactly one",
+                            providers.len()
+                        ),
+                    });
+            }
+            let provider = &providers[0];
+            (
+                SceneAssetLocator::Rpf(provider.locator.clone()),
+                provider.ytyp_name,
+                provider.archetype.clone(),
+            )
+        } else {
+            return Ok(None);
+        };
+
+        if archetype.kind != ArchetypeKind::Mlo {
+            return Ok(None);
+        }
+
+        let provenance = provider.provenance();
+        let bytes = provider
+            .read_bytes()
+            .map_err(|message| SceneAssetLookupError {
+                code: SceneAssetLookupErrorCode::DictionaryUnreadable,
+                archetype_hash,
+                provider: Some(provenance.clone()),
+                expected_kind: Some(AssetKind::Ytyp),
+                hash: provider_ytyp_name.map(|hash| hash.0),
+                message: format!("MLO provider {provenance} could not be read: {message}"),
+            })?;
+        let ytyp = Ytyp::from_bytes(&bytes).map_err(|error| SceneAssetLookupError {
+            code: SceneAssetLookupErrorCode::DictionaryUnreadable,
+            archetype_hash,
+            provider: Some(provenance.clone()),
+            expected_kind: Some(AssetKind::Ytyp),
+            hash: provider_ytyp_name.map(|hash| hash.0),
+            message: format!("MLO provider {provenance} could not be parsed: {error}"),
+        })?;
+        let Some(mlo) = ytyp
+            .mlos
+            .into_iter()
+            .find(|mlo| mlo.archetype_name.0 == archetype_hash)
+        else {
+            return Err(SceneAssetLookupError {
+                code: SceneAssetLookupErrorCode::DictionaryEntryMissing,
+                archetype_hash,
+                provider: Some(provenance),
+                expected_kind: Some(AssetKind::Ytyp),
+                hash: provider_ytyp_name.map(|hash| hash.0),
+                message: format!(
+                    "selected YTYP provider does not contain normalized MLO 0x{archetype_hash:08X}"
+                ),
+            });
+        };
+
+        Ok(Some(SceneMloResolution {
+            archetype_hash,
+            provider,
+            provider_ytyp_hash: provider_ytyp_name.map(|hash| hash.0),
+            mlo,
+        }))
     }
 
     /// Resolve one YMAP archetype to the renderable identity needed by scene

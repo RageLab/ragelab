@@ -12,7 +12,7 @@ use std::{
 use ragelab_assets::{
     AssetKind, SceneArchetypeResolution, SceneAssetLocator, SceneAssetLookupError,
     SceneAssetLookupErrorCode, SceneCollisionLookup, SceneCollisionLookupErrorCode,
-    SceneResolvedAsset, SceneTextureDictionaryLookup, WorkspaceIndex,
+    SceneMloResolution, SceneResolvedAsset, SceneTextureDictionaryLookup, WorkspaceIndex,
 };
 use ragelab_ymap::Ymap;
 use serde::Serialize;
@@ -93,6 +93,7 @@ pub struct SceneManifest {
     pub schema_version: u32,
     pub root: SceneRoot,
     pub nodes: Vec<SceneNode>,
+    pub interiors: Vec<SceneInterior>,
     pub assets: Vec<SceneAssetReference>,
     pub summary: SceneSummary,
     pub warnings: Vec<String>,
@@ -118,6 +119,73 @@ pub struct SceneNode {
     pub resolution: SceneResolutionState,
     pub reason: Option<SceneResolutionReason>,
     pub collision: Option<SceneCollisionRelationship>,
+    pub interior: Option<SceneInteriorNodeContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SceneInteriorNodeContext {
+    pub interior_index: usize,
+    pub mlo_archetype_hash: u32,
+    pub mlo_entity_index: Option<usize>,
+    pub room_indices: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneInterior {
+    pub index: usize,
+    pub source_node_index: usize,
+    pub source_entity_index: usize,
+    pub archetype_hash: u32,
+    pub provider_path: String,
+    pub bounds_min: [f32; 3],
+    pub bounds_max: [f32; 3],
+    pub rooms: Vec<SceneInteriorRoom>,
+    pub portals: Vec<SceneInteriorPortal>,
+    pub entity_sets: Vec<SceneInteriorEntitySet>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneInteriorRoom {
+    pub index: usize,
+    pub name: String,
+    pub bounds_min: [f32; 3],
+    pub bounds_max: [f32; 3],
+    pub flags: u32,
+    pub portal_count: u32,
+    pub floor_id: i32,
+    pub attached_objects: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneInteriorPortal {
+    pub index: usize,
+    pub room_from: u32,
+    pub room_to: u32,
+    pub flags: u32,
+    pub mirror_priority: u32,
+    pub opacity: u32,
+    pub audio_occlusion: u32,
+    pub corners: Vec<[f32; 3]>,
+    pub attached_objects: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneInteriorEntitySet {
+    pub index: usize,
+    pub name_hash: u32,
+    pub locations: Vec<i32>,
+    pub entities: Vec<SceneInteriorEntitySetEntity>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneInteriorEntitySetEntity {
+    pub index: usize,
+    pub archetype_hash: u32,
+    pub position: [f32; 3],
+    pub rotation: [f32; 4],
+    pub scale: Option<[f32; 3]>,
+    pub flags: u32,
+    pub parent_index: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,6 +304,7 @@ pub struct SceneManifestReport {
     pub schema_version: u32,
     pub root: SceneRootReport,
     pub nodes: Vec<SceneNodeReport>,
+    pub interiors: Vec<SceneInteriorReport>,
     pub assets: Vec<SceneAssetReferenceReport>,
     pub summary: SceneSummaryReport,
     pub warnings: Vec<String>,
@@ -263,6 +332,80 @@ pub struct SceneNodeReport {
     pub resolution: String,
     pub reason: Option<SceneResolutionReasonReport>,
     pub collision: Option<SceneCollisionRelationshipReport>,
+    pub interior: Option<SceneInteriorNodeContextReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneInteriorNodeContextReport {
+    pub interior_index: usize,
+    pub mlo_archetype_hash: String,
+    pub mlo_entity_index: Option<usize>,
+    pub room_indices: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneInteriorReport {
+    pub index: usize,
+    pub source_node_index: usize,
+    pub source_entity_index: usize,
+    pub archetype_hash: String,
+    pub provider_path: String,
+    pub bounds_min: [f32; 3],
+    pub bounds_max: [f32; 3],
+    pub rooms: Vec<SceneInteriorRoomReport>,
+    pub portals: Vec<SceneInteriorPortalReport>,
+    pub entity_sets: Vec<SceneInteriorEntitySetReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneInteriorRoomReport {
+    pub index: usize,
+    pub name: String,
+    pub bounds_min: [f32; 3],
+    pub bounds_max: [f32; 3],
+    pub flags: u32,
+    pub portal_count: u32,
+    pub floor_id: i32,
+    pub attached_objects: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneInteriorPortalReport {
+    pub index: usize,
+    pub room_from: u32,
+    pub room_to: u32,
+    pub flags: u32,
+    pub mirror_priority: u32,
+    pub opacity: u32,
+    pub audio_occlusion: u32,
+    pub exterior: bool,
+    pub corners: Vec<[f32; 3]>,
+    pub attached_objects: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneInteriorEntitySetReport {
+    pub index: usize,
+    pub name_hash: String,
+    pub locations: Vec<i32>,
+    pub entities: Vec<SceneInteriorEntitySetEntityReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneInteriorEntitySetEntityReport {
+    pub index: usize,
+    pub archetype_hash: String,
+    pub position: [f32; 3],
+    pub rotation: [f32; 4],
+    pub scale: Option<[f32; 3]>,
+    pub flags: u32,
+    pub parent_index: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -392,7 +535,20 @@ impl From<&SceneManifest> for SceneManifestReport {
                             reason: collision.reason.clone(),
                         }
                     }),
+                    interior: node.interior.as_ref().map(|interior| {
+                        SceneInteriorNodeContextReport {
+                            interior_index: interior.interior_index,
+                            mlo_archetype_hash: format!("0x{:08X}", interior.mlo_archetype_hash),
+                            mlo_entity_index: interior.mlo_entity_index,
+                            room_indices: interior.room_indices.clone(),
+                        }
+                    }),
                 })
+                .collect(),
+            interiors: manifest
+                .interiors
+                .iter()
+                .map(scene_interior_report)
                 .collect(),
             assets: manifest
                 .assets
@@ -431,6 +587,70 @@ impl From<&SceneManifest> for SceneManifestReport {
                 omitted_entities: manifest.limits.omitted_entities,
             },
         }
+    }
+}
+
+fn scene_interior_report(interior: &SceneInterior) -> SceneInteriorReport {
+    SceneInteriorReport {
+        index: interior.index,
+        source_node_index: interior.source_node_index,
+        source_entity_index: interior.source_entity_index,
+        archetype_hash: format!("0x{:08X}", interior.archetype_hash),
+        provider_path: interior.provider_path.clone(),
+        bounds_min: interior.bounds_min,
+        bounds_max: interior.bounds_max,
+        rooms: interior
+            .rooms
+            .iter()
+            .map(|room| SceneInteriorRoomReport {
+                index: room.index,
+                name: room.name.clone(),
+                bounds_min: room.bounds_min,
+                bounds_max: room.bounds_max,
+                flags: room.flags,
+                portal_count: room.portal_count,
+                floor_id: room.floor_id,
+                attached_objects: room.attached_objects.clone(),
+            })
+            .collect(),
+        portals: interior
+            .portals
+            .iter()
+            .map(|portal| SceneInteriorPortalReport {
+                index: portal.index,
+                room_from: portal.room_from,
+                room_to: portal.room_to,
+                flags: portal.flags,
+                mirror_priority: portal.mirror_priority,
+                opacity: portal.opacity,
+                audio_occlusion: portal.audio_occlusion,
+                exterior: portal.room_from == 0 || portal.room_to == 0,
+                corners: portal.corners.clone(),
+                attached_objects: portal.attached_objects.clone(),
+            })
+            .collect(),
+        entity_sets: interior
+            .entity_sets
+            .iter()
+            .map(|set| SceneInteriorEntitySetReport {
+                index: set.index,
+                name_hash: format!("0x{:08X}", set.name_hash),
+                locations: set.locations.clone(),
+                entities: set
+                    .entities
+                    .iter()
+                    .map(|entity| SceneInteriorEntitySetEntityReport {
+                        index: entity.index,
+                        archetype_hash: format!("0x{:08X}", entity.archetype_hash),
+                        position: entity.position,
+                        rotation: entity.rotation,
+                        scale: entity.scale,
+                        flags: entity.flags,
+                        parent_index: entity.parent_index,
+                    })
+                    .collect(),
+            })
+            .collect(),
     }
 }
 
@@ -490,9 +710,306 @@ pub fn assemble_ymap_scene(
     ymap: &Ymap,
     options: SceneAssemblyOptions,
 ) -> SceneManifest {
-    assemble_ymap_scene_with_lookup(ymap_path, ymap, options, |archetype_hash| {
-        index.resolve_scene_archetype(archetype_hash)
-    })
+    let mut manifest =
+        assemble_ymap_scene_with_lookup(ymap_path, ymap, options, |archetype_hash| {
+            index.resolve_scene_archetype(archetype_hash)
+        });
+    expand_scene_mlos(index, ymap_path, ymap, options, &mut manifest);
+    manifest
+}
+
+fn expand_scene_mlos(
+    index: &WorkspaceIndex,
+    ymap_path: &Path,
+    ymap: &Ymap,
+    options: SceneAssemblyOptions,
+    manifest: &mut SceneManifest,
+) {
+    let max_nodes = options.effective_max_nodes();
+    let top_level_nodes = manifest.nodes.len().min(ymap.entities.len());
+    let mut asset_ids = manifest
+        .assets
+        .iter()
+        .map(|asset| {
+            (
+                SceneAssetKey {
+                    kind: asset.kind,
+                    hash: asset.hash,
+                    path: asset.path.clone(),
+                    selector: asset.selector.clone(),
+                    texture_dictionary: asset.texture_dictionary.clone(),
+                },
+                asset.id,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut child_lookup_cache =
+        BTreeMap::<u32, Result<SceneArchetypeResolution, SceneAssetLookupError>>::new();
+
+    for source_entity_index in 0..top_level_nodes {
+        let archetype_hash = ymap.entities[source_entity_index].archetype_name.0;
+        let mlo_resolution = match index.resolve_scene_mlo(archetype_hash) {
+            Ok(Some(resolution)) => resolution,
+            Ok(None) => continue,
+            Err(error) => {
+                let node = &mut manifest.nodes[source_entity_index];
+                node.provider_path = error.provider.clone();
+                node.resolution = SceneResolutionState::Unresolved;
+                node.reason = Some(scene_lookup_reason(error));
+                continue;
+            }
+        };
+
+        let interior_index = manifest.interiors.len();
+        let provider_path = mlo_resolution.provider.provenance();
+        let parent_transform = manifest.nodes[source_entity_index].transform;
+        manifest.interiors.push(scene_interior_from_mlo(
+            interior_index,
+            source_entity_index,
+            source_entity_index,
+            &mlo_resolution,
+        ));
+
+        {
+            let parent = &mut manifest.nodes[source_entity_index];
+            parent.provider_path = Some(provider_path);
+            parent.asset_ref = None;
+            parent.asset_kind = None;
+            parent.collision = None;
+            parent.interior = Some(SceneInteriorNodeContext {
+                interior_index,
+                mlo_archetype_hash: archetype_hash,
+                mlo_entity_index: None,
+                room_indices: Vec::new(),
+            });
+            if parent_transform.is_some() {
+                parent.resolution = SceneResolutionState::Resolved;
+                parent.reason = None;
+            }
+        }
+
+        if !mlo_resolution.mlo.entity_sets.is_empty() {
+            manifest.warnings.push(format!(
+                "MLO 0x{archetype_hash:08X} exposes {} entity set(s); activation state is not proven, so entity-set members remain inspect-only",
+                mlo_resolution.mlo.entity_sets.len()
+            ));
+        }
+
+        manifest.summary.total_entities = manifest
+            .summary
+            .total_entities
+            .saturating_add(mlo_resolution.mlo.entities.len());
+
+        for mlo_entity in &mlo_resolution.mlo.entities {
+            if manifest.nodes.len() >= max_nodes {
+                manifest.limits.truncated = true;
+                manifest.limits.omitted_entities =
+                    manifest.limits.omitted_entities.saturating_add(1);
+                continue;
+            }
+
+            let local_transform = mlo_entity_transform(mlo_entity);
+            let world_transform = parent_transform
+                .and_then(|parent| local_transform.and_then(|child| parent.compose(child)));
+            let child_hash = mlo_entity.archetype_name.0;
+            let scene_lookup = child_lookup_cache
+                .entry(child_hash)
+                .or_insert_with(|| index.resolve_scene_archetype(child_hash))
+                .clone();
+
+            let (provider_path, asset_ref, asset_kind, collision, lookup_reason) =
+                match scene_lookup {
+                    Ok(resolution) => {
+                        let asset_kind = resolution.asset.kind();
+                        let asset_ref = insert_primary_asset(
+                            &resolution.asset,
+                            &resolution.texture_dictionary,
+                            &mut manifest.assets,
+                            &mut asset_ids,
+                        );
+                        let collision = collision_relationship(
+                            resolution.collision,
+                            &mut manifest.assets,
+                            &mut asset_ids,
+                        );
+                        (
+                            Some(resolution.provider.provenance()),
+                            Some(asset_ref),
+                            Some(asset_kind),
+                            collision,
+                            None,
+                        )
+                    }
+                    Err(error) => (
+                        error.provider.clone(),
+                        None,
+                        error.expected_kind,
+                        None,
+                        Some(scene_lookup_reason(error)),
+                    ),
+                };
+
+            let (resolution, reason) = if let Some(reason) = lookup_reason {
+                (SceneResolutionState::Unresolved, Some(reason))
+            } else if world_transform.is_some() {
+                (SceneResolutionState::Resolved, None)
+            } else {
+                (
+                    SceneResolutionState::Unresolved,
+                    Some(SceneResolutionReason {
+                        code: SceneResolutionReasonCode::InvalidWorldTransform,
+                        message: format!(
+                            "MLO entity {} in 0x{archetype_hash:08X} has no proven composed world transform",
+                            mlo_entity.index
+                        ),
+                    }),
+                )
+            };
+
+            let room_indices = mlo_resolution
+                .mlo
+                .rooms
+                .iter()
+                .filter(|room| {
+                    room.attached_objects
+                        .iter()
+                        .any(|index| usize::try_from(*index).ok() == Some(mlo_entity.index))
+                })
+                .filter_map(|room| u32::try_from(room.index).ok())
+                .collect();
+
+            manifest.nodes.push(SceneNode {
+                index: manifest.nodes.len(),
+                source_ymap: ymap_path.to_path_buf(),
+                entity_index: source_entity_index,
+                archetype_hash: child_hash,
+                provider_path,
+                asset_ref,
+                asset_kind,
+                transform: world_transform,
+                resolution,
+                reason,
+                collision,
+                interior: Some(SceneInteriorNodeContext {
+                    interior_index,
+                    mlo_archetype_hash: archetype_hash,
+                    mlo_entity_index: Some(mlo_entity.index),
+                    room_indices,
+                }),
+            });
+        }
+    }
+
+    manifest.summary.emitted_nodes = manifest.nodes.len();
+    manifest.summary.resolved_nodes = manifest
+        .nodes
+        .iter()
+        .filter(|node| node.resolution == SceneResolutionState::Resolved)
+        .count();
+    manifest.summary.unresolved_nodes = manifest
+        .nodes
+        .len()
+        .saturating_sub(manifest.summary.resolved_nodes);
+    manifest.summary.asset_references = manifest.assets.len();
+}
+
+fn mlo_entity_transform(entity: &ragelab_ytyp::MloEntity) -> Option<SpatialTransform> {
+    let scale = match (entity.scale_xy, entity.scale_z) {
+        (Some(scale_xy), Some(scale_z)) => Some([scale_xy, scale_xy, scale_z]),
+        (None, None) => None,
+        _ => return None,
+    };
+    SpatialTransform::new(
+        [entity.position.x, entity.position.y, entity.position.z],
+        [
+            entity.rotation.x,
+            entity.rotation.y,
+            entity.rotation.z,
+            entity.rotation.w,
+        ],
+        scale,
+    )
+}
+
+fn scene_interior_from_mlo(
+    index: usize,
+    source_node_index: usize,
+    source_entity_index: usize,
+    resolution: &SceneMloResolution,
+) -> SceneInterior {
+    let mlo = &resolution.mlo;
+    SceneInterior {
+        index,
+        source_node_index,
+        source_entity_index,
+        archetype_hash: resolution.archetype_hash,
+        provider_path: resolution.provider.provenance(),
+        bounds_min: [mlo.bounds_min.x, mlo.bounds_min.y, mlo.bounds_min.z],
+        bounds_max: [mlo.bounds_max.x, mlo.bounds_max.y, mlo.bounds_max.z],
+        rooms: mlo
+            .rooms
+            .iter()
+            .map(|room| SceneInteriorRoom {
+                index: room.index,
+                name: room.name.clone(),
+                bounds_min: [room.bounds_min.x, room.bounds_min.y, room.bounds_min.z],
+                bounds_max: [room.bounds_max.x, room.bounds_max.y, room.bounds_max.z],
+                flags: room.flags,
+                portal_count: room.portal_count,
+                floor_id: room.floor_id,
+                attached_objects: room.attached_objects.clone(),
+            })
+            .collect(),
+        portals: mlo
+            .portals
+            .iter()
+            .map(|portal| SceneInteriorPortal {
+                index: portal.index,
+                room_from: portal.room_from,
+                room_to: portal.room_to,
+                flags: portal.flags,
+                mirror_priority: portal.mirror_priority,
+                opacity: portal.opacity,
+                audio_occlusion: portal.audio_occlusion,
+                corners: portal
+                    .corners
+                    .iter()
+                    .map(|corner| [corner.x, corner.y, corner.z])
+                    .collect(),
+                attached_objects: portal.attached_objects.clone(),
+            })
+            .collect(),
+        entity_sets: mlo
+            .entity_sets
+            .iter()
+            .map(|set| SceneInteriorEntitySet {
+                index: set.index,
+                name_hash: set.name.0,
+                locations: set.locations.clone(),
+                entities: set
+                    .entities
+                    .iter()
+                    .map(|entity| SceneInteriorEntitySetEntity {
+                        index: entity.index,
+                        archetype_hash: entity.archetype_name.0,
+                        position: [entity.position.x, entity.position.y, entity.position.z],
+                        rotation: [
+                            entity.rotation.x,
+                            entity.rotation.y,
+                            entity.rotation.z,
+                            entity.rotation.w,
+                        ],
+                        scale: match (entity.scale_xy, entity.scale_z) {
+                            (Some(scale_xy), Some(scale_z)) => Some([scale_xy, scale_xy, scale_z]),
+                            _ => None,
+                        },
+                        flags: entity.flags,
+                        parent_index: entity.parent_index,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
 }
 
 pub fn workspace_scene_report(
@@ -1056,6 +1573,7 @@ where
             resolution,
             reason,
             collision,
+            interior: None,
         });
     }
 
@@ -1072,6 +1590,7 @@ where
             name_hash: ymap.name.map(|hash| hash.0),
         },
         nodes,
+        interiors: Vec::new(),
         summary: SceneSummary {
             total_entities: ymap.entities.len(),
             emitted_nodes,
@@ -1244,6 +1763,7 @@ mod tests {
     use ragelab_assets::{
         AssetKind, SceneAssetLookupError, SceneAssetLookupErrorCode, WorkspaceIndex,
     };
+    use ragelab_hash::joaat;
     use ragelab_ymap::Ymap;
 
     use super::*;
@@ -1294,6 +1814,85 @@ mod tests {
             "collision must not become a world node"
         );
         assert_eq!(manifest.assets.len(), 2, "YDR + dependency-only YBN");
+    }
+
+    #[test]
+    fn expands_mlo_entities_with_topology_provenance_and_composed_transform() {
+        let source = synthetic_workspace();
+        let fixture_root = source.parent().expect("synthetic fixture root");
+        let temporary =
+            std::env::temp_dir().join(format!("ragelab-scene-mlo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temporary);
+        fs::create_dir_all(&temporary).expect("create MLO scene workspace");
+
+        for name in ["simple.ytyp", "test_drawable.ydr", "test_collision.ybn"] {
+            fs::copy(source.join(name), temporary.join(name)).expect("copy scene dependency");
+        }
+        fs::copy(fixture_root.join("mlo.ytyp"), temporary.join("mlo.ytyp")).expect("copy MLO YTYP");
+
+        let index = WorkspaceIndex::scan(&temporary).expect("scan MLO workspace");
+        let mut ymap = parsed_map();
+        ymap.entities[0].archetype_name.0 = joaat("v_test_mlo");
+
+        let manifest = assemble_ymap_scene(
+            &index,
+            &temporary.join("mlo_instance.ymap"),
+            &ymap,
+            SceneAssemblyOptions::default(),
+        );
+
+        assert_eq!(manifest.interiors.len(), 1);
+        assert_eq!(
+            manifest.nodes.len(),
+            2,
+            "MLO instance + one embedded entity"
+        );
+        assert_eq!(manifest.summary.total_entities, 2);
+        assert_eq!(manifest.summary.resolved_nodes, 2);
+
+        let parent = &manifest.nodes[0];
+        assert_eq!(parent.resolution, SceneResolutionState::Resolved);
+        assert!(parent.asset_ref.is_none(), "MLO parent is assetless");
+        let parent_context = parent.interior.as_ref().expect("MLO parent context");
+        assert_eq!(parent_context.mlo_entity_index, None);
+
+        let child = &manifest.nodes[1];
+        assert_eq!(child.asset_kind, Some(AssetKind::Ydr));
+        assert!(child.asset_ref.is_some());
+        assert!(child.collision.is_some());
+        let child_context = child.interior.as_ref().expect("MLO child context");
+        assert_eq!(child_context.mlo_entity_index, Some(0));
+        assert_eq!(child_context.room_indices, vec![1]);
+        let transform = child.transform.expect("composed child transform");
+        assert!((transform.translation[0] - 2.25).abs() < 1.0e-5);
+        assert!((transform.translation[1] - 4.5).abs() < 1.0e-5);
+        assert!((transform.translation[2] - 5.25).abs() < 1.0e-5);
+        assert_eq!(transform.scale, Some([1.25, 1.25, 0.75]));
+
+        let interior = &manifest.interiors[0];
+        assert!(interior.provider_path.ends_with("mlo.ytyp"));
+        assert_eq!(interior.rooms.len(), 2);
+        assert_eq!(interior.portals.len(), 1);
+        assert_eq!(interior.entity_sets.len(), 1);
+        assert!(manifest
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("entity set")));
+
+        let value = serde_json::to_value(SceneManifestReport::from(&manifest))
+            .expect("serialize MLO report");
+        assert_eq!(value["interiors"][0]["rooms"][1]["name"], "hall");
+        assert_eq!(value["interiors"][0]["portals"][0]["roomFrom"], 1);
+        assert_eq!(value["interiors"][0]["portals"][0]["roomTo"], 2);
+        assert_eq!(
+            value["interiors"][0]["entitySets"][0]["entities"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(value["nodes"][1]["interior"]["mloEntityIndex"], 0);
+
+        fs::remove_dir_all(&temporary).expect("remove MLO scene workspace");
     }
 
     #[test]

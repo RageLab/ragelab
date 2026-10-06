@@ -55,6 +55,7 @@ pub fn is_structured_command(command: &str) -> bool {
             | "gta.rpf-order"
             | "gta.rpf-index"
             | "gta.world-query"
+            | "gta.mlo-validate"
             | "rpf.keys"
             | "rpf.info"
             | "rpf.list"
@@ -1437,6 +1438,128 @@ pub fn gta_rpf_index(request: GtaRpfIndexCommandArgs) -> Result<(), Box<dyn Erro
     Ok(())
 }
 
+pub struct GtaMloValidateCommandArgs {
+    pub index: PathBuf,
+    pub game_root: PathBuf,
+    pub keys: PathBuf,
+    pub archetype_hash: Option<u32>,
+    pub json_output: bool,
+}
+
+pub fn parse_gta_mlo_validate_args(
+    args: impl Iterator<Item = String>,
+    usage: &str,
+) -> Result<GtaMloValidateCommandArgs, io::Error> {
+    let mut args = args;
+    let index = args
+        .next()
+        .filter(|value| !value.starts_with('-'))
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+
+    let mut game_root = None;
+    let mut keys = None;
+    let mut archetype_hash = None;
+    let mut json_output = false;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--game-root" if game_root.is_none() => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+                game_root = Some(PathBuf::from(value));
+            }
+            "--keys" if keys.is_none() => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+                keys = Some(PathBuf::from(value));
+            }
+            "--hash" if archetype_hash.is_none() => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?;
+                let trimmed = value.trim();
+                let parsed = if let Some(hex) = trimmed
+                    .strip_prefix("0x")
+                    .or_else(|| trimmed.strip_prefix("0X"))
+                {
+                    u32::from_str_radix(hex, 16)
+                } else {
+                    trimmed.parse::<u32>()
+                }
+                .map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("{usage}; --hash must be u32 decimal or 0xHEX"),
+                    )
+                })?;
+                archetype_hash = Some(parsed);
+            }
+            "--json" if !json_output => json_output = true,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{usage}; unknown option: {arg}"),
+                ))
+            }
+        }
+    }
+
+    Ok(GtaMloValidateCommandArgs {
+        index,
+        game_root: game_root.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?,
+        keys: keys.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, usage))?,
+        archetype_hash,
+        json_output,
+    })
+}
+
+pub fn gta_mlo_validate(request: GtaMloValidateCommandArgs) -> Result<(), Box<dyn Error>> {
+    let index = GtaRpfAssetIndex::load(&request.index)?;
+    let archetype_hash = match request.archetype_hash {
+        Some(hash) => hash,
+        None => index.representative_mlo_hash().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "index contains no unique MLO with entities, rooms and portals",
+            )
+        })?,
+    };
+    let report = index.validate_mlo_provider(archetype_hash, &request.game_root, &request.keys)?;
+
+    if !report.exact_match {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "MLO 0x{archetype_hash:08X} persisted record does not match authoritative YTYP source"
+            ),
+        )
+        .into());
+    }
+
+    if request.json_output {
+        print_success(
+            "gta.mlo-validate",
+            json!({
+                "index": request.index.display().to_string(),
+                "report": report,
+            }),
+        )?;
+    } else {
+        println!("index: {}", request.index.display());
+        println!("archetype: 0x{archetype_hash:08X}");
+        println!("provider: {}", report.provider.entry);
+        println!("entities: {}", report.indexed_entities);
+        println!("rooms: {}", report.indexed_rooms);
+        println!("portals: {}", report.indexed_portals);
+        println!("entity-sets: {}", report.indexed_entity_sets);
+        println!("exact-match: {}", report.exact_match);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum GtaWorldQueryShape {
     Radius {
@@ -1884,6 +2007,7 @@ pub fn normalize_command_args(args: Vec<String>) -> Vec<String> {
         ("gta", "rpf-order") => Some("gta.rpf-order"),
         ("gta", "rpf-index") => Some("gta.rpf-index"),
         ("gta", "world-query") => Some("gta.world-query"),
+        ("gta", "mlo-validate") => Some("gta.mlo-validate"),
         ("gta", "vanilla-index") => Some("vanilla-index"),
         ("rpf", "keys") => Some("rpf.keys"),
         ("rpf", "info") => Some("rpf.info"),

@@ -510,6 +510,12 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn Error>> {
             let request = agent::parse_gta_world_query_args(args, USAGE)?;
             agent::gta_world_query(request)?;
         }
+        "gta.mlo-validate" => {
+            const USAGE: &str =
+                "usage: ragelab gta mlo-validate <index> --game-root <directory> --keys <directory> [--hash <u32|0xHEX>] [--json]";
+            let request = agent::parse_gta_mlo_validate_args(args, USAGE)?;
+            agent::gta_mlo_validate(request)?;
+        }
         "rpf.keys" => {
             const USAGE: &str =
                 "usage: ragelab rpf keys <GTA5.exe> --cache-root <directory> [--json]";
@@ -654,6 +660,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "gta.rpf-order",
         "gta.rpf-index",
         "gta.world-query",
+        "gta.mlo-validate",
         "gta.vanilla-index",
         "rpf.keys",
         "rpf.info",
@@ -768,6 +775,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "gta.rpf-order",
         "gta.rpf-index",
         "gta.world-query",
+        "gta.mlo-validate",
         "gta.vanilla-index",
         "rpf.keys",
         "rpf.info",
@@ -786,7 +794,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
                 "version": env!("CARGO_PKG_VERSION"),
                 "commands": DISCOVERY_COMMANDS,
                 "canonicalCommands": CANONICAL_COMMANDS,
-                "structuredOutput": ["version", "capabilities", "inspect", "validate", "spatial", "preview", "plan", "apply", "workspace.preflight", "workspace.export", "workspace.scene", "workspace.render-package", "render.asset", "render.scene", "render.compare", "gta.discover", "gta.catalog", "gta.rpf-order", "gta.rpf-index", "gta.world-query", "rpf.keys", "rpf.info", "rpf.list", "rpf.extract", "fivem.discover"],
+                "structuredOutput": ["version", "capabilities", "inspect", "validate", "spatial", "preview", "plan", "apply", "workspace.preflight", "workspace.export", "workspace.scene", "workspace.render-package", "render.asset", "render.scene", "render.compare", "gta.discover", "gta.catalog", "gta.rpf-order", "gta.rpf-index", "gta.world-query", "gta.mlo-validate", "rpf.keys", "rpf.info", "rpf.list", "rpf.extract", "fivem.discover"],
                 "legacyAliases": LEGACY_ALIASES,
                 "responseEnvelope": {
                     "schema": agent::RESPONSE_SCHEMA,
@@ -857,6 +865,7 @@ ragelab gta catalog <directory> --output <paths.txt> [--overwrite] [--json]\n  \
 ragelab gta rpf-order <game-root> --keys <directory> [--json]\n  \
 ragelab gta rpf-index <game-root> --keys <directory> --output <file> [--overwrite] [--json]\n  \
 ragelab gta world-query <index> (--point <x> <y> <z> --radius <r> | --box <minx> <miny> <minz> <maxx> <maxy> <maxz>) [--entities] [--repeat <n>] [--json]\n  \
+ragelab gta mlo-validate <index> --game-root <directory> --keys <directory> [--hash <u32|0xHEX>] [--json]\n  \
 ragelab gta vanilla-index <extracted-gta-directory> <output.txt>\n\n\
 RPF commands:\n  \
 ragelab rpf keys <GTA5.exe> --cache-root <directory> [--json]\n  \
