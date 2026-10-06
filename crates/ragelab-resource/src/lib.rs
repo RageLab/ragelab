@@ -178,6 +178,25 @@ fn encode_page_size_at_least_with_max_pages(
     minimum_size: usize,
     max_pages: usize,
 ) -> Result<(u32, usize), ResourceError> {
+    encode_page_size_at_least_with_page_constraint(minimum_size, |count| count <= max_pages)
+}
+
+fn encode_page_size_at_least_with_exact_pages(
+    minimum_size: usize,
+    exact_pages: usize,
+) -> Result<(u32, usize), ResourceError> {
+    encode_page_size_at_least_with_page_constraint(minimum_size, |count| count == exact_pages)
+        .map_err(|_| {
+            ResourceError::Malformed(format!(
+                "cannot encode RSC7 page layout for {minimum_size} bytes with exactly {exact_pages} pages"
+            ))
+        })
+}
+
+fn encode_page_size_at_least_with_page_constraint(
+    minimum_size: usize,
+    accepts_page_count: impl Fn(usize) -> bool,
+) -> Result<(u32, usize), ResourceError> {
     if minimum_size == 0 {
         return Ok((0, 0));
     }
@@ -198,7 +217,7 @@ fn encode_page_size_at_least_with_max_pages(
 
         let layout = encode_page_units(units)? | shift;
         let page_count = decode_page_count(layout);
-        if page_count > max_pages {
+        if !accepts_page_count(page_count) {
             continue;
         }
         let allocation = base_page
@@ -225,7 +244,7 @@ fn encode_page_size_at_least_with_max_pages(
     best.map(|(layout, allocation, _)| (layout, allocation))
         .ok_or_else(|| {
             ResourceError::Malformed(format!(
-                "cannot encode RSC7 page layout for {minimum_size} bytes within {max_pages} pages"
+                "cannot encode RSC7 page layout for {minimum_size} bytes with the requested page-count constraint"
             ))
         })
 }
@@ -355,6 +374,86 @@ impl Rsc7Resource {
         let reserved = self.header.graphics_flags & PAGE_RESERVED_MASK;
         self.header.graphics_flags = reserved | (layout_flags & PAGE_LAYOUT_MASK);
         self.graphics.resize(allocation, 0);
+        Ok(allocation)
+    }
+
+    /// Grows the system segment to a valid page allocation that can hold at
+    /// least `minimum_size` bytes, preserving existing bytes and reserved
+    /// upper flag bits. Use this only for resources that do not carry an
+    /// internal ResourcePagesInfo table that would need synchronized updates.
+    pub fn grow_system_to_fit(&mut self, minimum_size: usize) -> Result<usize, ResourceError> {
+        if minimum_size <= self.system.len() {
+            return Ok(self.system.len());
+        }
+
+        let (layout_flags, allocation) = encode_page_size_at_least(minimum_size)?;
+        let reserved = self.header.system_flags & PAGE_RESERVED_MASK;
+        self.header.system_flags = reserved | (layout_flags & PAGE_LAYOUT_MASK);
+        self.system.resize(allocation, 0);
+        Ok(allocation)
+    }
+
+    /// Grows the system segment while preserving the exact system page count.
+    ///
+    /// META resources keep graphics page-table records immediately after the
+    /// system page records in `ResourcePagesInfo`. Changing the number of
+    /// system pages would shift that logical boundary and require rewriting the
+    /// table, so this helper fails closed unless the allocation can grow with
+    /// the current system page count unchanged.
+    pub fn grow_system_to_fit_with_page_info(
+        &mut self,
+        minimum_size: usize,
+        pages_info_pointer: u64,
+    ) -> Result<usize, ResourceError> {
+        if minimum_size <= self.system.len() {
+            return Ok(self.system.len());
+        }
+        if pages_info_pointer == 0 {
+            return Err(ResourceError::Malformed(
+                "cannot grow system segment with a null ResourcePagesInfo pointer".into(),
+            ));
+        }
+
+        let system_pages = usize::from(self.read_u8(checked_pointer_add(
+            pages_info_pointer,
+            0x08,
+            "ResourcePagesInfo system page count",
+        )?)?);
+        let graphics_pages = usize::from(self.read_u8(checked_pointer_add(
+            pages_info_pointer,
+            0x09,
+            "ResourcePagesInfo graphics page count",
+        )?)?);
+        let header_system_pages = decode_page_count(self.header.system_flags);
+        let header_graphics_pages = decode_page_count(self.header.graphics_flags);
+        if system_pages != header_system_pages || graphics_pages != header_graphics_pages {
+            return Err(ResourceError::Malformed(format!(
+                "ResourcePagesInfo page counts {system_pages}/{graphics_pages} do not match RSC7 flags {header_system_pages}/{header_graphics_pages}"
+            )));
+        }
+
+        let page_info_len = 16_usize
+            .checked_add(
+                system_pages
+                    .checked_add(graphics_pages)
+                    .and_then(|count| count.checked_mul(8))
+                    .ok_or_else(|| {
+                        ResourceError::Malformed(
+                            "ResourcePagesInfo page-table length overflows usize".into(),
+                        )
+                    })?,
+            )
+            .ok_or_else(|| {
+                ResourceError::Malformed("ResourcePagesInfo block length overflows usize".into())
+            })?;
+        self.bytes_at(pages_info_pointer, page_info_len)?;
+
+        let (layout_flags, allocation) =
+            encode_page_size_at_least_with_exact_pages(minimum_size, system_pages)?;
+        debug_assert_eq!(decode_page_count(layout_flags), system_pages);
+        let reserved = self.header.system_flags & PAGE_RESERVED_MASK;
+        self.header.system_flags = reserved | (layout_flags & PAGE_LAYOUT_MASK);
+        self.system.resize(allocation, 0);
         Ok(allocation)
     }
 

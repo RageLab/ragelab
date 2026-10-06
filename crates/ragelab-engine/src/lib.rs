@@ -28,6 +28,7 @@ mod render;
 mod rpf;
 mod scene;
 mod spatial;
+mod world_authoring;
 mod world_stream;
 pub use asset::*;
 pub use catalog::*;
@@ -39,6 +40,7 @@ pub use render::*;
 pub use rpf::*;
 pub use scene::*;
 pub use spatial::*;
+pub use world_authoring::*;
 pub use world_stream::*;
 
 pub const DURTYFREE_OBJECT_LIST_URL: &str =

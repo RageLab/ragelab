@@ -4,7 +4,9 @@
 //! structure descriptions and data blocks, so higher-level crates can resolve
 //! fields without baking every game structure into this crate.
 
-use ragelab_resource::{ResourceError, Rsc7Header, Rsc7Resource};
+use std::collections::BTreeMap;
+
+use ragelab_resource::{ResourceError, Rsc7Header, Rsc7Resource, SYSTEM_BASE};
 
 pub const META_HEADER_SIZE: usize = 112;
 
@@ -41,6 +43,22 @@ impl MetaPointer {
 
     pub const fn is_null(self) -> bool {
         self.block_id() == 0
+    }
+
+    pub fn from_block_offset(block_id: usize, offset: usize) -> Result<Self, ResourceError> {
+        if block_id == 0 || block_id > 0x0fff {
+            return Err(ResourceError::Malformed(format!(
+                "META block id {block_id} is outside 1..=4095"
+            )));
+        }
+        if offset > 0x000f_ffff {
+            return Err(ResourceError::Malformed(format!(
+                "META block offset {offset} exceeds 20-bit pointer range"
+            )));
+        }
+        Ok(Self {
+            raw: (block_id as u64) | ((offset as u64) << 12),
+        })
     }
 }
 
@@ -387,6 +405,113 @@ impl MetaDocument {
             ))
         })
     }
+
+    /// Rewrites selected META data-block payloads while preserving every
+    /// existing block id, schema descriptor and untouched payload.
+    ///
+    /// Replacement payloads are appended to the system segment and existing
+    /// data-block descriptors are repointed. Old payload bytes remain
+    /// orphaned, so block-id/offset MetaPointers into untouched blocks stay
+    /// stable.
+    pub fn rewrite_blocks(
+        source: &[u8],
+        replacements: &[(usize, Vec<u8>)],
+    ) -> Result<Vec<u8>, ResourceError> {
+        if replacements.is_empty() {
+            return Ok(source.to_vec());
+        }
+
+        let document = Self::from_rsc7(source)?;
+        let mut ordered = BTreeMap::<usize, &[u8]>::new();
+        for (block_id, data) in replacements {
+            if *block_id == 0 || *block_id > document.blocks.len() {
+                return Err(ResourceError::Malformed(format!(
+                    "META replacement block id {block_id} is outside 1..={}",
+                    document.blocks.len()
+                )));
+            }
+            if ordered.insert(*block_id, data.as_slice()).is_some() {
+                return Err(ResourceError::Malformed(format!(
+                    "META replacement block id {block_id} was provided more than once"
+                )));
+            }
+            if data.len() > i32::MAX as usize {
+                return Err(ResourceError::Malformed(format!(
+                    "META replacement block {block_id} exceeds i32 data length"
+                )));
+            }
+        }
+
+        let mut resource = Rsc7Resource::parse(source)?;
+        let old_system_len = resource.system().len();
+        let mut required = old_system_len;
+        for data in ordered.values() {
+            required = align_up_16(required)?;
+            required = required.checked_add(data.len()).ok_or_else(|| {
+                ResourceError::Malformed("META replacement allocation overflows usize".into())
+            })?;
+        }
+
+        let pages_info_pointer = u64::from_le_bytes(
+            document.header.resource_base_prefix[8..16]
+                .try_into()
+                .expect("fixed ResourceFileBase page-info pointer"),
+        );
+        if pages_info_pointer == 0 {
+            resource.grow_system_to_fit(required)?;
+        } else {
+            resource.grow_system_to_fit_with_page_info(required, pages_info_pointer)?;
+        }
+
+        let mut cursor = old_system_len;
+        for (block_id, data) in ordered {
+            cursor = align_up_16(cursor)?;
+            let data_pointer = SYSTEM_BASE
+                .checked_add(cursor as u64)
+                .ok_or_else(|| ResourceError::Malformed("META data pointer overflow".into()))?;
+            if !data.is_empty() {
+                resource
+                    .bytes_at_mut(data_pointer, data.len())?
+                    .copy_from_slice(data);
+            }
+
+            let descriptor_pointer = add_pointer(
+                document.header.data_blocks_pointer,
+                (block_id - 1).checked_mul(16).ok_or_else(|| {
+                    ResourceError::Malformed("META descriptor offset overflow".into())
+                })?,
+            )?;
+            let descriptor = resource.bytes_at_mut(descriptor_pointer, 16)?;
+            descriptor[4..8].copy_from_slice(&(data.len() as i32).to_le_bytes());
+            descriptor[8..16]
+                .copy_from_slice(&(if data.is_empty() { 0 } else { data_pointer }).to_le_bytes());
+            cursor = cursor.checked_add(data.len()).ok_or_else(|| {
+                ResourceError::Malformed("META replacement cursor overflow".into())
+            })?;
+        }
+
+        let rewritten = resource.to_bytes()?;
+        let reopened = Self::from_rsc7(&rewritten)?;
+        for (block_id, expected) in replacements {
+            let actual = reopened.block_by_id(*block_id).ok_or_else(|| {
+                ResourceError::Malformed(format!(
+                    "META rewritten block id {block_id} disappeared after semantic re-open"
+                ))
+            })?;
+            if actual.data != *expected {
+                return Err(ResourceError::Malformed(format!(
+                    "META rewritten block id {block_id} changed after semantic re-open"
+                )));
+            }
+            if actual.structure_name != document.blocks[*block_id - 1].structure_name {
+                return Err(ResourceError::Malformed(format!(
+                    "META rewritten block id {block_id} changed structure identity"
+                )));
+            }
+        }
+
+        Ok(rewritten)
+    }
 }
 
 fn parse_structure_infos(
@@ -547,6 +672,13 @@ fn add_pointer(base: u64, offset: usize) -> Result<u64, ResourceError> {
         .ok_or_else(|| ResourceError::Malformed("resource pointer overflow".into()))
 }
 
+fn align_up_16(value: usize) -> Result<usize, ResourceError> {
+    value
+        .checked_add(15)
+        .map(|aligned| aligned & !15)
+        .ok_or_else(|| ResourceError::Malformed("META alignment overflows usize".into()))
+}
+
 pub fn read_u8(bytes: &[u8], offset: usize) -> Result<u8, ResourceError> {
     bytes
         .get(offset)
@@ -625,6 +757,12 @@ mod tests {
         assert_eq!(pointer.block_id(), 7);
         assert_eq!(pointer.block_index(), Some(6));
         assert_eq!(pointer.offset(), 0x12345);
+
+        let encoded = MetaPointer::from_block_offset(7, 0x12345).unwrap();
+        assert_eq!(encoded.raw, raw);
+        assert!(MetaPointer::from_block_offset(0, 0).is_err());
+        assert!(MetaPointer::from_block_offset(0x1000, 0).is_err());
+        assert!(MetaPointer::from_block_offset(1, 0x10_0000).is_err());
     }
 
     #[test]

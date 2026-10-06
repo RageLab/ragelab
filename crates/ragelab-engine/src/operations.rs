@@ -6,11 +6,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ragelab_meta::MetaHash;
 use ragelab_ybn::{
     repack_polygon_edits, CollisionShape, YbnCollision, YbnPolygonEdit, YbnPolygonKind,
 };
 use ragelab_ydd::{YddDictionary, YddEditSession};
 use ragelab_ydr::{ShaderBindingKey, TextureBindingKey, YdrDocument, YdrEditSession};
+use ragelab_ymap::{Quat as YmapQuat, Vec3 as YmapVec3, YmapEditCommand, YmapEditSession};
 use ragelab_ytd::{TextureInfo, Ytd};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -200,7 +202,9 @@ pub fn plan_operation_document(
         None
     };
 
-    let operations = if asset_type == "YDR" {
+    let operations = if asset_type == "YMAP" {
+        plan_ymap_operations(&source_bytes, &document.operations, &mut reasons)?
+    } else if asset_type == "YDR" {
         plan_ydr_operations(&source_bytes, &document.operations, &mut reasons)?
     } else if asset_type == "YDD" {
         plan_ydd_operations(&source_bytes, &document.operations, &mut reasons)?
@@ -305,6 +309,7 @@ pub fn apply_operation_document(
     }
 
     match plan.asset_type.as_str() {
+        "YMAP" => apply_ymap_operations(document, &plan),
         "YDR" => apply_ydr_operations(document, &plan),
         "YDD" => apply_ydd_operations(document, &plan),
         "YTD" => apply_ytd_operations(document, &plan, base_dir),
@@ -313,6 +318,424 @@ pub fn apply_operation_document(
             "no declarative writer is available for asset type {other}"
         ))),
     }
+}
+
+fn plan_ymap_operations(
+    source_bytes: &[u8],
+    specs: &[OperationSpec],
+    reasons: &mut Vec<String>,
+) -> Result<Vec<PlannedOperation>, OperationError> {
+    let mut session = YmapEditSession::from_bytes(source_bytes)
+        .map_err(|error| OperationError::InvalidSource(error.to_string()))?;
+    let mut planned = Vec::with_capacity(specs.len());
+
+    for (index, operation) in specs.iter().enumerate() {
+        let result = parse_ymap_operation(operation).and_then(|command| {
+            let transaction = session
+                .apply_transaction(&[command])
+                .map_err(|error| error.to_string())?;
+            Ok(json!({
+                "entitiesBefore": transaction.entities_before,
+                "entitiesAfter": transaction.entities_after,
+                "revision": transaction.revision,
+                "dirty": transaction.dirty,
+            }))
+        });
+
+        match result {
+            Ok(details) => planned.push(PlannedOperation {
+                index,
+                operation_type: operation.operation_type.clone(),
+                allowed: true,
+                reason: None,
+                details,
+            }),
+            Err(reason) => planned.push(PlannedOperation {
+                index,
+                operation_type: operation.operation_type.clone(),
+                allowed: false,
+                reason: Some(reason),
+                details: Value::Null,
+            }),
+        }
+    }
+
+    if planned.iter().all(|operation| operation.allowed) {
+        if let Err(error) = session.document() {
+            reasons.push(format!(
+                "YMAP writer failed semantic re-open during planning: {error}"
+            ));
+        }
+    }
+
+    Ok(planned)
+}
+
+fn parse_ymap_operation(operation: &OperationSpec) -> Result<YmapEditCommand, String> {
+    match operation.operation_type.as_str() {
+        "ymap.set-transform" => {
+            const ALLOWED: &[&str] = &["index", "position", "rotation", "scaleXY", "scaleZ"];
+            reject_unknown_parameters(operation, ALLOWED)?;
+            let index = required_usize(&operation.parameters, "index", "ymap.set-transform")?;
+            let position = parse_ymap_vec3(
+                operation
+                    .parameters
+                    .get("position")
+                    .ok_or_else(|| "ymap.set-transform requires position".to_string())?,
+                "position",
+                "ymap.set-transform",
+            )?;
+            let rotation = parse_ymap_quat(
+                operation
+                    .parameters
+                    .get("rotation")
+                    .ok_or_else(|| "ymap.set-transform requires rotation".to_string())?,
+                "rotation",
+                "ymap.set-transform",
+            )?;
+            let scale_xy = optional_f32(&operation.parameters, "scaleXY", "ymap.set-transform")?;
+            let scale_z = optional_f32(&operation.parameters, "scaleZ", "ymap.set-transform")?;
+            Ok(YmapEditCommand::SetTransform {
+                index,
+                position,
+                rotation,
+                scale_xy,
+                scale_z,
+            })
+        }
+        "ymap.set-property" => {
+            const ALLOWED: &[&str] = &["index", "archetypeHash", "flags", "parentIndex"];
+            reject_unknown_parameters(operation, ALLOWED)?;
+            let index = required_usize(&operation.parameters, "index", "ymap.set-property")?;
+            let archetype_name = operation
+                .parameters
+                .get("archetypeHash")
+                .map(|value| parse_u32_or_hex(value, "archetypeHash", "ymap.set-property"))
+                .transpose()?
+                .map(MetaHash);
+            if matches!(archetype_name, Some(MetaHash(0))) {
+                return Err("ymap.set-property archetypeHash must not be zero".into());
+            }
+            let flags = operation
+                .parameters
+                .get("flags")
+                .map(|value| parse_u32_or_hex(value, "flags", "ymap.set-property"))
+                .transpose()?;
+            let parent_index = match operation.parameters.get("parentIndex") {
+                None => None,
+                Some(Value::Null) => Some(None),
+                Some(value) => {
+                    let parent = json_usize(value, "parentIndex", "ymap.set-property")?;
+                    let parent = i32::try_from(parent).map_err(|_| {
+                        "ymap.set-property parentIndex exceeds i32 range".to_string()
+                    })?;
+                    Some(Some(parent))
+                }
+            };
+            if archetype_name.is_none() && flags.is_none() && parent_index.is_none() {
+                return Err(
+                    "ymap.set-property requires archetypeHash, flags, or parentIndex".into(),
+                );
+            }
+            Ok(YmapEditCommand::SetProperties {
+                index,
+                archetype_name,
+                flags,
+                parent_index,
+            })
+        }
+        "ymap.delete" => {
+            const ALLOWED: &[&str] = &["indices"];
+            reject_unknown_parameters(operation, ALLOWED)?;
+            Ok(YmapEditCommand::Delete {
+                indices: required_indices(&operation.parameters, "indices", "ymap.delete")?,
+            })
+        }
+        "ymap.duplicate" => {
+            const ALLOWED: &[&str] = &["indices", "translation"];
+            reject_unknown_parameters(operation, ALLOWED)?;
+            let indices = required_indices(&operation.parameters, "indices", "ymap.duplicate")?;
+            let translation = parse_ymap_vec3(
+                operation
+                    .parameters
+                    .get("translation")
+                    .ok_or_else(|| "ymap.duplicate requires translation".to_string())?,
+                "translation",
+                "ymap.duplicate",
+            )?;
+            Ok(YmapEditCommand::Duplicate {
+                indices,
+                translation,
+            })
+        }
+        "ymap.create" => {
+            const ALLOWED: &[&str] = &[
+                "templateIndex",
+                "archetypeHash",
+                "position",
+                "rotation",
+                "scaleXY",
+                "scaleZ",
+                "flags",
+                "parentIndex",
+            ];
+            reject_unknown_parameters(operation, ALLOWED)?;
+            let template_index =
+                required_usize(&operation.parameters, "templateIndex", "ymap.create")?;
+            let archetype_name = MetaHash(parse_u32_or_hex(
+                operation
+                    .parameters
+                    .get("archetypeHash")
+                    .ok_or_else(|| "ymap.create requires archetypeHash".to_string())?,
+                "archetypeHash",
+                "ymap.create",
+            )?);
+            if archetype_name.0 == 0 {
+                return Err("ymap.create archetypeHash must not be zero".into());
+            }
+            let position = parse_ymap_vec3(
+                operation
+                    .parameters
+                    .get("position")
+                    .ok_or_else(|| "ymap.create requires position".to_string())?,
+                "position",
+                "ymap.create",
+            )?;
+            let rotation = parse_ymap_quat(
+                operation
+                    .parameters
+                    .get("rotation")
+                    .ok_or_else(|| "ymap.create requires rotation".to_string())?,
+                "rotation",
+                "ymap.create",
+            )?;
+            let scale_xy = optional_f32(&operation.parameters, "scaleXY", "ymap.create")?;
+            let scale_z = optional_f32(&operation.parameters, "scaleZ", "ymap.create")?;
+            let flags = parse_u32_or_hex(
+                operation
+                    .parameters
+                    .get("flags")
+                    .ok_or_else(|| "ymap.create requires flags".to_string())?,
+                "flags",
+                "ymap.create",
+            )?;
+            let parent_index = match operation.parameters.get("parentIndex") {
+                None | Some(Value::Null) => None,
+                Some(value) => {
+                    let parent = json_usize(value, "parentIndex", "ymap.create")?;
+                    Some(
+                        i32::try_from(parent)
+                            .map_err(|_| "ymap.create parentIndex exceeds i32 range".to_string())?,
+                    )
+                }
+            };
+            Ok(YmapEditCommand::CreateFromTemplate {
+                template_index,
+                archetype_name,
+                position,
+                rotation,
+                scale_xy,
+                scale_z,
+                flags,
+                parent_index,
+            })
+        }
+        other => Err(format!("unsupported YMAP operation type: {other}")),
+    }
+}
+
+fn required_indices(
+    parameters: &Map<String, Value>,
+    key: &str,
+    operation: &str,
+) -> Result<Vec<usize>, String> {
+    let values = parameters
+        .get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{operation} {key} must be a non-empty array of indices"))?;
+    if values.is_empty() {
+        return Err(format!("{operation} {key} must not be empty"));
+    }
+    values
+        .iter()
+        .map(|value| json_usize(value, key, operation))
+        .collect()
+}
+
+fn parse_ymap_vec3(value: &Value, key: &str, operation: &str) -> Result<YmapVec3, String> {
+    let values = parse_f32_array(value, 3, key, operation)?;
+    Ok(YmapVec3 {
+        x: values[0],
+        y: values[1],
+        z: values[2],
+    })
+}
+
+fn parse_ymap_quat(value: &Value, key: &str, operation: &str) -> Result<YmapQuat, String> {
+    let values = parse_f32_array(value, 4, key, operation)?;
+    let length_squared = values[0] * values[0]
+        + values[1] * values[1]
+        + values[2] * values[2]
+        + values[3] * values[3];
+    if !length_squared.is_finite() || length_squared <= 1.0e-12 {
+        return Err(format!("{operation} {key} quaternion must be non-zero"));
+    }
+    Ok(YmapQuat {
+        x: values[0],
+        y: values[1],
+        z: values[2],
+        w: values[3],
+    })
+}
+
+fn parse_f32_array(
+    value: &Value,
+    expected_len: usize,
+    key: &str,
+    operation: &str,
+) -> Result<Vec<f32>, String> {
+    let values = value
+        .as_array()
+        .ok_or_else(|| format!("{operation} {key} must be an array of {expected_len} numbers"))?;
+    if values.len() != expected_len {
+        return Err(format!(
+            "{operation} {key} must contain exactly {expected_len} values"
+        ));
+    }
+    values
+        .iter()
+        .map(|value| json_f32(value, key, operation))
+        .collect()
+}
+
+fn optional_f32(
+    parameters: &Map<String, Value>,
+    key: &str,
+    operation: &str,
+) -> Result<Option<f32>, String> {
+    parameters
+        .get(key)
+        .map(|value| json_f32(value, key, operation))
+        .transpose()
+}
+
+fn json_f32(value: &Value, key: &str, operation: &str) -> Result<f32, String> {
+    let value = value
+        .as_f64()
+        .ok_or_else(|| format!("{operation} {key} must be a finite f32"))?;
+    if !value.is_finite() || value < f32::MIN as f64 || value > f32::MAX as f64 {
+        return Err(format!("{operation} {key} must be a finite f32"));
+    }
+    Ok(value as f32)
+}
+
+fn parse_u32_or_hex(value: &Value, key: &str, operation: &str) -> Result<u32, String> {
+    if let Some(number) = value.as_u64() {
+        return u32::try_from(number).map_err(|_| format!("{operation} {key} exceeds u32 range"));
+    }
+    let text = value.as_str().ok_or_else(|| {
+        format!("{operation} {key} must be a u32 number or 0x-prefixed hexadecimal string")
+    })?;
+    let digits = text
+        .strip_prefix("0x")
+        .or_else(|| text.strip_prefix("0X"))
+        .ok_or_else(|| {
+            format!("{operation} {key} string must use 0x-prefixed hexadecimal notation")
+        })?;
+    u32::from_str_radix(digits, 16)
+        .map_err(|_| format!("{operation} {key} is not a valid u32 hexadecimal value"))
+}
+
+fn apply_ymap_operations(
+    document: &OperationDocument,
+    plan: &OperationPlan,
+) -> Result<OperationApplyResult, OperationError> {
+    let source_bytes = fs::read(&plan.source)?;
+    let mut session = YmapEditSession::from_bytes(&source_bytes)
+        .map_err(|error| OperationError::InvalidSource(error.to_string()))?;
+    let before = session
+        .document()
+        .map_err(|error| OperationError::InvalidSource(error.to_string()))?;
+
+    for operation in &document.operations {
+        let command = parse_ymap_operation(operation).map_err(OperationError::Rejected)?;
+        session
+            .apply_transaction(&[command])
+            .map_err(|error| OperationError::Writer(error.to_string()))?;
+    }
+
+    let rewritten = session.bytes().to_vec();
+    let reopened = session
+        .document()
+        .map_err(|error| OperationError::Writer(error.to_string()))?;
+    if reopened.name != before.name
+        || reopened.parent != before.parent
+        || reopened.flags != before.flags
+        || reopened.content_flags != before.content_flags
+        || reopened.physics_dictionaries != before.physics_dictionaries
+        || reopened.entities_extents_min != before.entities_extents_min
+        || reopened.entities_extents_max != before.entities_extents_max
+        || reopened.streaming_extents_min != before.streaming_extents_min
+        || reopened.streaming_extents_max != before.streaming_extents_max
+    {
+        return Err(OperationError::Writer(
+            "edited YMAP changed map identity/dependency/extent metadata unexpectedly".into(),
+        ));
+    }
+
+    if let Some(parent) = plan
+        .output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut file = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&plan.output)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(OperationError::Rejected(format!(
+                "output already exists; apply never overwrites existing files: {}",
+                plan.output.display()
+            )))
+        }
+        Err(error) => return Err(OperationError::Io(error)),
+    };
+    file.write_all(&rewritten)?;
+    file.flush()?;
+
+    let source_unchanged = fs::read(&plan.source)? == source_bytes;
+    if !source_unchanged {
+        return Err(OperationError::Writer(
+            "source asset changed during non-destructive apply".into(),
+        ));
+    }
+
+    Ok(OperationApplyResult {
+        schema: OPERATION_APPLY_SCHEMA,
+        schema_version: OPERATION_DOCUMENT_SCHEMA_VERSION,
+        source: plan.source.clone(),
+        output: plan.output.clone(),
+        asset_type: plan.asset_type.clone(),
+        operations_applied: document.operations.len(),
+        bytes_written: rewritten.len(),
+        non_destructive: true,
+        validation: ApplyValidation {
+            semantic_reopen: true,
+            source_unchanged,
+        },
+        details: json!({
+            "entitiesBefore": before.entities.len(),
+            "entitiesAfter": reopened.entities.len(),
+            "undoDepth": session.undo_depth(),
+            "revision": session.revision(),
+            "dirty": session.dirty(),
+        }),
+    })
 }
 
 fn plan_ydr_operations(
@@ -1873,9 +2296,11 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    use ragelab_hash::jenkins;
     use ragelab_ybn::{CollisionShape, YbnCollision};
     use ragelab_ydd::{YddDictionary, YddEditSession};
     use ragelab_ydr::{YdrDocument, YdrEditSession};
+    use ragelab_ymap::Ymap;
     use ragelab_ytd::Ytd;
     use serde_json::json;
 
@@ -1902,6 +2327,10 @@ mod tests {
 
     fn ybn_fixture() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/ybn/simple.ybn")
+    }
+
+    fn ymap_fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/simple.ymap")
     }
 
     fn temp_root(label: &str) -> PathBuf {
@@ -2341,6 +2770,97 @@ mod tests {
             .unwrap()
             .contains("missing.dds"));
         assert!(!root.join("output.ytd").exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn plans_and_applies_ymap_authoring_transaction_non_destructively() {
+        let root = temp_root("ymap-authoring");
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.ymap");
+        let output = root.join("output.ymap");
+        fs::copy(ymap_fixture(), &source).unwrap();
+        let source_before = fs::read(&source).unwrap();
+        let before = Ymap::from_bytes(&source_before).unwrap();
+        let placed_hash = jenkins("placed_prop");
+
+        let body = json!({
+            "schema": OPERATION_DOCUMENT_SCHEMA,
+            "schemaVersion": 1,
+            "source": "source.ymap",
+            "output": "output.ymap",
+            "operations": [
+                {
+                    "type": "ymap.set-transform",
+                    "index": 0,
+                    "position": [3.0, 4.0, 5.0],
+                    "rotation": [0.0, 0.0, 0.0, 1.0],
+                    "scaleXY": 1.5,
+                    "scaleZ": 1.0
+                },
+                {
+                    "type": "ymap.set-property",
+                    "index": 0,
+                    "flags": "0x12345678"
+                },
+                {
+                    "type": "ymap.duplicate",
+                    "indices": [0],
+                    "translation": [1.0, 0.0, 0.0]
+                },
+                {
+                    "type": "ymap.create",
+                    "templateIndex": 0,
+                    "archetypeHash": format!("0x{placed_hash:08X}"),
+                    "position": [-2.0, 6.0, 1.0],
+                    "rotation": [0.0, 0.0, 0.0, 1.0],
+                    "scaleXY": 1.0,
+                    "scaleZ": 1.0,
+                    "flags": 7,
+                    "parentIndex": null
+                },
+                {
+                    "type": "ymap.delete",
+                    "indices": [1]
+                }
+            ]
+        })
+        .to_string();
+        let document = parse_operation_document(&body).unwrap();
+        let plan = plan_operation_document(&document, &root).unwrap();
+
+        assert!(plan.allowed, "{:?}", plan.reasons);
+        assert_eq!(plan.asset_type, "YMAP");
+        assert_eq!(plan.operations.len(), 5);
+        assert!(plan.operations.iter().all(|operation| operation.allowed));
+        assert_eq!(plan.operations[0].details["entitiesAfter"], 1);
+        assert_eq!(plan.operations[2].details["entitiesAfter"], 2);
+        assert_eq!(plan.operations[3].details["entitiesAfter"], 3);
+        assert_eq!(plan.operations[4].details["entitiesAfter"], 2);
+        assert!(!output.exists());
+
+        let result = apply_operation_document(&document, &root).unwrap();
+        assert!(output.is_file());
+        assert_eq!(fs::read(&source).unwrap(), source_before);
+        assert!(result.validation.semantic_reopen);
+        assert!(result.validation.source_unchanged);
+        assert_eq!(result.details["entitiesBefore"], 1);
+        assert_eq!(result.details["entitiesAfter"], 2);
+
+        let after = Ymap::from_bytes(&fs::read(&output).unwrap()).unwrap();
+        assert_eq!(after.name, before.name);
+        assert_eq!(after.parent, before.parent);
+        assert_eq!(after.physics_dictionaries, before.physics_dictionaries);
+        assert_eq!(after.entities.len(), 2);
+        assert_eq!(after.entities[0].flags, 0x1234_5678);
+        assert_eq!(after.entities[0].position.x, 3.0);
+        assert_eq!(after.entities[1].archetype_name.0, placed_hash);
+        assert_eq!(after.entities[1].flags, 7);
+
+        let second = apply_operation_document(&document, &root).unwrap_err();
+        assert!(second.to_string().contains("output already exists"));
+        assert_eq!(fs::read(&source).unwrap(), source_before);
 
         fs::remove_dir_all(root).unwrap();
     }
