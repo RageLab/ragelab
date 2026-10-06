@@ -1,4 +1,5 @@
 mod agent;
+mod bridge_cmd;
 mod rpf_cmd;
 
 use std::{
@@ -516,6 +517,9 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn Error>> {
             let request = agent::parse_gta_mlo_validate_args(args, USAGE)?;
             agent::gta_mlo_validate(request)?;
         }
+        "bridge.serve" => {
+            bridge_cmd::serve(args)?;
+        }
         "rpf.keys" => {
             const USAGE: &str =
                 "usage: ragelab rpf keys <GTA5.exe> --cache-root <directory> [--json]";
@@ -662,6 +666,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "gta.world-query",
         "gta.mlo-validate",
         "gta.vanilla-index",
+        "bridge.serve",
         "rpf.keys",
         "rpf.info",
         "rpf.list",
@@ -777,6 +782,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "gta.world-query",
         "gta.mlo-validate",
         "gta.vanilla-index",
+        "bridge.serve",
         "rpf.keys",
         "rpf.info",
         "rpf.list",
@@ -867,6 +873,8 @@ ragelab gta rpf-index <game-root> --keys <directory> --output <file> [--overwrit
 ragelab gta world-query <index> (--point <x> <y> <z> --radius <r> | --box <minx> <miny> <minz> <maxx> <maxy> <maxz>) [--entities] [--repeat <n>] [--json]\n  \
 ragelab gta mlo-validate <index> --game-root <directory> --keys <directory> [--hash <u32|0xHEX>] [--json]\n  \
 ragelab gta vanilla-index <extracted-gta-directory> <output.txt>\n\n\
+Optional local Web bridge:\n  \
+ragelab bridge serve --game-root <directory> --index <legacy-v5.bin> --keys <directory> --origin <http(s)://host[:port]> [--origin <...>]... [--port <n>] [--max-asset-bytes <n>] [--max-bundle-assets <n>] [--max-bundle-bytes <n>] [--audit-log <file>]\n\n\
 RPF commands:\n  \
 ragelab rpf keys <GTA5.exe> --cache-root <directory> [--json]\n  \
 ragelab rpf info <archive.rpf> [--keys <directory>] [--nested <entry.rpf>]... [--json]\n  \

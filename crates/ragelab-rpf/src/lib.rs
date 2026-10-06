@@ -211,6 +211,17 @@ impl RpfEntryLocator {
         }
     }
 
+    pub fn info(&self) -> Result<RpfEntryInfo, RpfError> {
+        let keys = GtaKeyStore::load(&self.keys)?;
+        let mut archive = Rpf7Archive::open(&self.archive, Some(&keys))?;
+        for nested in &self.nested {
+            archive = archive.open_nested(nested, Some(&keys))?;
+        }
+        archive
+            .find_file(&self.entry)
+            .ok_or_else(|| RpfError::EntryNotFound(self.entry.clone()))
+    }
+
     pub fn read(&self) -> Result<Vec<u8>, RpfError> {
         let keys = GtaKeyStore::load(&self.keys)?;
         let mut archive = Rpf7Archive::open(&self.archive, Some(&keys))?;

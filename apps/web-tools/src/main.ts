@@ -5,6 +5,7 @@ import { renderTexture } from "./components/texture-preview";
 import { YtdDocument } from "./ytd-document";
 import { createModelTool, type ModelToolDebugSnapshot } from "./model-tool";
 import { createYmapTool, type YmapToolDebugSnapshot } from "./ymap-tool";
+import { createBridgeTool, type BridgeToolDebugSnapshot } from "./bridge-tool";
 
 const q = <T extends Element>(selector: string): T => {
   const element = document.querySelector<T>(selector);
@@ -43,6 +44,7 @@ const ymapToolPanel = q<HTMLElement>("#ymap-tool");
 let documentState: YtdDocument | null = null;
 let modelTool: ReturnType<typeof createModelTool> | null = null;
 let ymapTool: ReturnType<typeof createYmapTool> | null = null;
+let bridgeTool: ReturnType<typeof createBridgeTool> | null = null;
 let selectedTexture = 0;
 let selectedMip = 0;
 let channel: ChannelMode = "rgba";
@@ -343,12 +345,44 @@ ytdToolButton.addEventListener("click", () => selectTool("ytd"));
 modelToolButton.addEventListener("click", () => selectTool("model"));
 ymapToolButton.addEventListener("click", () => selectTool("ymap"));
 
+bridgeTool = createBridgeTool({
+  onError: setError,
+  onSuccess: setSuccess,
+  async onOpenAsset(name, format, bytes) {
+    if (format === "ytd") {
+      selectTool("ytd");
+      await openBytes(name, bytes);
+      return;
+    }
+    if (format === "ydr" || format === "ydd" || format === "yft") {
+      selectTool("model");
+      ensureModelTool();
+      modelTool!.openBridgeAsset(name, bytes);
+      return;
+    }
+    throw new Error("Bridge preview does not support ." + format + " directly");
+  },
+  async onOpenYmapBundle(files) {
+    const primary = files.filter((file) => file.format.toLowerCase() === "ymap");
+    if (primary.length !== 1) {
+      throw new Error("Bridge bundle must contain exactly one YMAP primary file");
+    }
+    const dependencies = files
+      .filter((file) => file !== primary[0])
+      .map((file) => ({ name: file.name, bytes: file.bytes }));
+    selectTool("ymap");
+    ensureYmapTool();
+    ymapTool!.openBridgeBundle(primary[0].name, primary[0].bytes, dependencies);
+  },
+});
+
 declare global {
   interface Window {
     __ragelabWebTools?: {
       probeMip(textureIndex: number, mipIndex: number): ReturnType<typeof probeMipError>;
       modelSnapshot(): ModelToolDebugSnapshot | null;
       ymapSnapshot(): YmapToolDebugSnapshot | null;
+      bridgeSnapshot(): BridgeToolDebugSnapshot | null;
     };
   }
 }
@@ -370,6 +404,9 @@ async function boot(): Promise<void> {
         },
         ymapSnapshot() {
           return ymapTool?.debugSnapshot() ?? null;
+        },
+        bridgeSnapshot() {
+          return bridgeTool?.debugSnapshot() ?? null;
         },
       };
     }

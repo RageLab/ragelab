@@ -6,6 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+base64 = "0.22"
+rand = "0.8"
 ragelab-assets = { path = "../../crates/ragelab-assets" }
 ragelab-engine = { path = "../../crates/ragelab-engine" }
 ragelab-render = { path = "../../crates/ragelab-render" }

@@ -68,6 +68,7 @@ function downloadBytes(bytes: Uint8Array, name: string): void {
 }
 
 export function createYmapTool(callbacks: YmapToolCallbacks): {
+  openBridgeBundle(name: string, bytes: Uint8Array, suppliedDependencies: ModelDependency[]): void;
   debugSnapshot(): YmapToolDebugSnapshot;
   dispose(): void;
 } {
@@ -519,6 +520,41 @@ export function createYmapTool(callbacks: YmapToolCallbacks): {
   renderDiagnostics([]);
 
   return {
+    openBridgeBundle(name, bytes, suppliedDependencies) {
+      if (extension(name) !== "ymap") {
+        throw new Error("Bridge YMAP bundle requires a .ymap primary file");
+      }
+      const allowed = new Set(["ytyp", "ydr", "ydd", "yft", "ytd"]);
+      const next: ModelDependency[] = [];
+      for (const dependency of suppliedDependencies) {
+        if (!allowed.has(extension(dependency.name))) {
+          throw new Error("Unsupported bridge YMAP dependency: " + dependency.name);
+        }
+        next.push({
+          name: dependency.name,
+          bytes: Uint8Array.from(dependency.bytes),
+        });
+      }
+      dependencies = next;
+      renderDependencyList();
+
+      const primary = Uint8Array.from(bytes);
+      state = {
+        name,
+        originalBytes: primary,
+        bytes: primary,
+        scene: resolveSuppliedScene(primary, dependencies),
+        dirty: false,
+        semanticValidated: false,
+      };
+      selectedIndex = null;
+      semanticStatus.textContent = "Original bytes";
+      downloadButton.disabled = true;
+      renderCurrentScene();
+      callbacks.onSuccess(
+        name + " loaded from the read-only local bridge through Rust/WASM supplied-only resolution.",
+      );
+    },
     debugSnapshot() {
       return {
         name: state?.name ?? null,

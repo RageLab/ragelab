@@ -15,6 +15,48 @@
         <span id="core-status" class="badge">Initializing Rust/WASM…</span>
       </header>
 
+      <section class="panel bridge-panel" aria-labelledby="bridge-heading">
+        <div class="bridge-heading">
+          <div>
+            <p class="eyebrow">Optional local bridge</p>
+            <h2 id="bridge-heading">Installed GTA index access</h2>
+          </div>
+          <span id="bridge-status" class="badge muted">Disconnected · optional</span>
+        </div>
+        <div class="bridge-connect-row">
+          <label>
+            Bridge URL
+            <input id="bridge-url" type="url" value="http://127.0.0.1:32191" spellcheck="false" />
+          </label>
+          <label>
+            Launch token
+            <input
+              id="bridge-token"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Paste the 64-character token printed by ragelab bridge serve"
+            />
+          </label>
+          <button id="bridge-connect" class="button" type="button">Connect explicitly</button>
+          <button id="bridge-disconnect" class="button" type="button" hidden>Disconnect</button>
+        </div>
+        <p class="bridge-note">
+          Disabled by default. RageLab never auto-connects, never stores the launch token, and never exposes
+          GTA key material or raw filesystem paths to this page.
+        </p>
+        <div id="bridge-browser" class="bridge-browser" hidden>
+          <form id="bridge-search-form" class="bridge-search-row">
+            <label>
+              Search installed index
+              <input id="bridge-search-input" type="search" maxlength="128" placeholder="YMAP, archetype or asset" />
+            </label>
+            <button id="bridge-search-button" class="button primary" type="submit" disabled>Search</button>
+          </form>
+          <div id="bridge-search-results" class="bridge-results"></div>
+        </div>
+      </section>
+
       <nav class="tool-tabs" aria-label="Web tools">
         <button id="tool-ytd" class="tool-tab active" type="button" aria-pressed="true">
           YTD Texture Viewer / Editor

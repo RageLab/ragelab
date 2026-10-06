@@ -71,6 +71,8 @@ The application layer also owns the persistent GTA V Legacy RPF/world index. The
 
 `apps/ragelab` is the primary automation adapter. It exposes diagnostics and product operations without requiring a graphical environment, including `render asset`, `render scene`, and `render compare` over the shared native renderer.
 
+The same adapter can host the optional, disabled-by-default loopback Web bridge. The bridge is transport only: search/provider resolution stays in the engine index, RPF access stays in `ragelab-rpf`, browser responses use opaque grants, and there is no bridge write route. See [WEB_BRIDGE_SECURITY.md](WEB_BRIDGE_SECURITY.md).
+
 The CLI must not contain an independent implementation of format parsing, renderer semantics, or writer safety.
 
 ### RageLab Studio

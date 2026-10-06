@@ -65,6 +65,7 @@ function downloadBlob(blob: Blob, name: string): void {
 }
 
 export function createModelTool(callbacks: ModelToolCallbacks): {
+  openBridgeAsset(name: string, bytes: Uint8Array): void;
   debugSnapshot(): ModelToolDebugSnapshot;
   dispose(): void;
 } {
@@ -387,6 +388,12 @@ export function createModelTool(callbacks: ModelToolCallbacks): {
   renderDiagnostics([]);
 
   return {
+    openBridgeAsset(name, bytes) {
+      dependencies = [];
+      renderDependencyList();
+      openModelBytes(name, Uint8Array.from(bytes));
+      callbacks.onSuccess(name + " loaded from the read-only local bridge through Rust/WASM.");
+    },
     debugSnapshot() {
       return {
         name: state?.name ?? null,

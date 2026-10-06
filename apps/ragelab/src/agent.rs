@@ -2009,6 +2009,7 @@ pub fn normalize_command_args(args: Vec<String>) -> Vec<String> {
         ("gta", "world-query") => Some("gta.world-query"),
         ("gta", "mlo-validate") => Some("gta.mlo-validate"),
         ("gta", "vanilla-index") => Some("vanilla-index"),
+        ("bridge", "serve") => Some("bridge.serve"),
         ("rpf", "keys") => Some("rpf.keys"),
         ("rpf", "info") => Some("rpf.info"),
         ("rpf", "list") => Some("rpf.list"),
