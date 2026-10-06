@@ -5,8 +5,8 @@ use ragelab_resource::Rsc7Resource;
 use ragelab_wasm::{
     capabilities, inspect_ydd, inspect_ydr_materials, inspect_yft, inspect_ymap, inspect_ytd,
     inspect_ytyp, validate_asset, wasm_export_ytd_texture_png, wasm_replace_ytd_texture_png,
-    ydd_model, ydd_rebind_texture, ydr_model, ydr_rebind_texture, yft_model, ymap_set_flags,
-    ytd_texture, ytd_texture_mip,
+    ydd_model, ydd_rebind_texture, ydr_embedded_texture, ydr_model, ydr_rebind_texture, yft_model,
+    ymap_set_flags, ytd_texture, ytd_texture_mip,
 };
 use ragelab_yft::YFT_LEGACY_VERSION;
 use wasm_bindgen::JsValue;
@@ -16,6 +16,7 @@ const YMAP: &[u8] = include_bytes!("../../../fixtures/synthetic/stream/simple.ym
 const YTYP: &[u8] = include_bytes!("../../../fixtures/synthetic/mlo.ytyp");
 const YDR: &[u8] = include_bytes!("../../../fixtures/synthetic/ydr/simple.ydr");
 const EDITABLE_YDR: &[u8] = include_bytes!("../../../fixtures/synthetic/ydr/editable.ydr");
+const EMBEDDED_YDR: &[u8] = include_bytes!("../../../fixtures/synthetic/ydr/embedded.ydr");
 const YDD: &[u8] = include_bytes!("../../../fixtures/synthetic/ydd/editable.ydd");
 const YTD: &[u8] = include_bytes!("../../../fixtures/synthetic/ytd/simple.ytd");
 
@@ -74,6 +75,41 @@ fn all_supported_formats_validate_and_inspect_from_supplied_bytes() {
             );
         }
     }
+}
+
+#[wasm_bindgen_test]
+fn ydr_embedded_texture_packet_matches_proven_diffuse_binding() {
+    let model = ydr_model(EMBEDDED_YDR).expect("embedded YDR model");
+    let metadata = model.metadata().expect("model metadata");
+    let shaders = Array::from(&field(&metadata, "shaders"));
+    assert_eq!(shaders.length(), 1);
+    let shader = shaders.get(0);
+    assert_eq!(
+        field(&shader, "diffuseTextureName").as_string().as_deref(),
+        Some("embedded_diff")
+    );
+    assert_eq!(field(&metadata, "embeddedTextureCount").as_f64(), Some(1.0));
+
+    let texture = ydr_embedded_texture(EMBEDDED_YDR, 0).expect("embedded texture packet");
+    let texture_metadata = texture.metadata().expect("texture metadata");
+    assert_eq!(
+        field(&texture_metadata, "name").as_string().as_deref(),
+        Some("embedded_diff")
+    );
+    assert_eq!(field(&texture_metadata, "width").as_f64(), Some(4.0));
+    assert_eq!(field(&texture_metadata, "height").as_f64(), Some(4.0));
+    let rgba = texture.rgba().to_vec();
+    assert_eq!(rgba.len(), 64);
+    assert!(rgba.chunks_exact(4).all(|pixel| pixel == [255, 0, 0, 255]));
+
+    let error = match ydr_embedded_texture(EMBEDDED_YDR, 1) {
+        Ok(_) => panic!("embedded texture index must fail closed"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        field(&error, "code").as_string().as_deref(),
+        Some("indexOutOfBounds")
+    );
 }
 
 #[wasm_bindgen_test]

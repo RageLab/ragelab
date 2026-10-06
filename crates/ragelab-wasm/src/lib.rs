@@ -10,7 +10,7 @@ use ragelab_yft::YftDocument;
 use ragelab_ymap::{
     apply_ymap_edit_command, Quat as YmapQuat, Vec3 as YmapVec3, Ymap, YmapEditCommand,
 };
-use ragelab_ytd::Ytd;
+use ragelab_ytd::{Ytd, YtdDictionary};
 use ragelab_ytyp::{ArchetypeKind, AssetType, Ytyp};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
@@ -534,6 +534,78 @@ pub fn ytd_texture(bytes: &[u8], index: usize) -> Result<WasmTexturePacket, JsVa
     texture_packet(bytes, index, 0)
 }
 
+#[wasm_bindgen(js_name = ydrEmbeddedTexture)]
+pub fn ydr_embedded_texture(
+    bytes: &[u8],
+    texture_index: usize,
+) -> Result<WasmTexturePacket, JsValue> {
+    let document =
+        YdrDocument::from_bytes(bytes).map_err(|e| wasm_error("ydr", "parseFailed", e))?;
+    let dictionary = document.embedded_textures.as_ref().ok_or_else(|| {
+        wasm_error(
+            "ydr",
+            "missingDependency",
+            "YDR has no embedded TextureDictionary",
+        )
+    })?;
+    embedded_texture_packet("ydr", dictionary, texture_index)
+}
+
+#[wasm_bindgen(js_name = yddEmbeddedTexture)]
+pub fn ydd_embedded_texture(
+    bytes: &[u8],
+    drawable_index: usize,
+    texture_index: usize,
+) -> Result<WasmTexturePacket, JsValue> {
+    let dictionary =
+        YddDictionary::from_bytes(bytes).map_err(|e| wasm_error("ydd", "parseFailed", e))?;
+    if drawable_index >= dictionary.entries().len() {
+        return Err(wasm_error(
+            "ydd",
+            "indexOutOfBounds",
+            format!(
+                "drawable index {drawable_index} exceeds dictionary size {}",
+                dictionary.entries().len()
+            ),
+        ));
+    }
+    let document = dictionary
+        .document(drawable_index)
+        .map_err(|e| wasm_error("ydd", "parseFailed", e))?;
+    let textures = document.embedded_textures.as_ref().ok_or_else(|| {
+        wasm_error(
+            "ydd",
+            "missingDependency",
+            format!("YDD drawable {drawable_index} has no embedded TextureDictionary"),
+        )
+    })?;
+    embedded_texture_packet("ydd", textures, texture_index)
+}
+
+#[wasm_bindgen(js_name = yftEmbeddedTexture)]
+pub fn yft_embedded_texture(
+    bytes: &[u8],
+    texture_index: usize,
+) -> Result<WasmTexturePacket, JsValue> {
+    let document =
+        YftDocument::from_bytes(bytes).map_err(|e| wasm_error("yft", "parseFailed", e))?;
+    let drawable = document.main_drawable.as_ref().ok_or_else(|| {
+        wasm_error(
+            "yft",
+            "unsupportedAsset",
+            "YFT has no pristine main drawable available for preview",
+        )
+    })?;
+    let dictionary = drawable.embedded_textures.as_ref().ok_or_else(|| {
+        wasm_error(
+            "yft",
+            "missingDependency",
+            "YFT main drawable has no embedded TextureDictionary",
+        )
+    })?;
+    embedded_texture_packet("yft", dictionary, texture_index)
+}
+
 #[wasm_bindgen(js_name = ytdTextureMip)]
 pub fn ytd_texture_mip(
     bytes: &[u8],
@@ -751,6 +823,44 @@ pub fn ydd_rebind_texture(
         .to_bytes()
         .map_err(|e| wasm_error("ydd", "semanticReopenFailed", e))?;
     Ok(Uint8Array::from(output.as_slice()))
+}
+
+fn embedded_texture_packet(
+    format: &'static str,
+    dictionary: &YtdDictionary,
+    texture_index: usize,
+) -> Result<WasmTexturePacket, JsValue> {
+    let info = dictionary.textures().get(texture_index).ok_or_else(|| {
+        wasm_error(
+            format,
+            "indexOutOfBounds",
+            format!(
+                "embedded texture index {texture_index} exceeds dictionary size {}",
+                dictionary.textures().len()
+            ),
+        )
+    })?;
+    let decoded = dictionary
+        .decode_top_mip(texture_index)
+        .map_err(|e| wasm_error(format, "decodeFailed", e))?;
+    Ok(WasmTexturePacket {
+        metadata: TextureMetadata {
+            schema: "ragelab.wasm.texture",
+            schema_version: API_SCHEMA_VERSION,
+            index: texture_index,
+            mip_index: 0,
+            name: info
+                .name
+                .clone()
+                .unwrap_or_else(|| hex_hash(info.name_hash)),
+            name_hash: hex_hash(info.name_hash),
+            width: decoded.width,
+            height: decoded.height,
+            format: info.format.normalized_name().to_string(),
+            mip_levels: info.levels,
+        },
+        rgba: decoded.rgba,
+    })
 }
 
 fn texture_packet(
