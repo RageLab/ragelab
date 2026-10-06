@@ -222,6 +222,7 @@ pub fn plan_operation_document(
                 | "ydd.rebind-shader"
                 | "ytd.replace-dds"
                 | "ytd.repack-dds"
+                | "ytd.repack-png"
                 | "ytd.repack-rgba"
                 | "ytd.rebuild-compact" => PlannedOperation {
                     index,
@@ -1304,6 +1305,59 @@ fn apply_ytd_operation_to_bytes(
                 }),
             ))
         }
+        "ytd.repack-png" => {
+            const ALLOWED: &[&str] = &["textureIndex", "replacement"];
+            reject_unknown_parameters(operation, ALLOWED)?;
+            let texture_index =
+                required_usize(&operation.parameters, "textureIndex", "ytd.repack-png")?;
+            let replacement =
+                required_payload_path(&operation.parameters, "replacement", "ytd.repack-png")?;
+            let replacement_path = resolve_path(base_dir, &replacement);
+            let replacement_bytes = fs::read(&replacement_path).map_err(|error| {
+                format!(
+                    "ytd.repack-png could not read replacement {}: {error}",
+                    replacement_path.display()
+                )
+            })?;
+
+            let before = Ytd::from_bytes(bytes).map_err(|error| error.to_string())?;
+            let before_texture = before.textures.get(texture_index).cloned().ok_or_else(|| {
+                format!(
+                    "texture index {texture_index} is out of bounds for YTD with {} textures",
+                    before.textures.len()
+                )
+            })?;
+            let rewritten =
+                crate::replace_ytd_texture_from_png(bytes, texture_index, &replacement_bytes)
+                    .map_err(|error| error.to_string())?;
+            let after = Ytd::from_bytes(&rewritten).map_err(|error| error.to_string())?;
+            verify_ytd_repack(bytes, &before, &rewritten, &after, texture_index)?;
+            let after_texture = after
+                .textures
+                .get(texture_index)
+                .ok_or_else(|| "PNG-repacked YTD lost the target texture".to_string())?;
+
+            Ok((
+                rewritten,
+                json!({
+                    "textureIndex": texture_index,
+                    "texture": after_texture.name,
+                    "dictionaryHash": format!("0x{:08X}", after_texture.dictionary_hash),
+                    "sizeBefore": [before_texture.width, before_texture.height],
+                    "sizeAfter": [after_texture.width, after_texture.height],
+                    "format": after_texture.format.normalized_name(),
+                    "mipLevelsBefore": before_texture.levels,
+                    "mipLevelsAfter": after_texture.levels,
+                    "encodedBytesBefore": before_texture.data_length,
+                    "encodedBytesAfter": after_texture.data_length,
+                    "replacement": replacement.display().to_string(),
+                    "imageFormat": "PNG",
+                    "mipsGenerated": true,
+                    "payloadRelocated": true,
+                    "formatPreserved": true,
+                }),
+            ))
+        }
         "ytd.repack-rgba" => {
             const ALLOWED: &[&str] = &["textureIndex", "width", "height", "replacement"];
             reject_unknown_parameters(operation, ALLOWED)?;
@@ -1803,6 +1857,7 @@ fn apply_ytd_operations(
     let mut working_bytes = source_bytes.clone();
     let mut replace_dds_count = 0_usize;
     let mut repack_dds_count = 0_usize;
+    let mut repack_png_count = 0_usize;
     let mut repack_rgba_count = 0_usize;
     let mut compact_rebuild_count = 0_usize;
     let mut texture_indices = Vec::<usize>::new();
@@ -1824,6 +1879,7 @@ fn apply_ytd_operations(
         match operation.operation_type.as_str() {
             "ytd.replace-dds" => replace_dds_count += 1,
             "ytd.repack-dds" => repack_dds_count += 1,
+            "ytd.repack-png" => repack_png_count += 1,
             "ytd.repack-rgba" => repack_rgba_count += 1,
             "ytd.rebuild-compact" => compact_rebuild_count += 1,
             other => {
@@ -1889,6 +1945,7 @@ fn apply_ytd_operations(
             "editedTextureIndices": texture_indices,
             "replaceDds": replace_dds_count,
             "repackDds": repack_dds_count,
+            "repackPng": repack_png_count,
             "repackRgba": repack_rgba_count,
             "compactRebuilds": compact_rebuild_count,
         }),
@@ -2672,6 +2729,9 @@ mod tests {
         let resized_dds = Ytd::rgba8_dds_with_generated_mips(2, 2, &resized_rgba).unwrap();
         fs::write(root.join("resized.dds"), &resized_dds).unwrap();
 
+        let png = crate::export_ytd_texture_png(&source_before, 0).unwrap();
+        fs::write(root.join("replacement.png"), &png).unwrap();
+
         let rgba = vec![64_u8; 4 * 4 * 4];
         fs::write(root.join("replacement.rgba"), &rgba).unwrap();
 
@@ -2692,6 +2752,11 @@ mod tests {
                     "replacement": "resized.dds"
                 },
                 {
+                    "type": "ytd.repack-png",
+                    "textureIndex": 0,
+                    "replacement": "replacement.png"
+                },
+                {
                     "type": "ytd.repack-rgba",
                     "textureIndex": 0,
                     "width": 4,
@@ -2709,12 +2774,14 @@ mod tests {
 
         assert!(plan.allowed);
         assert_eq!(plan.asset_type, "YTD");
-        assert_eq!(plan.operations.len(), 4);
+        assert_eq!(plan.operations.len(), 5);
         assert!(plan.operations.iter().all(|operation| operation.allowed));
         assert_eq!(plan.operations[0].details["layoutPreserved"], true);
         assert_eq!(plan.operations[1].details["sizeAfter"], json!([2, 2]));
+        assert_eq!(plan.operations[2].details["imageFormat"], "PNG");
         assert_eq!(plan.operations[2].details["sizeAfter"], json!([4, 4]));
-        assert_eq!(plan.operations[3].details["layoutRebuilt"], true);
+        assert_eq!(plan.operations[3].details["sizeAfter"], json!([4, 4]));
+        assert_eq!(plan.operations[4].details["layoutRebuilt"], true);
         assert!(!output.exists());
 
         let result = apply_operation_document(&document, &root).unwrap();
@@ -2723,6 +2790,7 @@ mod tests {
         assert!(result.validation.source_unchanged);
         assert_eq!(result.details["replaceDds"], 1);
         assert_eq!(result.details["repackDds"], 1);
+        assert_eq!(result.details["repackPng"], 1);
         assert_eq!(result.details["repackRgba"], 1);
         assert_eq!(result.details["compactRebuilds"], 1);
         assert_eq!(result.details["editedTextureIndices"][0], 0);

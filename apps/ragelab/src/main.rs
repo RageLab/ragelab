@@ -11,10 +11,11 @@ use std::{
 
 use ragelab_assets::WorkspaceIndex;
 use ragelab_engine::{
-    build_vanilla_catalog, export_map_resource, parse_durtyfree_object_list,
-    parse_vanilla_file_catalog, render_vanilla_catalog_paths, summarize_mlo_audit,
-    workspace_export_preflight_report, workspace_export_report, CatalogRefs, DurtyFreeCatalog,
-    SharedExportOptions, VanillaFileCatalog,
+    build_vanilla_catalog, export_map_resource, export_ytd_texture_png,
+    parse_durtyfree_object_list, parse_vanilla_file_catalog, render_vanilla_catalog_paths,
+    replace_ytd_texture_from_png, summarize_mlo_audit, workspace_export_preflight_report,
+    workspace_export_report, CatalogRefs, DurtyFreeCatalog, SharedExportOptions,
+    VanillaFileCatalog,
 };
 use ragelab_hash::{jenkins, joaat};
 use ragelab_meta::MetaDocument;
@@ -330,6 +331,15 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn Error>> {
             let output = required_arg(args.next(), USAGE)?;
             ytd_dds(Path::new(&path), index, Path::new(&output))?;
         }
+        "ytd-png" => {
+            const USAGE: &str = "usage: ragelab ytd-png <file.ytd> <texture-index> <output.png>";
+            let path = required_arg(args.next(), USAGE)?;
+            let index = required_arg(args.next(), USAGE)?
+                .parse::<usize>()
+                .map_err(|_| invalid_input("texture-index must be a non-negative integer"))?;
+            let output = required_arg(args.next(), USAGE)?;
+            ytd_png(Path::new(&path), index, Path::new(&output))?;
+        }
         "ytd-replace-dds" => {
             const USAGE: &str = "usage: ragelab ytd-replace-dds <source.ytd> <texture-index> <replacement.dds> <output.ytd>";
             let source = required_arg(args.next(), USAGE)?;
@@ -354,6 +364,21 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn Error>> {
             let replacement = required_arg(args.next(), USAGE)?;
             let output = required_arg(args.next(), USAGE)?;
             ytd_repack_dds(
+                Path::new(&source),
+                index,
+                Path::new(&replacement),
+                Path::new(&output),
+            )?;
+        }
+        "ytd-repack-png" => {
+            const USAGE: &str = "usage: ragelab ytd-repack-png <source.ytd> <texture-index> <replacement.png> <output.ytd>";
+            let source = required_arg(args.next(), USAGE)?;
+            let index = required_arg(args.next(), USAGE)?
+                .parse::<usize>()
+                .map_err(|_| invalid_input("texture-index must be a non-negative integer"))?;
+            let replacement = required_arg(args.next(), USAGE)?;
+            let output = required_arg(args.next(), USAGE)?;
+            ytd_repack_png(
                 Path::new(&source),
                 index,
                 Path::new(&replacement),
@@ -602,8 +627,10 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "ydd.rebind-shader",
         "ytd.info",
         "ytd.extract-dds",
+        "ytd.extract-png",
         "ytd.replace-dds",
         "ytd.repack-dds",
+        "ytd.repack-png",
         "ytd.repack-rgba",
         "ytd.rebuild-compact",
         "ybn.info",
@@ -650,8 +677,10 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "ymf-info",
         "ytd-info",
         "ytd-dds",
+        "ytd-png",
         "ytd-replace-dds",
         "ytd-repack-dds",
+        "ytd-repack-png",
         "ytd-repack-rgba",
         "ytd-rebuild-compact",
         "extract",
@@ -689,8 +718,10 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "ymf-info",
         "ytd-info",
         "ytd-dds",
+        "ytd-png",
         "ytd-replace-dds",
         "ytd-repack-dds",
+        "ytd-repack-png",
         "ytd-repack-rgba",
         "ytd-rebuild-compact",
         "extract",
@@ -710,8 +741,10 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "ydd.rebind-shader",
         "ytd.info",
         "ytd.extract-dds",
+        "ytd.extract-png",
         "ytd.replace-dds",
         "ytd.repack-dds",
+        "ytd.repack-png",
         "ytd.repack-rgba",
         "ytd.rebuild-compact",
         "ybn.info",
@@ -794,8 +827,10 @@ ragelab ydd rebind-texture <source.ydd> <drawable-index> <source-shader> <source
 ragelab ydd rebind-shader <source.ydd> <drawable-index> <model-index> <geometry-index> <target-shader-index> <output.ydd>\n  \
 ragelab ytd info <file.ytd>\n  \
 ragelab ytd extract-dds <file.ytd> <texture-index> <output.dds>\n  \
+ragelab ytd extract-png <file.ytd> <texture-index> <output.png>\n  \
 ragelab ytd replace-dds <source.ytd> <texture-index> <replacement.dds> <output.ytd>\n  \
 ragelab ytd repack-dds <source.ytd> <texture-index> <replacement.dds> <output.ytd>\n  \
+ragelab ytd repack-png <source.ytd> <texture-index> <replacement.png> <output.ytd>\n  \
 ragelab ytd repack-rgba <source.ytd> <texture-index> <width> <height> <replacement.rgba> <output.ytd>\n  \
 ragelab ytd rebuild-compact <source.ytd> <output.ytd>\n  \
 ragelab ybn info <file.ybn>\n  \
@@ -1754,6 +1789,34 @@ fn ytd_dds(path: &Path, index: usize, output: &Path) -> Result<(), Box<dyn Error
     Ok(())
 }
 
+fn ytd_png(path: &Path, index: usize, output: &Path) -> Result<(), Box<dyn Error>> {
+    let bytes = fs::read(path)?;
+    let ytd = Ytd::from_bytes(&bytes)?;
+    let texture = ytd.textures.get(index).ok_or_else(|| {
+        invalid_input(format!(
+            "texture index {index} is out of bounds for YTD with {} textures",
+            ytd.textures.len()
+        ))
+    })?;
+    let png = export_ytd_texture_png(&bytes, index)?;
+
+    if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(output, &png)?;
+
+    println!("file: {}", path.display());
+    println!("texture-index: {index}");
+    println!("texture: {}", texture.name);
+    println!("hash: 0x{:08X}", texture.dictionary_hash);
+    println!("size: {}x{}", texture.width, texture.height);
+    println!("format: {}", texture.format.normalized_name());
+    println!("png-bytes: {}", png.len());
+    println!("output: {}", output.display());
+    println!("exported-mips: top");
+    Ok(())
+}
+
 fn validate_new_ytd_output(source: &Path, output: &Path) -> Result<(), io::Error> {
     let source_canonical = fs::canonicalize(source)?;
     if output.exists() {
@@ -1919,6 +1982,66 @@ fn ytd_repack_dds(
     println!("replacement-dds: {}", replacement.display());
     println!("output: {}", output.display());
     println!("payload-relocated: yes");
+    println!("format-preserved: yes");
+    Ok(())
+}
+
+fn ytd_repack_png(
+    source: &Path,
+    index: usize,
+    replacement: &Path,
+    output: &Path,
+) -> Result<(), Box<dyn Error>> {
+    validate_new_ytd_output(source, output)?;
+
+    let source_bytes = fs::read(source)?;
+    let replacement_bytes = fs::read(replacement)?;
+    let before = Ytd::from_bytes(&source_bytes)?;
+    let before_texture = before.textures.get(index).cloned().ok_or_else(|| {
+        invalid_input(format!(
+            "texture index {index} is out of bounds for YTD with {} textures",
+            before.textures.len()
+        ))
+    })?;
+    let rewritten = replace_ytd_texture_from_png(&source_bytes, index, &replacement_bytes)?;
+    let after = Ytd::from_bytes(&rewritten)?;
+    let after_texture = after.textures.get(index).ok_or_else(|| {
+        io::Error::other("PNG-repacked YTD lost the replaced texture during semantic reparse")
+    })?;
+
+    if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output)?;
+    use std::io::Write as _;
+    file.write_all(&rewritten)?;
+    file.flush()?;
+    if fs::read(source)? != source_bytes {
+        return Err(io::Error::other("source changed during PNG YTD repack").into());
+    }
+    Ytd::from_bytes(&fs::read(output)?)?;
+
+    println!("source: {}", source.display());
+    println!("texture-index: {index}");
+    println!("texture: {}", after_texture.name);
+    println!("hash: 0x{:08X}", after_texture.dictionary_hash);
+    println!(
+        "size: {}x{} -> {}x{}",
+        before_texture.width, before_texture.height, after_texture.width, after_texture.height
+    );
+    println!("format: {}", after_texture.format.normalized_name());
+    println!(
+        "mip-levels: {} -> {}",
+        before_texture.levels, after_texture.levels
+    );
+    println!("replacement-png: {}", replacement.display());
+    println!("output: {}", output.display());
+    println!("semantic-reopen: yes");
+    println!("source-unchanged: yes");
+    println!("mips-generated: yes");
     println!("format-preserved: yes");
     Ok(())
 }

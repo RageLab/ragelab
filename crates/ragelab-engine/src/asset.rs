@@ -316,6 +316,7 @@ fn inspect_format(bytes: &[u8], asset_type: &str) -> Result<Value, io::Error> {
                 "textureCount": ytd.textures.len(),
                 "formats": formats,
                 "textures": textures,
+                "authoring": crate::ytd_texture_authoring_report(bytes)?,
             }))
         }
         "YBN" => {
@@ -346,12 +347,14 @@ fn inspect_format(bytes: &[u8], asset_type: &str) -> Result<Value, io::Error> {
                     .embedded_textures
                     .as_ref()
                     .map_or(0, |dictionary| dictionary.textures().len()),
+                "materialAuthoring": crate::ydr_material_authoring_report(bytes)?,
             }))
         }
         "YDD" => {
             let dictionary = YddDictionary::from_bytes(bytes).map_err(validation_error)?;
             Ok(json!({
                 "drawables": dictionary.entries().len(),
+                "materialAuthoring": crate::ydd_material_authoring_report(bytes)?,
             }))
         }
         _ => Ok(Value::Null),
@@ -622,6 +625,10 @@ fn operations_for(
                 .textures
                 .iter()
                 .any(|texture| texture.depth == 1 && texture.format.supports_classic_dds());
+            let png_available = ytd
+                .textures
+                .iter()
+                .any(|texture| texture.depth == 1 && texture.format.supports_rgba_preview());
             let rgba_available = ytd
                 .textures
                 .iter()
@@ -677,6 +684,23 @@ fn operations_for(
                     &["textureIndex", "output"],
                 ),
                 operation_with_availability(
+                    "ytd.extract-png",
+                    true,
+                    false,
+                    false,
+                    if png_available {
+                        AssetOperationAvailability::Parameterized
+                    } else {
+                        AssetOperationAvailability::Unavailable
+                    },
+                    if png_available {
+                        Some("exports the decoded top mip as portable RGBA PNG without modifying the YTD")
+                    } else {
+                        Some("no 2D texture supports RGBA top-mip decode")
+                    },
+                    &["textureIndex", "output"],
+                ),
+                operation_with_availability(
                     "ytd.replace-dds",
                     true,
                     false,
@@ -700,6 +724,21 @@ fn operations_for(
                         AssetOperationAvailability::Unavailable
                     },
                     Some("eligibility depends on the selected Legacy texture and replacement DDS"),
+                    &["textureIndex", "replacement"],
+                ),
+                operation_with_availability(
+                    "ytd.repack-png",
+                    true,
+                    false,
+                    false,
+                    if rgba_available {
+                        AssetOperationAvailability::Parameterized
+                    } else {
+                        AssetOperationAvailability::Unavailable
+                    },
+                    Some(
+                        "PNG is decoded to RGBA8; target Legacy format is preserved and a complete mip chain is regenerated",
+                    ),
                     &["textureIndex", "replacement"],
                 ),
                 operation_with_availability(
