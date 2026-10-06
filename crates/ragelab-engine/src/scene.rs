@@ -754,6 +754,49 @@ pub(crate) fn workspace_scene_manifest_with_sources(
     let bytes = fs::read(&resolved_ymap)?;
     let ymap = Ymap::from_bytes(&bytes)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    workspace_scene_manifest_from_ymap_with_sources(
+        workspace,
+        &resolved_ymap,
+        &ymap,
+        fallback_roots,
+        rpf_mounts,
+        game_index_source,
+        options,
+    )
+}
+
+pub fn workspace_scene_manifest_from_ymap_with_sources(
+    workspace: &Path,
+    ymap_path: &Path,
+    ymap: &Ymap,
+    fallback_roots: &[PathBuf],
+    rpf_mounts: &[SceneRpfMount],
+    game_index_source: Option<&SceneGameIndexSource>,
+    options: SceneAssemblyOptions,
+) -> Result<SceneManifest, io::Error> {
+    if !workspace.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("not a directory: {}", workspace.display()),
+        ));
+    }
+    for fallback_root in fallback_roots {
+        if !fallback_root.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "fallback root is not a directory: {}",
+                    fallback_root.display()
+                ),
+            ));
+        }
+    }
+
+    let resolved_ymap = if ymap_path.is_absolute() {
+        ymap_path.to_path_buf()
+    } else {
+        workspace.join(ymap_path)
+    };
     let mut index = WorkspaceIndex::scan_with_fallbacks(workspace, fallback_roots)
         .map_err(|error| io::Error::other(error.to_string()))?;
     for mount in rpf_mounts {
@@ -764,10 +807,10 @@ pub(crate) fn workspace_scene_manifest_with_sources(
 
     let mut source_warnings = Vec::new();
     if let Some(source) = game_index_source {
-        source_warnings = mount_game_index_for_ymap(&mut index, &ymap, source, options)?;
+        source_warnings = mount_game_index_for_ymap(&mut index, ymap, source, options)?;
     }
 
-    let mut manifest = assemble_ymap_scene(&index, &resolved_ymap, &ymap, options);
+    let mut manifest = assemble_ymap_scene(&index, &resolved_ymap, ymap, options);
     manifest.warnings.extend(source_warnings);
     Ok(manifest)
 }

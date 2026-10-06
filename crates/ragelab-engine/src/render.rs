@@ -11,15 +11,16 @@ use std::{
 
 use ragelab_assets::AssetKind;
 use ragelab_hash::joaat;
+use ragelab_ymap::Ymap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
     parse_model_preview_source, prepare_scene_asset_preview_input, resolve_diffuse_textures,
-    workspace_scene_manifest_with_sources, PreviewOptions, PreviewTextureDictionarySource,
-    ResolvedDiffuseTexture, SceneAssemblyOptions, SceneAssetPreviewSources, SceneAssetReference,
-    SceneAssetSelector, SceneManifest, SceneNode, SpatialTransform, MODEL_DIFFUSE_TEXTURE_LIMIT,
-    MODEL_DIFFUSE_TEXTURE_MAX_DIMENSION,
+    workspace_scene_manifest_from_ymap_with_sources, workspace_scene_manifest_with_sources,
+    PreviewOptions, PreviewTextureDictionarySource, ResolvedDiffuseTexture, SceneAssemblyOptions,
+    SceneAssetPreviewSources, SceneAssetReference, SceneAssetSelector, SceneManifest, SceneNode,
+    SpatialTransform, MODEL_DIFFUSE_TEXTURE_LIMIT, MODEL_DIFFUSE_TEXTURE_MAX_DIMENSION,
 };
 
 pub const RENDER_PACKAGE_SCHEMA_VERSION: u32 = 1;
@@ -662,6 +663,29 @@ pub fn workspace_scene_render_package_with_game_index(
     let manifest = workspace_scene_manifest_with_sources(
         workspace,
         ymap_path,
+        sources.fallback_roots,
+        sources.rpf_mounts,
+        sources.game_index,
+        scene_options,
+    )?;
+    build_scene_render_package(&manifest, options)
+}
+
+pub fn workspace_scene_render_package_from_ymap_bytes_with_game_index(
+    workspace: &Path,
+    ymap_path: &Path,
+    ymap_bytes: &[u8],
+    sources: SceneAssetPreviewSources<'_>,
+    scene_options: SceneAssemblyOptions,
+    render_options: RenderPackageOptions,
+) -> Result<RenderPackage, io::Error> {
+    let options = render_options.validate()?;
+    let ymap = Ymap::from_bytes(ymap_bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    let manifest = workspace_scene_manifest_from_ymap_with_sources(
+        workspace,
+        ymap_path,
+        &ymap,
         sources.fallback_roots,
         sources.rpf_mounts,
         sources.game_index,
@@ -1834,6 +1858,36 @@ mod tests {
         assert_eq!(decoded, package);
         decoded.validate().expect("validate package");
 
+        fs::remove_dir_all(workspace).expect("remove render workspace");
+    }
+
+    #[test]
+    fn in_memory_ymap_render_package_matches_path_pipeline() {
+        let workspace = render_workspace();
+        let ymap_path = workspace.join("simple.ymap");
+        let ymap_bytes = fs::read(&ymap_path).expect("read YMAP");
+        let from_path = workspace_scene_render_package(
+            &workspace,
+            Path::new("simple.ymap"),
+            SceneAssemblyOptions::default(),
+            RenderPackageOptions::default(),
+        )
+        .expect("path render package");
+        let from_memory = workspace_scene_render_package_from_ymap_bytes_with_game_index(
+            &workspace,
+            &ymap_path,
+            &ymap_bytes,
+            SceneAssetPreviewSources {
+                fallback_roots: &[],
+                rpf_mounts: &[],
+                game_index: None,
+            },
+            SceneAssemblyOptions::default(),
+            RenderPackageOptions::default(),
+        )
+        .expect("in-memory render package");
+
+        assert_eq!(from_memory, from_path);
         fs::remove_dir_all(workspace).expect("remove render workspace");
     }
 
