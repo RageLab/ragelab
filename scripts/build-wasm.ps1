@@ -39,11 +39,23 @@ if ($LASTEXITCODE -ne 0) { throw "wasm-bindgen failed with exit code $LASTEXITCO
 
 Copy-Item $packageTemplate (Join-Path $OutDir "package.json")
 
+function Get-Sha256Hex([string]$Path) {
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $hash = $sha256.ComputeHash($stream)
+    } finally {
+        $stream.Dispose()
+        $sha256.Dispose()
+    }
+    return ([System.BitConverter]::ToString($hash) -replace "-", "").ToLowerInvariant()
+}
+
 $files = Get-ChildItem -File $OutDir | Where-Object { $_.Name -ne "manifest.json" } | Sort-Object Name | ForEach-Object {
     [ordered]@{
         name = $_.Name
         bytes = $_.Length
-        sha256 = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()
+        sha256 = Get-Sha256Hex $_.FullName
     }
 }
 
