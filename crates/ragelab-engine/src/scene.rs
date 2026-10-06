@@ -815,12 +815,34 @@ fn mount_game_index_for_ymap(
         ));
     }
 
-    let plan = game_index.plan_for_archetypes(
+    mount_loaded_game_index_for_ymap(workspace_index, ymap, source, &game_index, options)
+}
+
+pub(crate) fn mount_loaded_game_index_for_ymap(
+    workspace_index: &mut WorkspaceIndex,
+    ymap: &Ymap,
+    source: &SceneGameIndexSource,
+    game_index: &GtaRpfAssetIndex,
+    options: SceneAssemblyOptions,
+) -> Result<Vec<String>, io::Error> {
+    mount_loaded_game_index_for_archetypes(
+        workspace_index,
         ymap.entities
             .iter()
             .take(options.effective_max_nodes())
             .map(|entity| entity.archetype_name.0),
-    );
+        source,
+        game_index,
+    )
+}
+
+pub(crate) fn mount_loaded_game_index_for_archetypes(
+    workspace_index: &mut WorkspaceIndex,
+    archetype_hashes: impl IntoIterator<Item = u32>,
+    source: &SceneGameIndexSource,
+    game_index: &GtaRpfAssetIndex,
+) -> Result<Vec<String>, io::Error> {
+    let plan = game_index.plan_for_archetypes(archetype_hashes);
 
     for selection in &plan.provider_selections {
         let locator = selection

@@ -1,4 +1,9 @@
-use std::{borrow::Cow, collections::HashMap, sync::mpsc, time::Instant};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+    sync::mpsc,
+    time::Instant,
+};
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Quat, Vec3};
@@ -10,8 +15,8 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use wgpu::util::DeviceExt;
 
 use crate::{
-    CameraSnapshot, OffscreenOptions, PickResult, Projection, RenderError, RenderResult,
-    RenderView, RenderedImage, ViewportOptions, ViewportStats,
+    CameraSnapshot, GpuCacheBudget, OffscreenOptions, PickResult, Projection, RenderError,
+    RenderResult, RenderView, RenderedImage, ViewportOptions, ViewportStats,
 };
 
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -160,6 +165,19 @@ struct GpuAsset {
     fallback_material: GpuMaterial,
 }
 
+#[derive(Debug, Clone)]
+struct GpuAssetCacheMeta {
+    bytes: u64,
+    last_used: u64,
+    texture_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GpuTextureCacheMeta {
+    bytes: u64,
+    last_used: u64,
+}
+
 struct DrawInstance {
     asset_key: String,
     model: Mat4,
@@ -219,6 +237,12 @@ pub struct OffscreenRenderer {
     white_texture: GpuTexture,
     asset_cache: HashMap<String, GpuAsset>,
     texture_cache: HashMap<String, GpuTexture>,
+    asset_cache_meta: HashMap<String, GpuAssetCacheMeta>,
+    texture_cache_meta: HashMap<String, GpuTextureCacheMeta>,
+    cache_epoch: u64,
+    cache_hits: u64,
+    cache_misses: u64,
+    cache_evictions: u64,
 }
 
 impl OffscreenRenderer {
@@ -466,6 +490,12 @@ impl OffscreenRenderer {
             white_texture,
             asset_cache: HashMap::new(),
             texture_cache: HashMap::new(),
+            asset_cache_meta: HashMap::new(),
+            texture_cache_meta: HashMap::new(),
+            cache_epoch: 0,
+            cache_hits: 0,
+            cache_misses: 0,
+            cache_evictions: 0,
         })
     }
 
@@ -731,9 +761,16 @@ impl OffscreenRenderer {
         descriptor: &RenderTextureDescriptor,
     ) -> RenderResult<()> {
         let key = texture_key(descriptor);
+        self.cache_epoch = self.cache_epoch.saturating_add(1);
+        let epoch = self.cache_epoch;
         if self.texture_cache.contains_key(&key) {
+            self.cache_hits = self.cache_hits.saturating_add(1);
+            if let Some(meta) = self.texture_cache_meta.get_mut(&key) {
+                meta.last_used = epoch;
+            }
             return Ok(());
         }
+        self.cache_misses = self.cache_misses.saturating_add(1);
         let bytes = view_bytes(
             package,
             descriptor.data,
@@ -749,7 +786,14 @@ impl OffscreenRenderer {
             u32::from(descriptor.height),
             bytes,
         )?;
-        self.texture_cache.insert(key, texture);
+        self.texture_cache.insert(key.clone(), texture);
+        self.texture_cache_meta.insert(
+            key,
+            GpuTextureCacheMeta {
+                bytes: descriptor.data.byte_length,
+                last_used: epoch,
+            },
+        );
         Ok(())
     }
 
@@ -759,10 +803,25 @@ impl OffscreenRenderer {
         descriptor: &RenderAssetDescriptor,
     ) -> RenderResult<()> {
         let key = asset_key(descriptor);
+        self.cache_epoch = self.cache_epoch.saturating_add(1);
+        let epoch = self.cache_epoch;
         if self.asset_cache.contains_key(&key) {
+            self.cache_hits = self.cache_hits.saturating_add(1);
+            if let Some(meta) = self.asset_cache_meta.get_mut(&key) {
+                meta.last_used = epoch;
+            }
             return Ok(());
         }
+        self.cache_misses = self.cache_misses.saturating_add(1);
 
+        let texture_keys = descriptor
+            .materials
+            .iter()
+            .filter_map(|material| material.diffuse_texture_ref)
+            .filter_map(|texture_ref| package.descriptor.textures.get(texture_ref as usize))
+            .map(texture_key)
+            .collect::<Vec<_>>();
+        let mut gpu_bytes = 0_u64;
         let mut materials = Vec::with_capacity(descriptor.materials.len());
         for material in &descriptor.materials {
             let view = if let Some(texture_ref) = material.diffuse_texture_ref {
@@ -820,6 +879,20 @@ impl OffscreenRenderer {
             };
             let indices = view_bytes(package, mesh.indices, RenderElementType::U32, 1, "indices")?;
             let wire = wire_indices(indices)?;
+            gpu_bytes = gpu_bytes
+                .saturating_add(mesh.positions.byte_length)
+                .saturating_add(mesh.indices.byte_length)
+                .saturating_add(
+                    mesh.normals
+                        .map(|view| view.byte_length)
+                        .unwrap_or((vertex_count as u64).saturating_mul(12)),
+                )
+                .saturating_add(
+                    mesh.uv0
+                        .map(|view| view.byte_length)
+                        .unwrap_or((vertex_count as u64).saturating_mul(8)),
+                )
+                .saturating_add((wire.len() as u64).saturating_mul(4));
 
             meshes.push(GpuMesh {
                 positions: self
@@ -866,14 +939,106 @@ impl OffscreenRenderer {
         }
 
         self.asset_cache.insert(
-            key,
+            key.clone(),
             GpuAsset {
                 meshes,
                 materials,
                 fallback_material,
             },
         );
+        self.asset_cache_meta.insert(
+            key,
+            GpuAssetCacheMeta {
+                bytes: gpu_bytes,
+                last_used: epoch,
+                texture_keys,
+            },
+        );
         Ok(())
+    }
+
+    fn cache_bytes(&self) -> (u64, u64) {
+        let asset_bytes = self
+            .asset_cache_meta
+            .values()
+            .map(|meta| meta.bytes)
+            .fold(0_u64, u64::saturating_add);
+        let texture_bytes = self
+            .texture_cache_meta
+            .values()
+            .map(|meta| meta.bytes)
+            .fold(0_u64, u64::saturating_add);
+        (asset_bytes, texture_bytes)
+    }
+
+    fn evict_to_budget(&mut self, package: &RenderPackage, budget: GpuCacheBudget) -> bool {
+        let protected_assets = package
+            .descriptor
+            .assets
+            .iter()
+            .filter(|asset| asset.state == RenderAssetState::Ready)
+            .map(asset_key)
+            .collect::<HashSet<_>>();
+
+        loop {
+            let (asset_bytes, _) = self.cache_bytes();
+            if self.asset_cache.len() <= budget.max_assets as usize
+                && asset_bytes <= budget.max_asset_bytes
+            {
+                break;
+            }
+            let victim = self
+                .asset_cache_meta
+                .iter()
+                .filter(|(key, _)| !protected_assets.contains(*key))
+                .map(|(key, meta)| (meta.last_used, key.as_str()))
+                .min_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1)))
+                .map(|(_, key)| key.to_string());
+            let Some(key) = victim else {
+                break;
+            };
+            self.asset_cache.remove(&key);
+            self.asset_cache_meta.remove(&key);
+            self.cache_evictions = self.cache_evictions.saturating_add(1);
+        }
+
+        let mut protected_textures = package
+            .descriptor
+            .textures
+            .iter()
+            .map(texture_key)
+            .collect::<HashSet<_>>();
+        for meta in self.asset_cache_meta.values() {
+            protected_textures.extend(meta.texture_keys.iter().cloned());
+        }
+
+        loop {
+            let (_, texture_bytes) = self.cache_bytes();
+            if self.texture_cache.len() <= budget.max_textures as usize
+                && texture_bytes <= budget.max_texture_bytes
+            {
+                break;
+            }
+            let victim = self
+                .texture_cache_meta
+                .iter()
+                .filter(|(key, _)| !protected_textures.contains(*key))
+                .map(|(key, meta)| (meta.last_used, key.as_str()))
+                .min_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1)))
+                .map(|(_, key)| key.to_string());
+            let Some(key) = victim else {
+                break;
+            };
+            self.texture_cache.remove(&key);
+            self.texture_cache_meta.remove(&key);
+            self.cache_evictions = self.cache_evictions.saturating_add(1);
+        }
+
+        let (asset_bytes, texture_bytes) = self.cache_bytes();
+        self.asset_cache.len() > budget.max_assets as usize
+            || self.texture_cache.len() > budget.max_textures as usize
+            || asset_bytes > budget.max_asset_bytes
+            || texture_bytes > budget.max_texture_bytes
     }
 
     fn create_material(&self, view: &wgpu::TextureView) -> GpuMaterial {
@@ -1193,6 +1358,8 @@ pub struct SurfaceRenderer {
     world_bounds: Option<Aabb>,
     camera: Option<OrbitCamera>,
     selected_node_index: Option<u32>,
+    gpu_cache_budget: GpuCacheBudget,
+    gpu_budget_overflow: bool,
     scene_load_ms: f64,
     last_frame_ms: f64,
 }
@@ -1272,12 +1439,39 @@ impl SurfaceRenderer {
             world_bounds: None,
             camera: None,
             selected_node_index: None,
+            gpu_cache_budget: GpuCacheBudget::default(),
+            gpu_budget_overflow: false,
             scene_load_ms: 0.0,
             last_frame_ms: 0.0,
         })
     }
 
     pub fn set_package(&mut self, package: RenderPackage) -> RenderResult<()> {
+        self.replace_package(package, false)
+    }
+
+    pub fn update_streaming_package(&mut self, package: RenderPackage) -> RenderResult<()> {
+        self.replace_package(package, true)
+    }
+
+    pub fn set_gpu_cache_budget(&mut self, budget: GpuCacheBudget) -> RenderResult<()> {
+        let budget = budget.validate()?;
+        self.gpu_cache_budget = budget;
+        if let Some(package) = self.package.as_ref() {
+            self.gpu_budget_overflow = self.gpu.evict_to_budget(package, budget);
+        }
+        Ok(())
+    }
+
+    pub const fn gpu_cache_budget(&self) -> GpuCacheBudget {
+        self.gpu_cache_budget
+    }
+
+    fn replace_package(
+        &mut self,
+        package: RenderPackage,
+        preserve_camera: bool,
+    ) -> RenderResult<()> {
         let started = Instant::now();
         package
             .validate()
@@ -1297,12 +1491,20 @@ impl SurfaceRenderer {
             ));
         }
         let world_bounds = package_world_bounds(&package, &draws)?;
-        let camera = OrbitCamera::fit(world_bounds, self.options.projection);
+        let camera = if preserve_camera {
+            self.camera
+                .take()
+                .unwrap_or_else(|| OrbitCamera::fit(world_bounds, self.options.projection))
+        } else {
+            OrbitCamera::fit(world_bounds, self.options.projection)
+        };
+        let gpu_budget_overflow = self.gpu.evict_to_budget(&package, self.gpu_cache_budget);
         self.package = Some(package);
         self.draws = draws;
         self.world_bounds = Some(world_bounds);
         self.camera = Some(camera);
         self.selected_node_index = None;
+        self.gpu_budget_overflow = gpu_budget_overflow;
         self.scene_load_ms = started.elapsed().as_secs_f64() * 1000.0;
         Ok(())
     }
@@ -1402,6 +1604,7 @@ impl SurfaceRenderer {
             } else {
                 (0, 0, 0, 0, 0, 0)
             };
+        let (gpu_asset_cache_bytes, gpu_texture_cache_bytes) = self.gpu.cache_bytes();
         ViewportStats {
             width: self.options.width,
             height: self.options.height,
@@ -1412,6 +1615,12 @@ impl SurfaceRenderer {
             textures,
             gpu_asset_cache: self.gpu.asset_cache.len().try_into().unwrap_or(u32::MAX),
             gpu_texture_cache: self.gpu.texture_cache.len().try_into().unwrap_or(u32::MAX),
+            gpu_asset_cache_bytes,
+            gpu_texture_cache_bytes,
+            gpu_cache_hits: self.gpu.cache_hits,
+            gpu_cache_misses: self.gpu.cache_misses,
+            gpu_evictions: self.gpu.cache_evictions,
+            gpu_budget_overflow: self.gpu_budget_overflow,
             uploaded_payload_bytes,
             scene_load_ms: self.scene_load_ms,
             last_frame_ms: self.last_frame_ms,
@@ -1836,33 +2045,11 @@ fn create_texture(
 }
 
 fn asset_key(asset: &RenderAssetDescriptor) -> String {
-    let selector = asset
-        .selector
-        .as_ref()
-        .map(|selector| {
-            format!(
-                "{}:{}:{:08X}:{}",
-                selector.selector_type,
-                selector.index,
-                selector.name_hash.unwrap_or(0),
-                selector.name.as_deref().unwrap_or("")
-            )
-        })
-        .unwrap_or_default();
-    format!(
-        "{}|{}|{:08X}|{}",
-        asset.source.source_type,
-        asset.source.path,
-        asset.hash.unwrap_or(0),
-        selector
-    )
+    asset.stable_key()
 }
 
 fn texture_key(texture: &RenderTextureDescriptor) -> String {
-    format!(
-        "{}|{}|{:08X}|{}x{}",
-        texture.source, texture.source_path, texture.name_hash, texture.width, texture.height
-    )
+    texture.stable_key()
 }
 
 fn view_bytes<'a>(

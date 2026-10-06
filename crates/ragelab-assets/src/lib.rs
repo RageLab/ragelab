@@ -461,6 +461,29 @@ pub struct WorkspaceIndex {
 }
 
 impl WorkspaceIndex {
+    /// Create an empty resolver catalog rooted at `root`.
+    ///
+    /// This is used by streamed game-world chunks that mount only the exact
+    /// RPF providers selected by the persistent game index instead of scanning
+    /// a filesystem workspace.
+    pub fn empty(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            files: BTreeMap::new(),
+            archetype_providers: BTreeMap::new(),
+            scene_rpf_files: BTreeMap::new(),
+            scene_rpf_archetype_providers: BTreeMap::new(),
+            ytyp_records: BTreeMap::new(),
+            source_map_dependencies: BTreeMap::new(),
+            source_ytyp_dependencies: BTreeMap::new(),
+            source_interior_bounds: BTreeMap::new(),
+            ymap_children: BTreeMap::new(),
+            texture_parents: BTreeMap::new(),
+            scene_rpf_texture_parents: BTreeMap::new(),
+            warnings: Vec::new(),
+        }
+    }
+
     pub fn scan(root: impl AsRef<Path>) -> Result<Self, WorkspaceError> {
         let root = root.as_ref().to_path_buf();
         if !root.is_dir() {
@@ -474,21 +497,7 @@ impl WorkspaceIndex {
         })?;
         paths.sort();
 
-        let mut index = Self {
-            root,
-            files: BTreeMap::new(),
-            archetype_providers: BTreeMap::new(),
-            scene_rpf_files: BTreeMap::new(),
-            scene_rpf_archetype_providers: BTreeMap::new(),
-            ytyp_records: BTreeMap::new(),
-            source_map_dependencies: BTreeMap::new(),
-            source_ytyp_dependencies: BTreeMap::new(),
-            source_interior_bounds: BTreeMap::new(),
-            ymap_children: BTreeMap::new(),
-            texture_parents: BTreeMap::new(),
-            scene_rpf_texture_parents: BTreeMap::new(),
-            warnings: Vec::new(),
-        };
+        let mut index = Self::empty(root);
 
         for path in &paths {
             let Some(kind) = file_kind(path) else {

@@ -364,6 +364,31 @@ pub struct RenderAssetDescriptor {
     pub materials: Vec<RenderMaterialDescriptor>,
 }
 
+impl RenderAssetDescriptor {
+    pub fn stable_key(&self) -> String {
+        let selector = self
+            .selector
+            .as_ref()
+            .map(|selector| {
+                format!(
+                    "{}:{}:{:08X}:{}",
+                    selector.selector_type,
+                    selector.index,
+                    selector.name_hash.unwrap_or(0),
+                    selector.name.as_deref().unwrap_or("")
+                )
+            })
+            .unwrap_or_default();
+        format!(
+            "{}|{}|{:08X}|{}",
+            self.source.source_type,
+            self.source.path,
+            self.hash.unwrap_or(0),
+            selector
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenderSourceDescriptor {
@@ -440,6 +465,15 @@ pub struct RenderTextureDescriptor {
     pub downscaled: bool,
     pub format: RenderTextureFormat,
     pub data: RenderBufferView,
+}
+
+impl RenderTextureDescriptor {
+    pub fn stable_key(&self) -> String {
+        format!(
+            "{}|{}|{:08X}|{}x{}",
+            self.source, self.source_path, self.name_hash, self.width, self.height
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -636,6 +670,269 @@ pub fn workspace_scene_render_package_with_game_index(
     build_scene_render_package(&manifest, options)
 }
 
+pub fn merge_render_packages(
+    root: RenderSceneRoot,
+    packages: &[&RenderPackage],
+) -> Result<RenderPackage, io::Error> {
+    if packages.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "at least one render package is required for merge",
+        ));
+    }
+    for package in packages {
+        package.validate()?;
+    }
+
+    let mut blob = Vec::new();
+    let mut textures = Vec::<RenderTextureDescriptor>::new();
+    let mut texture_keys = BTreeMap::<String, u32>::new();
+    let mut texture_maps = Vec::<BTreeMap<u32, u32>>::with_capacity(packages.len());
+
+    for package in packages {
+        let mut mapping = BTreeMap::new();
+        for texture in &package.descriptor.textures {
+            let key = texture.stable_key();
+            let merged_id = if let Some(existing) = texture_keys.get(&key) {
+                *existing
+            } else {
+                let id = u32::try_from(textures.len()).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "texture count exceeds u32")
+                })?;
+                let mut merged = texture.clone();
+                merged.id = id;
+                merged.data = copy_render_view(package, texture.data, &mut blob)?;
+                texture_keys.insert(key, id);
+                textures.push(merged);
+                id
+            };
+            mapping.insert(texture.id, merged_id);
+        }
+        texture_maps.push(mapping);
+    }
+
+    let mut assets = Vec::<RenderAssetDescriptor>::new();
+    let mut asset_keys = BTreeMap::<String, u32>::new();
+    let mut asset_maps = Vec::<BTreeMap<u32, u32>>::with_capacity(packages.len());
+
+    for (package_index, package) in packages.iter().enumerate() {
+        let mut mapping = BTreeMap::new();
+        for asset in &package.descriptor.assets {
+            let key = asset.stable_key();
+            let merged_ref = if let Some(existing) = asset_keys.get(&key) {
+                let existing_asset = &assets[*existing as usize];
+                if existing_asset.state != asset.state {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("stable render asset key has inconsistent states: {key}"),
+                    ));
+                }
+                *existing
+            } else {
+                if assets.len() >= HARD_RENDER_MAX_ASSETS {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "merged render package exceeds hard asset limit {}",
+                            HARD_RENDER_MAX_ASSETS
+                        ),
+                    ));
+                }
+                let asset_ref = u32::try_from(assets.len()).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "asset count exceeds u32")
+                })?;
+                let mut merged = asset.clone();
+                merged.asset_ref = asset_ref;
+                for mesh in &mut merged.meshes {
+                    mesh.positions = copy_render_view(package, mesh.positions, &mut blob)?;
+                    mesh.indices = copy_render_view(package, mesh.indices, &mut blob)?;
+                    mesh.normals = mesh
+                        .normals
+                        .map(|view| copy_render_view(package, view, &mut blob))
+                        .transpose()?;
+                    mesh.uv0 = mesh
+                        .uv0
+                        .map(|view| copy_render_view(package, view, &mut blob))
+                        .transpose()?;
+                }
+                for material in &mut merged.materials {
+                    material.diffuse_texture_ref = material
+                        .diffuse_texture_ref
+                        .map(|old| {
+                            texture_maps[package_index]
+                                .get(&old)
+                                .copied()
+                                .ok_or_else(|| {
+                                    io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        "material texture ref missing from merge mapping",
+                                    )
+                                })
+                        })
+                        .transpose()?;
+                }
+                asset_keys.insert(key, asset_ref);
+                assets.push(merged);
+                asset_ref
+            };
+            mapping.insert(asset.asset_ref, merged_ref);
+        }
+        asset_maps.push(mapping);
+    }
+
+    let mut instances = Vec::new();
+    let mut node_maps = Vec::<BTreeMap<u32, u32>>::with_capacity(packages.len());
+    for (package_index, package) in packages.iter().enumerate() {
+        let mut node_mapping = BTreeMap::new();
+        for instance in &package.descriptor.scene.instances {
+            let node_index = u32::try_from(instances.len()).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "instance count exceeds u32")
+            })?;
+            let mut merged = instance.clone();
+            merged.node_index = node_index;
+            merged.asset_ref = merged
+                .asset_ref
+                .map(|old| {
+                    asset_maps[package_index].get(&old).copied().ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "instance asset ref missing from merge mapping",
+                        )
+                    })
+                })
+                .transpose()?;
+            if let Some(collision) = merged.collision.as_mut() {
+                collision.asset_ref = collision
+                    .asset_ref
+                    .map(|old| {
+                        asset_maps[package_index].get(&old).copied().ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "collision asset ref missing from merge mapping",
+                            )
+                        })
+                    })
+                    .transpose()?;
+            }
+            node_mapping.insert(instance.node_index, node_index);
+            instances.push(merged);
+        }
+        node_maps.push(node_mapping);
+    }
+
+    let mut diagnostics = Vec::new();
+    for (package_index, package) in packages.iter().enumerate() {
+        for diagnostic in &package.descriptor.diagnostics {
+            let mut merged = diagnostic.clone();
+            merged.asset_ref = merged
+                .asset_ref
+                .and_then(|old| asset_maps[package_index].get(&old).copied());
+            merged.node_index = merged
+                .node_index
+                .and_then(|old| node_maps[package_index].get(&old).copied());
+            diagnostics.push(merged);
+        }
+    }
+
+    if blob.len() > HARD_RENDER_MAX_BLOB_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "merged render package exceeds hard blob limit {}",
+                HARD_RENDER_MAX_BLOB_BYTES
+            ),
+        ));
+    }
+
+    let summary = summarize(&instances, &assets, &textures, blob.len());
+    let limits = RenderPackageLimits {
+        max_assets: u32::try_from(assets.len()).unwrap_or(u32::MAX),
+        max_blob_bytes: HARD_RENDER_MAX_BLOB_BYTES as u64,
+        omitted_assets: packages
+            .iter()
+            .map(|package| package.descriptor.limits.omitted_assets)
+            .fold(0_u32, u32::saturating_add),
+        max_primitives_per_asset: packages
+            .iter()
+            .map(|package| package.descriptor.limits.max_primitives_per_asset)
+            .max()
+            .unwrap_or(0),
+        max_vertices_per_asset: packages
+            .iter()
+            .map(|package| package.descriptor.limits.max_vertices_per_asset)
+            .max()
+            .unwrap_or(0),
+        max_indices_per_asset: packages
+            .iter()
+            .map(|package| package.descriptor.limits.max_indices_per_asset)
+            .max()
+            .unwrap_or(0),
+        max_shaders_per_asset: packages
+            .iter()
+            .map(|package| package.descriptor.limits.max_shaders_per_asset)
+            .max()
+            .unwrap_or(0),
+        max_diffuse_textures_per_asset: packages
+            .iter()
+            .map(|package| package.descriptor.limits.max_diffuse_textures_per_asset)
+            .max()
+            .unwrap_or(0),
+        max_texture_dimension: packages
+            .iter()
+            .map(|package| package.descriptor.limits.max_texture_dimension)
+            .max()
+            .unwrap_or(0),
+    };
+    let merged = RenderPackage {
+        descriptor: RenderPackageDescriptor {
+            schema_version: RENDER_PACKAGE_SCHEMA_VERSION,
+            scene: RenderSceneDescriptor { root, instances },
+            assets,
+            textures,
+            diagnostics,
+            summary,
+            limits,
+        },
+        blob,
+    };
+    merged.validate()?;
+    Ok(merged)
+}
+
+fn copy_render_view(
+    source: &RenderPackage,
+    view: RenderBufferView,
+    target: &mut Vec<u8>,
+) -> Result<RenderBufferView, io::Error> {
+    view.validate(source.blob.len())?;
+    let start = usize::try_from(view.offset)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "render view offset overflow"))?;
+    let length = usize::try_from(view.byte_length)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "render view length overflow"))?;
+    let end = start
+        .checked_add(length)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "render view range overflow"))?;
+    let alignment = usize::try_from(view.element_type.alignment()).unwrap_or(1);
+    while target.len() % alignment != 0 {
+        target.push(0);
+    }
+    let offset = target.len();
+    let new_len = offset
+        .checked_add(length)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "merged blob size overflow"))?;
+    if new_len > HARD_RENDER_MAX_BLOB_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "merged render blob exceeds hard limit",
+        ));
+    }
+    target.extend_from_slice(&source.blob[start..end]);
+    let mut merged = view;
+    merged.offset = u64::try_from(offset)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "merged view offset overflow"))?;
+    Ok(merged)
+}
+
 pub fn render_asset_package_bytes_as(
     path_label: &str,
     asset_type: &str,
@@ -702,7 +999,7 @@ pub fn render_asset_package_bytes_as(
     Ok(package)
 }
 
-fn build_scene_render_package(
+pub(crate) fn build_scene_render_package(
     manifest: &SceneManifest,
     options: RenderPackageOptions,
 ) -> Result<RenderPackage, io::Error> {
@@ -1536,6 +1833,51 @@ mod tests {
         let decoded = RenderPackage::decode_binary(&first).expect("decode package");
         assert_eq!(decoded, package);
         decoded.validate().expect("validate package");
+
+        fs::remove_dir_all(workspace).expect("remove render workspace");
+    }
+
+    #[test]
+    fn merged_chunks_deduplicate_payload_and_recanonicalize_instances() {
+        let workspace = render_workspace();
+        let package = workspace_scene_render_package(
+            &workspace,
+            Path::new("simple.ymap"),
+            SceneAssemblyOptions::default(),
+            RenderPackageOptions::default(),
+        )
+        .expect("build render package");
+        let merged = merge_render_packages(
+            RenderSceneRoot {
+                path: "gta://test-stream".into(),
+                name_hash: None,
+            },
+            &[&package, &package],
+        )
+        .expect("merge chunks");
+
+        assert_eq!(
+            merged.descriptor.assets.len(),
+            package.descriptor.assets.len(),
+            "stable asset identity must deduplicate across chunks"
+        );
+        assert_eq!(
+            merged.descriptor.textures.len(),
+            package.descriptor.textures.len(),
+            "stable texture identity must deduplicate across chunks"
+        );
+        assert_eq!(
+            merged.descriptor.scene.instances.len(),
+            package.descriptor.scene.instances.len() * 2
+        );
+        assert_eq!(merged.descriptor.scene.instances[0].node_index, 0);
+        assert_eq!(merged.descriptor.scene.instances[1].node_index, 1);
+        assert_eq!(
+            merged.blob.len(),
+            package.blob.len(),
+            "duplicate chunk payload must not be copied twice"
+        );
+        merged.validate().expect("merged package remains canonical");
 
         fs::remove_dir_all(workspace).expect("remove render workspace");
     }

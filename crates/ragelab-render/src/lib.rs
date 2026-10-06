@@ -218,6 +218,41 @@ pub struct PickResult {
     pub distance: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuCacheBudget {
+    pub max_assets: u32,
+    pub max_textures: u32,
+    pub max_asset_bytes: u64,
+    pub max_texture_bytes: u64,
+}
+
+impl Default for GpuCacheBudget {
+    fn default() -> Self {
+        Self {
+            max_assets: 2_048,
+            max_textures: 4_096,
+            max_asset_bytes: 384 * 1024 * 1024,
+            max_texture_bytes: 256 * 1024 * 1024,
+        }
+    }
+}
+
+impl GpuCacheBudget {
+    pub fn validate(self) -> RenderResult<Self> {
+        if self.max_assets == 0
+            || self.max_textures == 0
+            || self.max_asset_bytes == 0
+            || self.max_texture_bytes == 0
+        {
+            return Err(RenderError::InvalidInput(
+                "GPU cache budgets must be greater than zero".into(),
+            ));
+        }
+        Ok(self)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ViewportStats {
@@ -230,6 +265,12 @@ pub struct ViewportStats {
     pub textures: u32,
     pub gpu_asset_cache: u32,
     pub gpu_texture_cache: u32,
+    pub gpu_asset_cache_bytes: u64,
+    pub gpu_texture_cache_bytes: u64,
+    pub gpu_cache_hits: u64,
+    pub gpu_cache_misses: u64,
+    pub gpu_evictions: u64,
+    pub gpu_budget_overflow: bool,
     pub uploaded_payload_bytes: u64,
     pub scene_load_ms: f64,
     pub last_frame_ms: f64,

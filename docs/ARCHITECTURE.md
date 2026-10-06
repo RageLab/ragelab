@@ -65,7 +65,7 @@ The application layer also owns the persistent GTA V Legacy RPF/world index. The
 
 ### Native renderer
 
-`ragelab-render` is the reusable native/wgpu rendering layer. It consumes only the engine-owned `RenderPackage` contract and must not depend on RAGE format crates. The initial backend is deterministic offscreen rendering for PNG/visual regression; later native viewport work reuses the same GPU packet/cache vocabulary. See [RENDERER.md](RENDERER.md).
+`ragelab-render` is the reusable native/wgpu rendering layer. It consumes only the engine-owned `RenderPackage` contract and must not depend on RAGE format crates. The native viewport supports camera-preserving streaming package swaps plus bounded inactive GPU residency using the same stable asset/texture identities as Core package merging. `ragelab-engine::world_stream` drives nearby-map selection, chunk CPU caching, local-overlay precedence, deterministic eviction and active-package merging over the persistent world index without assembling the full installed world. See [RENDERER.md](RENDERER.md) and [WORLD_STREAMING.md](WORLD_STREAMING.md).
 
 ### CLI
 
