@@ -1370,6 +1370,9 @@ pub struct SurfaceRenderer {
     world_bounds: Option<Aabb>,
     camera: Option<OrbitCamera>,
     selected_node_index: Option<u32>,
+    hidden_node_indices: HashSet<u32>,
+    show_base_game: bool,
+    show_local_overlays: bool,
     gpu_cache_budget: GpuCacheBudget,
     gpu_budget_overflow: bool,
     scene_load_ms: f64,
@@ -1451,6 +1454,9 @@ impl SurfaceRenderer {
             world_bounds: None,
             camera: None,
             selected_node_index: None,
+            hidden_node_indices: HashSet::new(),
+            show_base_game: true,
+            show_local_overlays: true,
             gpu_cache_budget: GpuCacheBudget::default(),
             gpu_budget_overflow: false,
             scene_load_ms: 0.0,
@@ -1516,6 +1522,7 @@ impl SurfaceRenderer {
         self.world_bounds = Some(world_bounds);
         self.camera = Some(camera);
         self.selected_node_index = None;
+        self.hidden_node_indices.clear();
         self.gpu_budget_overflow = gpu_budget_overflow;
         self.scene_load_ms = started.elapsed().as_secs_f64() * 1000.0;
         Ok(())
@@ -1586,6 +1593,7 @@ impl SurfaceRenderer {
         let (origin, direction) = camera.ray(self.options.width, self.options.height, x, y)?;
         self.draws
             .iter()
+            .filter(|draw| self.draw_visible(draw))
             .filter_map(|draw| {
                 let node_index = draw.node_index?;
                 let distance = ray_aabb(origin, direction, draw.world_bounds)?;
@@ -1595,6 +1603,80 @@ impl SurfaceRenderer {
                 })
             })
             .min_by(|a, b| a.distance.total_cmp(&b.distance))
+    }
+
+    pub fn focus_node(&mut self, node_index: u32) -> bool {
+        let Some(draw) = self
+            .draws
+            .iter()
+            .find(|draw| draw.node_index == Some(node_index) && self.draw_visible(draw))
+        else {
+            return false;
+        };
+        self.camera = Some(OrbitCamera::fit(draw.world_bounds, self.options.projection));
+        true
+    }
+
+    pub fn set_node_visible(&mut self, node_index: u32, visible: bool) -> bool {
+        if !self
+            .draws
+            .iter()
+            .any(|draw| draw.node_index == Some(node_index))
+        {
+            return false;
+        }
+        if visible {
+            self.hidden_node_indices.remove(&node_index);
+        } else {
+            self.hidden_node_indices.insert(node_index);
+            if self.selected_node_index == Some(node_index) {
+                self.select(None);
+            }
+        }
+        true
+    }
+
+    pub fn isolate_node(&mut self, node_index: u32) -> bool {
+        if !self
+            .draws
+            .iter()
+            .any(|draw| draw.node_index == Some(node_index))
+        {
+            return false;
+        }
+        self.hidden_node_indices = self
+            .draws
+            .iter()
+            .filter_map(|draw| draw.node_index.filter(|candidate| *candidate != node_index))
+            .collect();
+        true
+    }
+
+    pub fn show_all_nodes(&mut self) {
+        self.hidden_node_indices.clear();
+    }
+
+    pub fn set_layer_visibility(&mut self, base_game: bool, local_overlays: bool) {
+        self.show_base_game = base_game;
+        self.show_local_overlays = local_overlays;
+        if self.selected_node_index.is_some_and(|selected| {
+            self.draws
+                .iter()
+                .find(|draw| draw.node_index == Some(selected))
+                .is_some_and(|draw| !self.draw_visible(draw))
+        }) {
+            self.select(None);
+        }
+    }
+
+    fn draw_visible(&self, draw: &DrawInstance) -> bool {
+        draw_visibility(
+            draw.node_index,
+            draw.local_overlay,
+            &self.hidden_node_indices,
+            self.show_base_game,
+            self.show_local_overlays,
+        )
     }
 
     pub fn select(&mut self, node_index: Option<u32>) {
@@ -1751,6 +1833,9 @@ impl SurfaceRenderer {
             pass.set_bind_group(0, &camera_bind_group, &[]);
             pass.set_pipeline(&self.mesh_pipeline);
             for draw in &self.draws {
+                if !self.draw_visible(draw) {
+                    continue;
+                }
                 let asset = self.gpu.asset_cache.get(&draw.asset_key).ok_or_else(|| {
                     RenderError::Gpu(format!("GPU asset cache missing {}", draw.asset_key))
                 })?;
@@ -1772,6 +1857,9 @@ impl SurfaceRenderer {
             if self.options.wireframe {
                 pass.set_pipeline(&self.line_pipeline);
                 for draw in &self.draws {
+                    if !self.draw_visible(draw) {
+                        continue;
+                    }
                     let Some(asset) = self.gpu.asset_cache.get(&draw.asset_key) else {
                         continue;
                     };
@@ -2173,6 +2261,24 @@ fn asset_world_bounds(asset: &RenderAssetDescriptor, model: Mat4) -> RenderResul
     Ok(bounds)
 }
 
+fn draw_visibility(
+    node_index: Option<u32>,
+    local_overlay: bool,
+    hidden_node_indices: &HashSet<u32>,
+    show_base_game: bool,
+    show_local_overlays: bool,
+) -> bool {
+    let layer_visible = if local_overlay {
+        show_local_overlays
+    } else {
+        show_base_game
+    };
+    layer_visible
+        && node_index
+            .map(|node_index| !hidden_node_indices.contains(&node_index))
+            .unwrap_or(true)
+}
+
 fn package_world_bounds(_package: &RenderPackage, draws: &[DrawInstance]) -> RenderResult<Aabb> {
     let mut bounds = Aabb::empty();
     for draw in draws {
@@ -2328,6 +2434,19 @@ mod tests {
         assert!(moved.target.iter().all(|value| value.is_finite()));
         assert!(moved.distance > 0.0);
         assert_ne!(moved.eye, initial.eye);
+    }
+
+    #[test]
+    fn draw_visibility_respects_layer_and_hidden_node_state() {
+        let mut hidden = HashSet::new();
+        hidden.insert(7);
+
+        assert!(draw_visibility(Some(1), false, &hidden, true, true));
+        assert!(!draw_visibility(Some(7), false, &hidden, true, true));
+        assert!(!draw_visibility(Some(1), false, &hidden, false, true));
+        assert!(draw_visibility(Some(1), true, &hidden, false, true));
+        assert!(!draw_visibility(Some(1), true, &hidden, true, false));
+        assert!(draw_visibility(None, false, &hidden, true, true));
     }
 
     #[test]
