@@ -1,0 +1,22 @@
+{
+  "schema": "ragelab.hardening.budgets",
+  "schemaVersion": 1,
+  "native": {
+    "coldIndexBuildMs": 180000,
+    "warmIndexOpenMs": 10000,
+    "worldQueryP95Ms": 50,
+    "warmStreamUpdateP95Ms": 1000,
+    "previewFixtureMs": 5000,
+    "gpuAssetCacheBytes": 402653184,
+    "gpuTextureCacheBytes": 268435456
+  },
+  "web": {
+    "wasmBytes": 716800,
+    "javascriptBytes": 716800,
+    "cssBytes": 65536,
+    "coreReadyMs": 10000
+  },
+  "release": {
+    "studioSmokeMs": 120000
+  }
+}

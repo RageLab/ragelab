@@ -676,13 +676,13 @@ impl WorldStreamingRuntime {
             {
                 break;
             }
-            let victim = self
-                .cache
-                .iter()
-                .filter(|(key, _)| !self.active.contains(*key))
-                .map(|(key, chunk)| (chunk.last_used_tick, key.clone()))
-                .min();
-            let Some((_, key)) = victim else {
+            let victim = select_cpu_eviction_victim(
+                self.cache
+                    .iter()
+                    .map(|(key, chunk)| (key, chunk.last_used_tick)),
+                &self.active,
+            );
+            let Some(key) = victim else {
                 break;
             };
             self.cache.remove(&key);
@@ -697,6 +697,17 @@ impl WorldStreamingRuntime {
             .map(|chunk| chunk.bytes)
             .fold(0_u64, u64::saturating_add)
     }
+}
+
+fn select_cpu_eviction_victim<'a>(
+    entries: impl Iterator<Item = (&'a WorldStreamChunkKey, u64)>,
+    active: &BTreeSet<WorldStreamChunkKey>,
+) -> Option<WorldStreamChunkKey> {
+    entries
+        .filter(|(key, _)| !active.contains(*key))
+        .map(|(key, last_used_tick)| (last_used_tick, key.clone()))
+        .min()
+        .map(|(_, key)| key)
 }
 
 fn validate_source_paths(source: &SceneGameIndexSource) -> Result<(), io::Error> {
@@ -749,6 +760,35 @@ mod tests {
             ..WorldStreamConfig::default()
         };
         assert!(invalid_chunks.validate().is_err());
+    }
+
+    #[test]
+    fn cpu_eviction_prefers_oldest_inactive_chunk_with_stable_tie_break() {
+        let provider = GtaRpfIndexLocator {
+            archive_relative: "update/update.rpf".into(),
+            nested: vec!["x64/levels.rpf".into()],
+            entry: "maps/a.ymap".into(),
+            load_rank: 10,
+        };
+        let key1 = WorldStreamChunkKey {
+            map_hash: 1,
+            provider: provider.clone(),
+        };
+        let key2 = WorldStreamChunkKey {
+            map_hash: 2,
+            provider: provider.clone(),
+        };
+        let key3 = WorldStreamChunkKey {
+            map_hash: 3,
+            provider,
+        };
+        let active = BTreeSet::from([key1.clone()]);
+        let entries = vec![(&key1, 1), (&key3, 2), (&key2, 2)];
+
+        assert_eq!(
+            select_cpu_eviction_victim(entries.into_iter(), &active),
+            Some(key2)
+        );
     }
 
     #[test]

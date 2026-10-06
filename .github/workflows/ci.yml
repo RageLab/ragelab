@@ -17,10 +17,11 @@ jobs:
         with:
           toolchain: 1.80.0
           components: rustfmt, clippy
-      - name: Validate synthetic fixtures
+      - name: Validate synthetic fixtures and hardening contracts
         run: |
           python3 scripts/validate_synthetic.py
           python3 scripts/validate_synthetic_ymf.py
+          python3 scripts/check_hardening.py
       - name: Format
         run: cargo fmt --all -- --check
       - name: Check
@@ -29,3 +30,52 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+
+  visual-regression:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.80.0
+      - name: Build CLI renderer
+        run: cargo build -p ragelab
+      - name: Repeat-render synthetic fixtures and compare exactly
+        run: python scripts/run_visual_regression.py --tolerance 0
+
+  web:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.80.0
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-bindgen CLI
+        run: cargo install wasm-bindgen-cli --version 0.2.100 --locked
+      - name: Install Web dependencies
+        working-directory: apps/web-tools
+        run: bun install --frozen-lockfile
+      - name: Build reproducible Rust/WASM package
+        working-directory: apps/web-tools
+        run: bun run wasm:sync
+      - name: Build Web Tools and enforce byte budgets
+        working-directory: apps/web-tools
+        run: |
+          bun run build
+          bun run budget
+      - name: Install Playwright browser
+        working-directory: apps/web-tools
+        run: bunx playwright install ${{ matrix.browser }}
+      - name: Browser matrix
+        working-directory: apps/web-tools
+        env:
+          RAGELAB_BROWSER: ${{ matrix.browser }}
+        run: bun run test:browser

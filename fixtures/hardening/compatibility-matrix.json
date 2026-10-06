@@ -1,0 +1,110 @@
+{
+  "schema": "ragelab.hardening.compatibility-matrix",
+  "schemaVersion": 1,
+  "policy": "Only synthetic or explicitly redistributable bytes are committed. Installed GTA probes are metadata-only and optional.",
+  "cases": [
+    {
+      "id": "base-drawable",
+      "layer": "base",
+      "kind": "ydr",
+      "path": "fixtures/synthetic/ydr/embedded.ydr",
+      "checks": [
+        "inspect",
+        "preview",
+        "render"
+      ]
+    },
+    {
+      "id": "base-textures",
+      "layer": "base",
+      "kind": "ytd",
+      "path": "fixtures/synthetic/ytd/simple.ytd",
+      "checks": [
+        "inspect",
+        "preview",
+        "semantic-reopen-write"
+      ]
+    },
+    {
+      "id": "update-world-relations",
+      "layer": "update",
+      "kind": "ymap",
+      "path": "fixtures/synthetic/ymap-relations/relation_parent.ymap",
+      "checks": [
+        "inspect",
+        "world-relations"
+      ]
+    },
+    {
+      "id": "dlc-drawable-dictionary",
+      "layer": "dlc",
+      "kind": "ydd",
+      "path": "fixtures/synthetic/ydd/editable.ydd",
+      "checks": [
+        "inspect",
+        "preview",
+        "render"
+      ]
+    },
+    {
+      "id": "world-scene",
+      "layer": "world",
+      "kind": "ymap",
+      "path": "fixtures/synthetic/stream/simple.ymap",
+      "checks": [
+        "scene",
+        "render-package",
+        "dependency-closure"
+      ]
+    },
+    {
+      "id": "world-collision",
+      "layer": "world",
+      "kind": "ybn",
+      "path": "fixtures/synthetic/ybn/preview.ybn",
+      "checks": [
+        "inspect",
+        "preview",
+        "semantic-reopen-write"
+      ]
+    },
+    {
+      "id": "interior-mlo",
+      "layer": "interior",
+      "kind": "ytyp",
+      "path": "fixtures/synthetic/mlo.ytyp",
+      "checks": [
+        "inspect",
+        "mlo-topology"
+      ]
+    },
+    {
+      "id": "fragment-no-main",
+      "layer": "dlc",
+      "kind": "yft",
+      "path": "fixtures/synthetic/yft/no-main-drawable.yft",
+      "checks": [
+        "inspect",
+        "recoverable-unsupported"
+      ]
+    }
+  ],
+  "legacyBuildProfiles": [
+    {
+      "id": "synthetic-legacy-a",
+      "description": "Synthetic GTA5.exe/update.rpf/outer-RPF fingerprint profile A; no Rockstar bytes."
+    },
+    {
+      "id": "synthetic-legacy-b",
+      "description": "Synthetic profile B with different executable/update/archive metadata; must invalidate profile A index."
+    }
+  ],
+  "optionalInstalledProbes": [
+    {
+      "id": "legacy-sm23",
+      "query": "hei_sm_23_strm_0",
+      "expectedKind": "ymap",
+      "notes": "Run only against a user-owned installed Legacy build; no bytes are committed."
+    }
+  ]
+}

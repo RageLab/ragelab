@@ -8,6 +8,7 @@
     "dev": "vite",
     "check": "tsc --noEmit",
     "build": "tsc --noEmit && vite build",
+    "budget": "node ../../scripts/check-web-budgets.mjs",
     "test:browser": "playwright test"
   },
   "dependencies": {

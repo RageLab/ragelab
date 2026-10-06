@@ -278,7 +278,7 @@ pub(crate) fn parse_model_preview_source(
             let fragment = YftDocument::from_bytes(bytes).map_err(validation_error)?;
             let drawable = fragment.main_drawable.ok_or_else(|| {
                 io::Error::new(
-                    io::ErrorKind::InvalidData,
+                    io::ErrorKind::Unsupported,
                     "YFT fragment does not contain a pristine main drawable",
                 )
             })?;

@@ -68,6 +68,55 @@ fn inspect_json_uses_versioned_response_envelope() {
 }
 
 #[test]
+fn corrupt_asset_fails_closed_with_structured_validation_error() {
+    let root = temp_root("corrupt-asset");
+    fs::create_dir_all(&root).unwrap();
+    let source = fixture("ydr/editable.ydr");
+    let corrupt = root.join("corrupt.ydr");
+    let bytes = fs::read(source).unwrap();
+    fs::write(&corrupt, &bytes[..32]).unwrap();
+
+    let output = binary()
+        .args(["inspect", corrupt.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab inspect corrupt asset should run");
+
+    assert_eq!(output.status.code(), Some(4));
+    assert!(output.stderr.is_empty());
+    let body = stdout_json(&output);
+    assert_eq!(body["command"], "inspect");
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error"]["code"], "validation_failed");
+    assert!(body["error"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("decompression")));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn unsupported_preview_layout_is_distinct_from_corruption() {
+    let output = binary()
+        .args([
+            "preview",
+            fixture("yft/no-main-drawable.yft").to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("ragelab preview unsupported YFT should run");
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stderr.is_empty());
+    let body = stdout_json(&output);
+    assert_eq!(body["command"], "preview");
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error"]["code"], "unsupported");
+    assert!(body["error"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("pristine main drawable")));
+}
+
+#[test]
 fn validate_json_reports_checks() {
     let output = binary()
         .args([

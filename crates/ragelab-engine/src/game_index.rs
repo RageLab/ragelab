@@ -2528,6 +2528,133 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_legacy_build_profiles_invalidate_index_deterministically() {
+        let root = std::env::temp_dir().join(format!(
+            "ragelab-game-index-build-profiles-{}",
+            std::process::id()
+        ));
+        let update = root.join("update");
+        let dlc = update.join("x64").join("dlcpacks").join("syntheticpack");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&dlc).expect("create synthetic GTA profile");
+
+        fs::write(root.join("GTA5.exe"), b"synthetic-gta-profile-a").expect("write profile A exe");
+        fs::write(update.join("update.rpf"), b"synthetic-update-profile-a")
+            .expect("write profile A update");
+        fs::write(root.join("x64a.rpf"), b"synthetic-base-rpf-a")
+            .expect("write profile A base RPF");
+        fs::write(dlc.join("dlc.rpf"), b"synthetic-dlc-rpf-a").expect("write profile A DLC RPF");
+
+        let profile_a =
+            GtaRpfInstallationFingerprint::read(&root).expect("read profile A fingerprint");
+        let profile_a_repeat =
+            GtaRpfInstallationFingerprint::read(&root).expect("repeat profile A fingerprint");
+        assert_eq!(profile_a, profile_a_repeat);
+
+        let mut index = empty_index();
+        index.fingerprint = profile_a.clone();
+        assert!(index
+            .matches_installation(&root)
+            .expect("match unchanged profile A"));
+
+        let cache_a = format!(
+            "legacy-v{}-{:08x}-{:016x}.bin",
+            GTA_RPF_INDEX_SCHEMA_VERSION,
+            profile_a.outer_archive_count,
+            profile_a.outer_archive_signature
+        );
+
+        fs::write(
+            root.join("GTA5.exe"),
+            b"synthetic-gta-profile-b-with-new-build",
+        )
+        .expect("write profile B exe");
+        fs::write(
+            update.join("update.rpf"),
+            b"synthetic-update-profile-b-with-different-size",
+        )
+        .expect("write profile B update");
+        fs::write(root.join("x64a.rpf"), b"synthetic-base-rpf-b-expanded")
+            .expect("write profile B base RPF");
+        fs::write(dlc.join("dlc.rpf"), b"synthetic-dlc-rpf-b-expanded")
+            .expect("write profile B DLC RPF");
+
+        let profile_b =
+            GtaRpfInstallationFingerprint::read(&root).expect("read profile B fingerprint");
+        assert_ne!(profile_a, profile_b);
+        assert_ne!(
+            profile_a.outer_archive_signature,
+            profile_b.outer_archive_signature
+        );
+        assert!(!index
+            .matches_installation(&root)
+            .expect("profile A index must reject profile B"));
+
+        let cache_b = format!(
+            "legacy-v{}-{:08x}-{:016x}.bin",
+            GTA_RPF_INDEX_SCHEMA_VERSION,
+            profile_b.outer_archive_count,
+            profile_b.outer_archive_signature
+        );
+        assert_ne!(cache_a, cache_b);
+
+        fs::remove_dir_all(root).expect("remove synthetic build profiles");
+    }
+
+    #[test]
+    fn cached_index_rejects_changed_installation_fingerprint() {
+        let root =
+            std::env::temp_dir().join(format!("ragelab-game-index-profile-{}", std::process::id()));
+        let update = root.join("update");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&update).expect("create synthetic GTA root");
+        fs::write(root.join("GTA5.exe"), b"synthetic-gta-profile-a")
+            .expect("write synthetic exe A");
+        fs::write(update.join("update.rpf"), b"synthetic-update-profile-a")
+            .expect("write synthetic update A");
+
+        let profile_a =
+            GtaRpfInstallationFingerprint::read(&root).expect("read synthetic fingerprint A");
+        let index = GtaRpfAssetIndex {
+            schema_version: GTA_RPF_INDEX_SCHEMA_VERSION,
+            fingerprint: profile_a.clone(),
+            files: BTreeMap::new(),
+            archetypes: BTreeMap::new(),
+            mlos: BTreeMap::new(),
+            texture_parents: BTreeMap::new(),
+            ytyps: BTreeMap::new(),
+            world_maps: BTreeMap::new(),
+            world_children: BTreeMap::new(),
+            world_cells: BTreeMap::new(),
+            world_global_maps: Vec::new(),
+        };
+
+        assert!(index
+            .matches_installation(&root)
+            .expect("profile A should match cached index"));
+
+        fs::write(
+            root.join("GTA5.exe"),
+            b"synthetic-gta-profile-b-with-size-change",
+        )
+        .expect("write synthetic exe B");
+        fs::write(
+            update.join("update.rpf"),
+            b"synthetic-update-profile-b-with-size-change",
+        )
+        .expect("write synthetic update B");
+
+        let profile_b =
+            GtaRpfInstallationFingerprint::read(&root).expect("read synthetic fingerprint B");
+        assert_ne!(profile_a, profile_b);
+        assert!(!index
+            .matches_installation(&root)
+            .expect("profile B must invalidate profile A index"));
+
+        fs::remove_dir_all(root).expect("remove synthetic fixture");
+    }
+
+    #[test]
     fn higher_load_rank_replaces_lower_file_winner() {
         let mut index = empty_index();
         insert_file_winner(&mut index, GtaRpfAssetKind::Ydr, 7, locator(10, "old.ydr"));

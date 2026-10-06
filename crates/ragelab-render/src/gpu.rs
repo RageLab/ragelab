@@ -217,6 +217,42 @@ struct GpuTextureCacheMeta {
     last_used: u64,
 }
 
+fn select_lru_key<'a>(
+    entries: impl Iterator<Item = (&'a String, u64)>,
+    protected: &HashSet<String>,
+) -> Option<String> {
+    entries
+        .filter(|(key, _)| !protected.contains(*key))
+        .min_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(right.0)))
+        .map(|(key, _)| key.clone())
+}
+
+fn textures_referenced_by_assets<'a>(
+    assets: impl Iterator<Item = &'a GpuAssetCacheMeta>,
+) -> HashSet<String> {
+    assets
+        .flat_map(|meta| meta.texture_keys.iter().cloned())
+        .collect()
+}
+
+fn select_asset_releasing_texture<'a>(
+    entries: impl Iterator<Item = (&'a String, &'a GpuAssetCacheMeta)>,
+    protected_assets: &HashSet<String>,
+    active_textures: &HashSet<String>,
+    resident_textures: &HashSet<String>,
+) -> Option<String> {
+    select_lru_key(
+        entries
+            .filter(|(_, meta)| {
+                meta.texture_keys
+                    .iter()
+                    .any(|key| !active_textures.contains(key) && resident_textures.contains(key))
+            })
+            .map(|(key, meta)| (key, meta.last_used)),
+        protected_assets,
+    )
+}
+
 struct DrawInstance {
     asset_key: String,
     model: Mat4,
@@ -1027,13 +1063,12 @@ impl OffscreenRenderer {
             {
                 break;
             }
-            let victim = self
-                .asset_cache_meta
-                .iter()
-                .filter(|(key, _)| !protected_assets.contains(*key))
-                .map(|(key, meta)| (meta.last_used, key.as_str()))
-                .min_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1)))
-                .map(|(_, key)| key.to_string());
+            let victim = select_lru_key(
+                self.asset_cache_meta
+                    .iter()
+                    .map(|(key, meta)| (key, meta.last_used)),
+                &protected_assets,
+            );
             let Some(key) = victim else {
                 break;
             };
@@ -1042,15 +1077,12 @@ impl OffscreenRenderer {
             self.cache_evictions = self.cache_evictions.saturating_add(1);
         }
 
-        let mut protected_textures = package
+        let active_textures = package
             .descriptor
             .textures
             .iter()
             .map(texture_key)
             .collect::<HashSet<_>>();
-        for meta in self.asset_cache_meta.values() {
-            protected_textures.extend(meta.texture_keys.iter().cloned());
-        }
 
         loop {
             let (_, texture_bytes) = self.cache_bytes();
@@ -1059,18 +1091,39 @@ impl OffscreenRenderer {
             {
                 break;
             }
-            let victim = self
+
+            let referenced_textures = textures_referenced_by_assets(self.asset_cache_meta.values());
+            let mut protected_textures = active_textures.clone();
+            protected_textures.extend(referenced_textures);
+
+            if let Some(key) = select_lru_key(
+                self.texture_cache_meta
+                    .iter()
+                    .map(|(key, meta)| (key, meta.last_used)),
+                &protected_textures,
+            ) {
+                self.texture_cache.remove(&key);
+                self.texture_cache_meta.remove(&key);
+                self.cache_evictions = self.cache_evictions.saturating_add(1);
+                continue;
+            }
+
+            let resident_textures = self
                 .texture_cache_meta
-                .iter()
-                .filter(|(key, _)| !protected_textures.contains(*key))
-                .map(|(key, meta)| (meta.last_used, key.as_str()))
-                .min_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1)))
-                .map(|(_, key)| key.to_string());
-            let Some(key) = victim else {
+                .keys()
+                .cloned()
+                .collect::<HashSet<_>>();
+            let releasable_asset = select_asset_releasing_texture(
+                self.asset_cache_meta.iter(),
+                &protected_assets,
+                &active_textures,
+                &resident_textures,
+            );
+            let Some(key) = releasable_asset else {
                 break;
             };
-            self.texture_cache.remove(&key);
-            self.texture_cache_meta.remove(&key);
+            self.asset_cache.remove(&key);
+            self.asset_cache_meta.remove(&key);
             self.cache_evictions = self.cache_evictions.saturating_add(1);
         }
 
@@ -2653,6 +2706,64 @@ fn nice_grid_spacing(target: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpu_eviction_selection_is_lru_stable_and_can_release_texture_pressure() {
+        let active_asset = "active".to_string();
+        let old_asset = "asset-a".to_string();
+        let new_asset = "asset-b".to_string();
+        let active_texture = "texture-active".to_string();
+        let old_texture = "texture-old".to_string();
+        let new_texture = "texture-new".to_string();
+
+        let mut assets = HashMap::new();
+        assets.insert(
+            active_asset.clone(),
+            GpuAssetCacheMeta {
+                bytes: 64,
+                last_used: 1,
+                texture_keys: vec![active_texture.clone()],
+            },
+        );
+        assets.insert(
+            old_asset.clone(),
+            GpuAssetCacheMeta {
+                bytes: 64,
+                last_used: 2,
+                texture_keys: vec![old_texture.clone()],
+            },
+        );
+        assets.insert(
+            new_asset.clone(),
+            GpuAssetCacheMeta {
+                bytes: 64,
+                last_used: 3,
+                texture_keys: vec![new_texture.clone()],
+            },
+        );
+
+        let protected_assets = HashSet::from([active_asset]);
+        let active_textures = HashSet::from([active_texture]);
+        let resident_textures = HashSet::from([old_texture, new_texture]);
+
+        assert_eq!(
+            select_asset_releasing_texture(
+                assets.iter(),
+                &protected_assets,
+                &active_textures,
+                &resident_textures,
+            ),
+            Some(old_asset)
+        );
+
+        let left = "a".to_string();
+        let right = "b".to_string();
+        let protected = HashSet::new();
+        assert_eq!(
+            select_lru_key([(&right, 7), (&left, 7)].into_iter(), &protected),
+            Some(left)
+        );
+    }
 
     #[test]
     fn orbit_camera_fit_and_controls_remain_finite() {
