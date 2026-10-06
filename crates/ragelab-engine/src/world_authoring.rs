@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub use ragelab_meta::MetaHash as YmapMetaHash;
 pub use ragelab_ymap::{Quat as YmapQuat, Vec3 as YmapVec3, YmapEditCommand};
 use ragelab_ymap::{Ymap, YmapEditSession, YmapEditTransactionResult};
 use serde::Serialize;
