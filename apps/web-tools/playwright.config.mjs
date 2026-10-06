@@ -1,6 +1,16 @@
 import { defineConfig } from "@playwright/test";
 
 const matrixBrowser = process.env.RAGELAB_BROWSER;
+const matrixLaunchOptions = matrixBrowser === "firefox"
+  ? {
+      firefoxUserPrefs: {
+        "webgl.disabled": false,
+        "webgl.force-enabled": true,
+        "gfx.webrender.all": true,
+        "gfx.webrender.software": true,
+      },
+    }
+  : undefined;
 
 export default defineConfig({
   testDir: "./tests",
@@ -11,6 +21,7 @@ export default defineConfig({
         baseURL: "http://127.0.0.1:4173",
         browserName: matrixBrowser,
         headless: true,
+        launchOptions: matrixLaunchOptions,
       }
     : {
         baseURL: "http://127.0.0.1:4173",
