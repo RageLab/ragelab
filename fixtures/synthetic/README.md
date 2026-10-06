@@ -100,6 +100,10 @@ The `stream/` directory combines generated YMAP and YTYP files with empty placeh
 
 It also contains `gtxd.meta` and two empty parent YTD placeholders for a two-hop texture-parent chain. These placeholders are dependency-index fixtures only; they are not valid model, texture, collision, or clip resources.
 
+## `release-smoke/`
+
+This directory is a copyright-free, renderable scene used by the standalone Studio release smoke. It reuses the generated `simple.ymap` and `simple.ytyp`, and names a copy of the generated `ydr/simple.ydr` as `test_drawable.ydr` so the YTYP archetype resolves to one valid drawable without GTA or private fixture bytes.
+
 ## Validation
 
 Run the independent fixture checks with:
