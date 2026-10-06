@@ -6,7 +6,7 @@ use ragelab_wasm::{
     capabilities, inspect_ydd, inspect_ydr_materials, inspect_yft, inspect_ymap, inspect_ytd,
     inspect_ytyp, validate_asset, wasm_export_ytd_texture_png, wasm_replace_ytd_texture_png,
     ydd_model, ydd_rebind_texture, ydr_model, ydr_rebind_texture, yft_model, ymap_set_flags,
-    ytd_texture,
+    ytd_texture, ytd_texture_mip,
 };
 use ragelab_yft::YFT_LEGACY_VERSION;
 use wasm_bindgen::JsValue;
@@ -84,6 +84,30 @@ fn shared_ytd_png_operation_roundtrips_in_wasm() {
         wasm_replace_ytd_texture_png(YTD, 0, &png_bytes).expect("replace PNG through shared core");
     assert!(rewritten.length() > 0);
     validate_asset("ytd", &rewritten.to_vec()).expect("semantic reopen through WASM");
+}
+
+#[wasm_bindgen_test]
+fn ytd_mip_binding_decodes_declared_level_and_fails_closed_out_of_bounds() {
+    let png = wasm_export_ytd_texture_png(YTD, 0).expect("export PNG");
+    let rewritten = wasm_replace_ytd_texture_png(YTD, 0, &png.to_vec())
+        .expect("regenerate deterministic mip chain");
+    let rewritten = rewritten.to_vec();
+
+    let mip = ytd_texture_mip(&rewritten, 0, 1).expect("decode mip 1");
+    let metadata = mip.metadata().expect("mip metadata");
+    assert_eq!(field(&metadata, "mipIndex").as_f64(), Some(1.0));
+    assert_eq!(field(&metadata, "width").as_f64(), Some(2.0));
+    assert_eq!(field(&metadata, "height").as_f64(), Some(2.0));
+    assert_eq!(mip.rgba().length(), 16);
+
+    let error = match ytd_texture_mip(&rewritten, 0, 99) {
+        Ok(_) => panic!("mip beyond declared count must fail closed"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        field(&error, "code").as_string().as_deref(),
+        Some("indexOutOfBounds")
+    );
 }
 
 #[wasm_bindgen_test]

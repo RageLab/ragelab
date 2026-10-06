@@ -492,6 +492,32 @@ fn repacks_rgba8_texture_from_generated_full_mip_chain() {
     assert!(encoded.data[64..]
         .chunks_exact(4)
         .all(|pixel| pixel == [12, 34, 56, 255]));
+
+    let mip0 = Ytd::decode_mip_rgba(&rewritten, 0, 0).expect("decode mip 0");
+    let mip1 = Ytd::decode_mip_rgba(&rewritten, 0, 1).expect("decode mip 1");
+    let mip2 = Ytd::decode_mip_rgba(&rewritten, 0, 2).expect("decode mip 2");
+    assert_eq!((mip0.width, mip0.height, mip0.rgba.len()), (4, 4, 64));
+    assert_eq!((mip1.width, mip1.height, mip1.rgba.len()), (2, 2, 16));
+    assert_eq!((mip2.width, mip2.height, mip2.rgba.len()), (1, 1, 4));
+    assert!(mip1
+        .rgba
+        .chunks_exact(4)
+        .all(|pixel| pixel == [12, 34, 56, 255]));
+    assert!(mip2
+        .rgba
+        .chunks_exact(4)
+        .all(|pixel| pixel == [12, 34, 56, 255]));
+
+    let error = Ytd::decode_mip_rgba(&rewritten, 0, 3)
+        .expect_err("mip index beyond declared levels must fail closed");
+    assert!(matches!(
+        error,
+        YtdError::MipIndexOutOfBounds {
+            texture_index: 0,
+            mip_index: 3,
+            mip_levels: 3,
+        }
+    ));
 }
 
 #[test]

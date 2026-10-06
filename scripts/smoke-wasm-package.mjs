@@ -36,6 +36,19 @@ const png = api.exportYtdTexturePng(ytd, 0);
 const rewritten = api.replaceYtdTexturePng(ytd, 0, png);
 assert.equal(api.validateAsset("ytd", rewritten).valid, true);
 
+const mip1 = api.ytdTextureMip(rewritten, 0, 1);
+assert.equal(mip1.metadata().mipIndex, 1);
+assert.equal(mip1.metadata().width, 2);
+assert.equal(mip1.metadata().height, 2);
+
+let mipRejected = false;
+try {
+  api.ytdTextureMip(rewritten, 0, 99);
+} catch (error) {
+  mipRejected = error?.schema === "ragelab.wasm.error" && error?.code === "indexOutOfBounds";
+}
+assert.equal(mipRejected, true);
+
 let rejected = false;
 try {
   api.validateAsset("rpf", new Uint8Array());

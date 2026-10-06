@@ -321,6 +321,10 @@ impl YtdDictionary {
     }
 
     pub fn decode_top_mip(&self, index: usize) -> Result<DecodedTexture, YtdError> {
+        self.decode_mip(index, 0)
+    }
+
+    pub fn decode_mip(&self, index: usize, mip_index: usize) -> Result<DecodedTexture, YtdError> {
         let texture = self
             .metadata
             .get(index)
@@ -328,7 +332,7 @@ impl YtdDictionary {
                 index,
                 textures: self.metadata.len(),
             })?;
-        decode_texture_top_mip(&self.resource, texture, index)
+        decode_texture_mip(&self.resource, texture, index, mip_index)
     }
 
     pub fn compressed_mip_chain(&self, index: usize) -> Result<CompressedTexture, YtdError> {
@@ -433,10 +437,18 @@ impl Ytd {
     }
 
     pub fn decode_top_mip_rgba(bytes: &[u8], index: usize) -> Result<DecodedTexture, YtdError> {
+        Self::decode_mip_rgba(bytes, index, 0)
+    }
+
+    pub fn decode_mip_rgba(
+        bytes: &[u8],
+        index: usize,
+        mip_index: usize,
+    ) -> Result<DecodedTexture, YtdError> {
         let resource = parse_legacy_resource(bytes)?;
         let ytd = parse_legacy(&resource)?;
         let texture = texture_at(&ytd, index)?;
-        decode_texture_top_mip(&resource, texture, index)
+        decode_texture_mip(&resource, texture, index, mip_index)
     }
 
     pub fn encoded_texture(bytes: &[u8], index: usize) -> Result<EncodedTexture, YtdError> {
@@ -1206,7 +1218,15 @@ fn write_segment_bytes(
 pub enum YtdError {
     Resource(ResourceError),
     UnsupportedResourceVersion(u32),
-    TextureIndexOutOfBounds { index: usize, textures: usize },
+    TextureIndexOutOfBounds {
+        index: usize,
+        textures: usize,
+    },
+    MipIndexOutOfBounds {
+        texture_index: usize,
+        mip_index: usize,
+        mip_levels: usize,
+    },
     UnsupportedTextureFormat(TextureFormat),
     InvalidDds(String),
     InvalidRgba(String),
@@ -1225,6 +1245,14 @@ impl fmt::Display for YtdError {
             Self::TextureIndexOutOfBounds { index, textures } => write!(
                 f,
                 "texture index {index} is out of bounds for YTD with {textures} textures"
+            ),
+            Self::MipIndexOutOfBounds {
+                texture_index,
+                mip_index,
+                mip_levels,
+            } => write!(
+                f,
+                "mip index {mip_index} is out of bounds for texture {texture_index} with {mip_levels} mip levels"
             ),
             Self::UnsupportedTextureFormat(format) => write!(
                 f,
@@ -1544,17 +1572,46 @@ fn read_texture(
     })
 }
 
-fn decode_texture_top_mip(
+fn decode_texture_mip(
     resource: &Rsc7Resource,
     texture: &TextureInfo,
     index: usize,
+    mip_index: usize,
 ) -> Result<DecodedTexture, YtdError> {
-    let width = usize::from(texture.width);
-    let height = usize::from(texture.height);
+    if texture.depth != 1 {
+        return Err(YtdError::Malformed(format!(
+            "texture {index} has depth {}; RGBA preview supports 2D textures only",
+            texture.depth
+        )));
+    }
+
+    let mip_levels = usize::from(texture.levels);
+    if mip_index >= mip_levels {
+        return Err(YtdError::MipIndexOutOfBounds {
+            texture_index: index,
+            mip_index,
+            mip_levels,
+        });
+    }
+
+    let layout = mip_layout(
+        texture.format,
+        texture.width,
+        texture.height,
+        texture.levels,
+    )?
+    .ok_or(YtdError::UnsupportedTextureFormat(texture.format))?;
+    let mip = layout.get(mip_index).ok_or(YtdError::MipIndexOutOfBounds {
+        texture_index: index,
+        mip_index,
+        mip_levels,
+    })?;
+
+    let width = mip.width;
+    let height = mip.height;
     if width == 0 || height == 0 {
         return Err(YtdError::Malformed(format!(
-            "texture {index} has zero-sized dimensions {}x{}",
-            texture.width, texture.height
+            "texture {index} mip {mip_index} has zero-sized dimensions {width}x{height}"
         )));
     }
 
@@ -1564,107 +1621,59 @@ fn decode_texture_top_mip(
         .ok_or_else(|| malformed("decoded RGBA byte length overflows usize"))?;
     if rgba_len > MAX_DECODED_RGBA_BYTES {
         return Err(YtdError::Malformed(format!(
-            "texture {index} decoded RGBA length {rgba_len} exceeds preview limit {MAX_DECODED_RGBA_BYTES}"
+            "texture {index} mip {mip_index} decoded RGBA length {rgba_len} exceeds preview limit {MAX_DECODED_RGBA_BYTES}"
+        )));
+    }
+    if mip.slice_pitch == 0 {
+        return Err(YtdError::Malformed(format!(
+            "texture {index} mip {mip_index} has an empty encoded payload"
         )));
     }
 
-    let top_mip_len = usize::from(texture.stride)
-        .checked_mul(height)
-        .ok_or_else(|| malformed("top mip byte length overflows usize"))?;
-    if top_mip_len == 0 {
-        return Err(YtdError::Malformed(format!(
-            "texture {index} has an empty top mip"
-        )));
-    }
-    let encoded = resource.bytes_at(texture.data_pointer, top_mip_len)?;
+    let pointer = texture
+        .data_pointer
+        .checked_add(mip.offset as u64)
+        .ok_or_else(|| malformed("texture mip address overflows u64"))?;
+    let encoded = resource.bytes_at(pointer, mip.slice_pitch)?;
     let mut rgba = vec![0_u8; rgba_len];
+    let decoder_stride = match texture.format {
+        TextureFormat::Bc1
+        | TextureFormat::Bc2
+        | TextureFormat::Bc3
+        | TextureFormat::Bc4
+        | TextureFormat::Bc5 => mip
+            .row_pitch
+            .checked_div(4)
+            .filter(|stride| *stride > 0)
+            .ok_or_else(|| malformed("BC decoder stride is invalid"))?,
+        _ => mip.row_pitch,
+    };
 
     match texture.format {
-        TextureFormat::Bgra8 => decode_bgra8(
-            encoded,
-            width,
-            height,
-            usize::from(texture.stride),
-            &mut rgba,
-            false,
-        )?,
-        TextureFormat::Bgrx8 => decode_bgra8(
-            encoded,
-            width,
-            height,
-            usize::from(texture.stride),
-            &mut rgba,
-            true,
-        )?,
-        TextureFormat::B5G5R5A1 => decode_b5g5r5a1(
-            encoded,
-            width,
-            height,
-            usize::from(texture.stride),
-            &mut rgba,
-        )?,
-        TextureFormat::A8 => decode_a8(
-            encoded,
-            width,
-            height,
-            usize::from(texture.stride),
-            &mut rgba,
-        )?,
-        TextureFormat::Rgba8 => decode_rgba8(
-            encoded,
-            width,
-            height,
-            usize::from(texture.stride),
-            &mut rgba,
-        )?,
-        TextureFormat::R8 => decode_r8(
-            encoded,
-            width,
-            height,
-            usize::from(texture.stride),
-            &mut rgba,
-        )?,
-        TextureFormat::Bc1 => decode_bc1(
-            encoded,
-            width,
-            height,
-            usize::from(texture.stride),
-            &mut rgba,
-        )?,
-        TextureFormat::Bc2 => decode_bc2(
-            encoded,
-            width,
-            height,
-            usize::from(texture.stride),
-            &mut rgba,
-        )?,
-        TextureFormat::Bc3 => decode_bc3(
-            encoded,
-            width,
-            height,
-            usize::from(texture.stride),
-            &mut rgba,
-        )?,
-        TextureFormat::Bc4 => decode_bc4(
-            encoded,
-            width,
-            height,
-            usize::from(texture.stride),
-            &mut rgba,
-        )?,
-        TextureFormat::Bc5 => decode_bc5(
-            encoded,
-            width,
-            height,
-            usize::from(texture.stride),
-            &mut rgba,
-        )?,
+        TextureFormat::Bgra8 => {
+            decode_bgra8(encoded, width, height, decoder_stride, &mut rgba, false)?
+        }
+        TextureFormat::Bgrx8 => {
+            decode_bgra8(encoded, width, height, decoder_stride, &mut rgba, true)?
+        }
+        TextureFormat::B5G5R5A1 => {
+            decode_b5g5r5a1(encoded, width, height, decoder_stride, &mut rgba)?
+        }
+        TextureFormat::A8 => decode_a8(encoded, width, height, decoder_stride, &mut rgba)?,
+        TextureFormat::Rgba8 => decode_rgba8(encoded, width, height, decoder_stride, &mut rgba)?,
+        TextureFormat::R8 => decode_r8(encoded, width, height, decoder_stride, &mut rgba)?,
+        TextureFormat::Bc1 => decode_bc1(encoded, width, height, decoder_stride, &mut rgba)?,
+        TextureFormat::Bc2 => decode_bc2(encoded, width, height, decoder_stride, &mut rgba)?,
+        TextureFormat::Bc3 => decode_bc3(encoded, width, height, decoder_stride, &mut rgba)?,
+        TextureFormat::Bc4 => decode_bc4(encoded, width, height, decoder_stride, &mut rgba)?,
+        TextureFormat::Bc5 => decode_bc5(encoded, width, height, decoder_stride, &mut rgba)?,
         format => return Err(YtdError::UnsupportedTextureFormat(format)),
     }
 
     Ok(DecodedTexture {
-        width: texture.width,
-        height: texture.height,
+        width: u16::try_from(width).map_err(|_| malformed("decoded mip width does not fit u16"))?,
+        height: u16::try_from(height)
+            .map_err(|_| malformed("decoded mip height does not fit u16"))?,
         rgba,
     })
 }

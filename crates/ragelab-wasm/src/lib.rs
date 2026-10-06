@@ -221,6 +221,7 @@ struct TextureMetadata {
     schema: &'static str,
     schema_version: u32,
     index: usize,
+    mip_index: usize,
     name: String,
     name_hash: String,
     width: u16,
@@ -530,7 +531,16 @@ pub fn yft_model(bytes: &[u8]) -> Result<WasmModelPacket, JsValue> {
 
 #[wasm_bindgen(js_name = ytdTexture)]
 pub fn ytd_texture(bytes: &[u8], index: usize) -> Result<WasmTexturePacket, JsValue> {
-    texture_packet(bytes, index)
+    texture_packet(bytes, index, 0)
+}
+
+#[wasm_bindgen(js_name = ytdTextureMip)]
+pub fn ytd_texture_mip(
+    bytes: &[u8],
+    index: usize,
+    mip_index: usize,
+) -> Result<WasmTexturePacket, JsValue> {
+    texture_packet(bytes, index, mip_index)
 }
 
 #[wasm_bindgen(js_name = exportYtdTexturePng)]
@@ -743,7 +753,11 @@ pub fn ydd_rebind_texture(
     Ok(Uint8Array::from(output.as_slice()))
 }
 
-fn texture_packet(bytes: &[u8], index: usize) -> Result<WasmTexturePacket, JsValue> {
+fn texture_packet(
+    bytes: &[u8],
+    index: usize,
+    mip_index: usize,
+) -> Result<WasmTexturePacket, JsValue> {
     let ytd = Ytd::from_bytes(bytes).map_err(|e| wasm_error("ytd", "parseFailed", e))?;
     let info = ytd.textures.get(index).ok_or_else(|| {
         wasm_error(
@@ -755,13 +769,24 @@ fn texture_packet(bytes: &[u8], index: usize) -> Result<WasmTexturePacket, JsVal
             ),
         )
     })?;
-    let decoded =
-        Ytd::decode_top_mip_rgba(bytes, index).map_err(|e| wasm_error("ytd", "decodeFailed", e))?;
+    if mip_index >= usize::from(info.levels) {
+        return Err(wasm_error(
+            "ytd",
+            "indexOutOfBounds",
+            format!(
+                "mip index {mip_index} exceeds texture {index} mip count {}",
+                info.levels
+            ),
+        ));
+    }
+    let decoded = Ytd::decode_mip_rgba(bytes, index, mip_index)
+        .map_err(|e| wasm_error("ytd", "decodeFailed", e))?;
     Ok(WasmTexturePacket {
         metadata: TextureMetadata {
             schema: "ragelab.wasm.texture",
             schema_version: API_SCHEMA_VERSION,
             index,
+            mip_index,
             name: info.name.clone(),
             name_hash: hex_hash(info.name_hash),
             width: decoded.width,
