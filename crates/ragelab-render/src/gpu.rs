@@ -47,6 +47,9 @@ var diffuse_texture: texture_2d<f32>;
 @group(2) @binding(1)
 var diffuse_sampler: sampler;
 
+@group(2) @binding(2)
+var<uniform> material_clip: vec4<f32>;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -74,6 +77,11 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let base = textureSample(diffuse_texture, diffuse_sampler, input.uv0);
+    // Discard genuinely empty texels before they write depth. For binary
+    // foliage/cutout materials, use a higher threshold to preserve silhouettes.
+    if (base.a < material_clip.x) {
+        discard;
+    }
     let normal = normalize(input.world_normal);
     let diffuse = max(dot(normal, normalize(camera.light_dir.xyz)), 0.0);
     let lighting = 0.34 + 0.66 * diffuse;
@@ -181,6 +189,7 @@ struct ModelBinding {
 struct GpuTexture {
     _texture: wgpu::Texture,
     view: wgpu::TextureView,
+    alpha_cutoff: f32,
 }
 
 struct GpuMaterial {
@@ -514,6 +523,8 @@ pub struct OffscreenRenderer {
     camera_layout: wgpu::BindGroupLayout,
     model_layout: wgpu::BindGroupLayout,
     material_layout: wgpu::BindGroupLayout,
+    opaque_alpha_buffer: wgpu::Buffer,
+    cutout_alpha_buffer: wgpu::Buffer,
     mesh_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
@@ -610,9 +621,31 @@ impl OffscreenRenderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
+        // Reuse two uniform buffers for every material. Streaming thousands
+        // of GTA materials must not allocate a separate GPU buffer per draw.
+        let opaque_alpha_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("RageLab opaque/soft alpha threshold"),
+            contents: bytemuck::cast_slice(&[1.0_f32 / 255.0, 0.0, 0.0, 0.0]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let cutout_alpha_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("RageLab cutout alpha threshold"),
+            contents: bytemuck::cast_slice(&[0.5_f32, 0.0, 0.0, 0.0]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("RageLab diffuse sampler"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -767,6 +800,8 @@ impl OffscreenRenderer {
             camera_layout,
             model_layout,
             material_layout,
+            opaque_alpha_buffer,
+            cutout_alpha_buffer,
             mesh_pipeline,
             line_pipeline,
             sampler,
@@ -1110,8 +1145,8 @@ impl OffscreenRenderer {
         let mut gpu_bytes = 0_u64;
         let mut materials = Vec::with_capacity(descriptor.materials.len());
         for material in &descriptor.materials {
-            let view = if let Some(texture_ref) = material.diffuse_texture_ref {
-                let texture = package
+            let texture = if let Some(texture_ref) = material.diffuse_texture_ref {
+                let descriptor_texture = package
                     .descriptor
                     .textures
                     .get(texture_ref as usize)
@@ -1121,23 +1156,20 @@ impl OffscreenRenderer {
                             descriptor.asset_ref, texture_ref
                         ))
                     })?;
-                let texture_key = texture_key(texture);
-                &self
-                    .texture_cache
-                    .get(&texture_key)
-                    .ok_or_else(|| {
-                        RenderError::Gpu(format!(
-                            "texture cache missing {} for asset {}",
-                            texture_key, descriptor.asset_ref
-                        ))
-                    })?
-                    .view
+                let key = texture_key(descriptor_texture);
+                self.texture_cache.get(&key).ok_or_else(|| {
+                    RenderError::Gpu(format!(
+                        "texture cache missing {} for asset {}",
+                        key, descriptor.asset_ref
+                    ))
+                })?
             } else {
-                &self.white_texture.view
+                &self.white_texture
             };
-            materials.push(self.create_material(view));
+            materials.push(self.create_material(&texture.view, texture.alpha_cutoff));
         }
-        let fallback_material = self.create_material(&self.white_texture.view);
+        let fallback_material =
+            self.create_material(&self.white_texture.view, self.white_texture.alpha_cutoff);
 
         let mut meshes = Vec::with_capacity(descriptor.meshes.len());
         for mesh in &descriptor.meshes {
@@ -1342,23 +1374,31 @@ impl OffscreenRenderer {
             || texture_bytes > budget.max_texture_bytes
     }
 
-    fn create_material(&self, view: &wgpu::TextureView) -> GpuMaterial {
-        GpuMaterial {
-            bind_group: self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("RageLab material bind group"),
-                layout: &self.material_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
-                    },
-                ],
-            }),
-        }
+    fn create_material(&self, view: &wgpu::TextureView, alpha_cutoff: f32) -> GpuMaterial {
+        let clip_buffer = if alpha_cutoff >= 0.5 {
+            &self.cutout_alpha_buffer
+        } else {
+            &self.opaque_alpha_buffer
+        };
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("RageLab material bind group"),
+            layout: &self.material_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: clip_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        GpuMaterial { bind_group }
     }
 
     fn create_model_binding(&self, model: Mat4, style: [f32; 4]) -> ModelBinding {
@@ -2931,6 +2971,28 @@ fn downsample_rgba_srgb(source: &[u8], width: u32, height: u32) -> Vec<u8> {
     output
 }
 
+// Treat essentially binary alpha as a hard surface cutout. Smooth
+// translucency (glass, decals) keeps its fractional alpha; every material
+// still discards fully transparent pixels to avoid writing invisible depth.
+fn alpha_cutoff_for_rgba(rgba: &[u8]) -> f32 {
+    let mut clear = 0_usize;
+    let mut opaque = 0_usize;
+    let mut soft = 0_usize;
+    for texel in rgba.chunks_exact(4) {
+        match texel[3] {
+            0..=8 => clear += 1,
+            247..=255 => opaque += 1,
+            _ => soft += 1,
+        }
+    }
+    let total = clear + opaque + soft;
+    if clear > 0 && opaque > 0 && soft <= total / 25 {
+        0.5
+    } else {
+        1.0 / 255.0
+    }
+}
+
 fn create_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -3015,6 +3077,7 @@ fn create_texture(
     Ok(GpuTexture {
         _texture: texture,
         view,
+        alpha_cutoff: alpha_cutoff_for_rgba(rgba),
     })
 }
 
@@ -3353,6 +3416,18 @@ fn nice_grid_spacing(target: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn material_alpha_classifies_binary_cutouts_without_discarding_soft_glass() {
+        let binary = [0, 0, 0, 0, 1, 1, 1, 255, 1, 1, 1, 255, 0, 0, 0, 0];
+        assert_eq!(alpha_cutoff_for_rgba(&binary), 0.5);
+        let soft = [0, 0, 0, 0, 1, 1, 1, 100, 1, 1, 1, 200, 1, 1, 1, 255];
+        assert!(alpha_cutoff_for_rgba(&soft) < 0.01);
+        let opaque = [1, 1, 1, 255, 1, 1, 1, 255];
+        assert!(alpha_cutoff_for_rgba(&opaque) < 0.01);
+        let all_clear = [0, 0, 0, 0, 0, 0, 0, 0];
+        assert!(alpha_cutoff_for_rgba(&all_clear) < 0.01);
+    }
 
     fn synthetic_lod_entity(
         ymap: &str,
