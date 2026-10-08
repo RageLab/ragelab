@@ -300,6 +300,189 @@ impl Aabb {
     }
 }
 
+// Source YMAP and original entity index remain stable when a YMAP is paginated,
+// sorted by camera proximity, or reloaded at a different package position.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct LodEntityKey {
+    source_ymap: String,
+    entity_index: u32,
+}
+
+#[derive(Debug, Clone)]
+struct LodEntity {
+    key: LodEntityKey,
+    node_index: u32,
+    parent_index: Option<i32>,
+    num_children: Option<u32>,
+    child_lod_dist: Option<f32>,
+    lod_dist: Option<f32>,
+    bounds: Option<Aabb>,
+}
+
+#[derive(Default)]
+struct LodHierarchy {
+    nodes: Vec<LodEntity>,
+    children: Vec<Vec<usize>>,
+    roots: Vec<usize>,
+}
+
+impl LodHierarchy {
+    fn from_packages(
+        packages: &[Arc<RenderPackage>],
+        draws: &[DrawInstance],
+        gpu_assets: &HashMap<String, GpuAsset>,
+    ) -> Self {
+        let bounds_by_node = draws
+            .iter()
+            .filter(|draw| !draw.collision_overlay)
+            .filter(|draw| {
+                gpu_assets
+                    .get(&draw.asset_key)
+                    .is_some_and(|asset| asset.meshes.iter().any(|mesh| mesh.index_count > 0))
+            })
+            .filter_map(|draw| draw.node_index.map(|index| (index, draw.world_bounds)))
+            .collect::<HashMap<_, _>>();
+        let bases = package_node_bases(packages);
+        let nodes = packages
+            .iter()
+            .enumerate()
+            .flat_map(|(package_index, package)| {
+                let base = bases[package_index];
+                let bounds_by_node = &bounds_by_node;
+                package
+                    .descriptor
+                    .scene
+                    .instances
+                    .iter()
+                    .map(move |instance| {
+                        let node_index = base.saturating_add(instance.node_index);
+                        LodEntity {
+                            key: LodEntityKey {
+                                source_ymap: instance.source_ymap.clone(),
+                                entity_index: instance.entity_index,
+                            },
+                            node_index,
+                            parent_index: instance.parent_index,
+                            num_children: instance.num_children,
+                            child_lod_dist: instance.child_lod_dist,
+                            lod_dist: instance.lod_dist,
+                            bounds: bounds_by_node.get(&node_index).copied(),
+                        }
+                    })
+            })
+            .collect();
+        Self::from_nodes(nodes)
+    }
+
+    fn from_nodes(nodes: Vec<LodEntity>) -> Self {
+        let mut by_entity = HashMap::new();
+        for (index, node) in nodes.iter().enumerate() {
+            // Interior nodes can share their parent entity index. Keep the
+            // original YMAP entity as the canonical hierarchy anchor.
+            by_entity.entry(node.key.clone()).or_insert(index);
+        }
+        let mut children = vec![Vec::new(); nodes.len()];
+        let mut has_parent = vec![false; nodes.len()];
+        for (index, node) in nodes.iter().enumerate() {
+            let Some(parent_index) = node
+                .parent_index
+                .and_then(|value| u32::try_from(value).ok())
+            else {
+                continue;
+            };
+            let parent_key = LodEntityKey {
+                source_ymap: node.key.source_ymap.clone(),
+                entity_index: parent_index,
+            };
+            if let Some(&parent) = by_entity.get(&parent_key) {
+                if parent != index {
+                    children[parent].push(index);
+                    has_parent[index] = true;
+                }
+            }
+        }
+        let roots = has_parent
+            .iter()
+            .enumerate()
+            .filter_map(|(index, linked)| (!linked).then_some(index))
+            .collect();
+        Self {
+            nodes,
+            children,
+            roots,
+        }
+    }
+
+    // Returns nodes hidden by *hierarchy* only. Frustum, user visibility and
+    // max lodDist are still independently applied in the draw loop.
+    fn suppressed(
+        &self,
+        camera: &OrbitCamera,
+        selections: &mut HashMap<LodEntityKey, bool>,
+    ) -> HashSet<u32> {
+        let mut suppressed = HashSet::new();
+        let mut visited = vec![false; self.nodes.len()];
+        let mut stack = self
+            .roots
+            .iter()
+            .rev()
+            .map(|&index| (index, true))
+            .collect::<Vec<_>>();
+        // Invalid/cyclic data must never make entities permanently disappear.
+        for start in 0..self.nodes.len() {
+            if stack.is_empty() && !visited[start] {
+                stack.push((start, true));
+            }
+            while let Some((index, enabled)) = stack.pop() {
+                if std::mem::replace(&mut visited[index], true) {
+                    continue;
+                }
+                let node = &self.nodes[index];
+                let expected = node.num_children.unwrap_or(0) as usize;
+                let threshold = node.child_lod_dist.filter(|d| d.is_finite() && *d > 0.0);
+                let managed =
+                    expected > 0 && threshold.is_some() && !self.children[index].is_empty();
+                let parent_ready = node
+                    .bounds
+                    .is_some_and(|bounds| camera.lod_visible(bounds, node.lod_dist));
+                let children_ready = managed
+                    && self.children[index].len() == expected
+                    && self.children[index]
+                        .iter()
+                        .all(|&child| self.nodes[child].bounds.is_some());
+                let use_children = if !parent_ready {
+                    // Never suppress a drawable child behind a missing parent.
+                    true
+                } else if children_ready {
+                    let bounds = node.bounds.expect("ready parent has bounds");
+                    let distance =
+                        ((bounds.center() - camera.eye()).length() - bounds.radius()).max(0.0);
+                    let threshold = threshold.expect("managed branch has threshold");
+                    let use_detail = match selections.get(&node.key) {
+                        Some(true) => distance <= threshold * 1.10,
+                        Some(false) => distance <= threshold * 0.90,
+                        None => distance <= threshold,
+                    };
+                    selections.insert(node.key.clone(), use_detail);
+                    use_detail
+                } else {
+                    // No metadata: preserve legacy rendering. Incomplete
+                    // declared hierarchy: keep the proxy until every child is ready.
+                    !managed
+                };
+                if !enabled || (managed && use_children) {
+                    suppressed.insert(node.node_index);
+                }
+                let children_enabled = enabled && (!managed || use_children);
+                for &child in self.children[index].iter().rev() {
+                    stack.push((child, children_enabled));
+                }
+            }
+        }
+        suppressed
+    }
+}
+
 pub struct OffscreenRenderer {
     _instance: wgpu::Instance,
     adapter: wgpu::Adapter,
@@ -1593,6 +1776,9 @@ pub struct SurfaceRenderer {
     options: ViewportOptions,
     packages: Vec<Arc<RenderPackage>>,
     draws: Vec<DrawInstance>,
+    lod_hierarchy: LodHierarchy,
+    lod_selections: HashMap<LodEntityKey, bool>,
+    lod_suppressed: HashSet<u32>,
     world_bounds: Option<Aabb>,
     camera: Option<OrbitCamera>,
     selected_node_index: Option<u32>,
@@ -1701,6 +1887,9 @@ impl SurfaceRenderer {
             options,
             packages: Vec::new(),
             draws: Vec::new(),
+            lod_hierarchy: LodHierarchy::default(),
+            lod_selections: HashMap::new(),
+            lod_suppressed: HashSet::new(),
             world_bounds: None,
             camera: None,
             selected_node_index: None,
@@ -1753,6 +1942,9 @@ impl SurfaceRenderer {
         if packages.is_empty() {
             self.packages.clear();
             self.draws.clear();
+            self.lod_hierarchy = LodHierarchy::default();
+            self.lod_selections.clear();
+            self.lod_suppressed.clear();
             self.world_bounds = None;
             self.selected_node_index = None;
             self.hidden_node_indices.clear();
@@ -1923,6 +2115,16 @@ impl SurfaceRenderer {
         };
         let gpu_budget_overflow = self.gpu.evict_to_budget(&packages, self.gpu_cache_budget);
 
+        self.lod_hierarchy = LodHierarchy::from_packages(&packages, &draws, &self.gpu.asset_cache);
+        let active_keys = self
+            .lod_hierarchy
+            .nodes
+            .iter()
+            .map(|node| node.key.clone())
+            .collect::<HashSet<_>>();
+        self.lod_selections
+            .retain(|key, _| active_keys.contains(key));
+        self.lod_suppressed.clear();
         self.packages = packages;
         self.draws = draws;
         self.world_bounds = Some(world_bounds);
@@ -2016,6 +2218,12 @@ impl SurfaceRenderer {
         self.draws
             .iter()
             .filter(|draw| self.draw_visible(draw))
+            .filter(|draw| {
+                !draw
+                    .node_index
+                    .is_some_and(|node| self.lod_suppressed.contains(&node))
+            })
+            .filter(|draw| camera.lod_visible(draw.world_bounds, draw.lod_dist))
             .filter_map(|draw| {
                 let node_index = draw.node_index?;
                 let distance = ray_aabb(origin, direction, draw.world_bounds)?;
@@ -2164,6 +2372,9 @@ impl SurfaceRenderer {
         let camera = self.camera.as_ref().ok_or_else(|| {
             RenderError::InvalidInput("native viewport has no camera state".into())
         })?;
+        self.lod_suppressed = self
+            .lod_hierarchy
+            .suppressed(camera, &mut self.lod_selections);
         let world_bounds = self.world_bounds.ok_or_else(|| {
             RenderError::InvalidInput("native viewport has no world bounds".into())
         })?;
@@ -2192,23 +2403,25 @@ impl SurfaceRenderer {
                     usage: wgpu::BufferUsages::VERTEX,
                 })
         });
-        let gizmo_vertices =
-            self.gizmo_mode
-                .and_then(|mode| {
-                    let selected = self.selected_node_index?;
-                    let draw = self.draws.iter().find(|draw| {
-                        draw.node_index == Some(selected) && self.draw_visible(draw)
-                    })?;
-                    let center = draw.world_bounds.center();
-                    let distance = (camera.eye() - center).length().max(0.1);
-                    let size = draw
-                        .world_bounds
-                        .radius()
-                        .max(distance * 0.08)
-                        .clamp(0.15, distance * 0.3);
-                    Some(build_transform_gizmo_vertices(center, size, mode))
-                })
-                .unwrap_or_default();
+        let gizmo_vertices = self
+            .gizmo_mode
+            .and_then(|mode| {
+                let selected = self.selected_node_index?;
+                let draw = self.draws.iter().find(|draw| {
+                    draw.node_index == Some(selected)
+                        && self.draw_visible(draw)
+                        && !self.lod_suppressed.contains(&selected)
+                })?;
+                let center = draw.world_bounds.center();
+                let distance = (camera.eye() - center).length().max(0.1);
+                let size = draw
+                    .world_bounds
+                    .radius()
+                    .max(distance * 0.08)
+                    .clamp(0.15, distance * 0.3);
+                Some(build_transform_gizmo_vertices(center, size, mode))
+            })
+            .unwrap_or_default();
         let mut visible_instances = 0_u32;
         let gizmo_buffer = (!gizmo_vertices.is_empty()).then(|| {
             self.gpu
@@ -2273,6 +2486,9 @@ impl SurfaceRenderer {
             for draw in &self.draws {
                 if draw.collision_overlay
                     || !self.draw_visible(draw)
+                    || draw
+                        .node_index
+                        .is_some_and(|node| self.lod_suppressed.contains(&node))
                     || !camera.aabb_visible(
                         draw.world_bounds,
                         self.options.width,
@@ -2305,6 +2521,9 @@ impl SurfaceRenderer {
                 pass.set_pipeline(&self.line_pipeline);
                 for draw in &self.draws {
                     if !self.draw_visible(draw)
+                        || draw
+                            .node_index
+                            .is_some_and(|node| self.lod_suppressed.contains(&node))
                         || !camera.aabb_visible(
                             draw.world_bounds,
                             self.options.width,
@@ -3107,6 +3326,111 @@ fn nice_grid_spacing(target: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn synthetic_lod_entity(
+        ymap: &str,
+        entity_index: u32,
+        parent_index: Option<i32>,
+        num_children: Option<u32>,
+        child_lod_dist: Option<f32>,
+        center: Vec3,
+        ready: bool,
+    ) -> LodEntity {
+        LodEntity {
+            key: LodEntityKey {
+                source_ymap: ymap.into(),
+                entity_index,
+            },
+            node_index: entity_index,
+            parent_index,
+            num_children,
+            child_lod_dist,
+            lod_dist: Some(500.0),
+            bounds: ready.then_some(Aabb {
+                min: center - Vec3::splat(1.0),
+                max: center + Vec3::splat(1.0),
+            }),
+        }
+    }
+
+    #[test]
+    fn lod_parent_survives_missing_and_unready_paginated_children() {
+        let camera = OrbitCamera::around_world_position([0.0; 3], 120.0, Projection::Perspective);
+        let center = camera.eye() + camera.forward() * 80.0;
+        let root = synthetic_lod_entity("map.ymap", 0, None, Some(2), Some(100.0), center, true);
+        let child_a = synthetic_lod_entity("map.ymap", 1, Some(0), None, None, center, true);
+        let child_b = synthetic_lod_entity("map.ymap", 2, Some(0), None, None, center, true);
+        let mut state = HashMap::new();
+
+        // Only the first page is resident; it must not remove the proxy.
+        let partial = LodHierarchy::from_nodes(vec![root.clone(), child_a.clone()]);
+        assert_eq!(partial.suppressed(&camera, &mut state), HashSet::from([1]));
+
+        // The second page is present but its drawable was not resolved.
+        let mut unresolved = child_b.clone();
+        unresolved.bounds = None;
+        let pending = LodHierarchy::from_nodes(vec![root.clone(), child_a.clone(), unresolved]);
+        assert_eq!(
+            pending.suppressed(&camera, &mut state),
+            HashSet::from([1, 2])
+        );
+
+        // Both pages become drawable: switch atomically to both HD children.
+        let complete = LodHierarchy::from_nodes(vec![root, child_a, child_b]);
+        assert_eq!(complete.suppressed(&camera, &mut state), HashSet::from([0]));
+
+        // Losing a child after a successful switch restores the parent immediately.
+        assert_eq!(
+            pending.suppressed(&camera, &mut state),
+            HashSet::from([1, 2])
+        );
+    }
+
+    #[test]
+    fn lod_hysteresis_avoids_thrashing_and_returns_to_detail() {
+        let mut camera =
+            OrbitCamera::around_world_position([0.0; 3], 120.0, Projection::Perspective);
+        let direction = camera.forward();
+        let center = camera.eye() + direction * 90.0;
+        let tree = LodHierarchy::from_nodes(vec![
+            synthetic_lod_entity("map", 0, None, Some(1), Some(100.0), center, true),
+            synthetic_lod_entity("map", 1, Some(0), None, None, center, true),
+        ]);
+        let mut state = HashMap::new();
+        assert_eq!(tree.suppressed(&camera, &mut state), HashSet::from([0]));
+        camera.target -= direction * 16.0;
+        assert_eq!(tree.suppressed(&camera, &mut state), HashSet::from([0]));
+        camera.target -= direction * 16.0;
+        assert_eq!(tree.suppressed(&camera, &mut state), HashSet::from([1]));
+        camera.target += direction * 16.0;
+        assert_eq!(tree.suppressed(&camera, &mut state), HashSet::from([1]));
+        camera.target += direction * 16.0;
+        assert_eq!(tree.suppressed(&camera, &mut state), HashSet::from([0]));
+    }
+
+    #[test]
+    fn lod_nested_branches_and_unlinked_ymaps_are_safe() {
+        let camera = OrbitCamera::around_world_position([0.0; 3], 120.0, Projection::Perspective);
+        let center = camera.eye() + camera.forward() * 80.0;
+        let tree = LodHierarchy::from_nodes(vec![
+            synthetic_lod_entity("a.ymap", 0, None, Some(1), Some(100.0), center, true),
+            synthetic_lod_entity("a.ymap", 1, Some(0), Some(1), Some(100.0), center, true),
+            synthetic_lod_entity("a.ymap", 2, Some(1), None, None, center, true),
+            synthetic_lod_entity("b.ymap", 3, Some(0), None, None, center, true),
+        ]);
+        let mut state = HashMap::new();
+        assert_eq!(tree.suppressed(&camera, &mut state), HashSet::from([0, 1]));
+        // A child from another YMAP cannot satisfy the parent's child count.
+        let incomplete = LodHierarchy::from_nodes(vec![
+            synthetic_lod_entity("a.ymap", 0, None, Some(2), Some(100.0), center, true),
+            synthetic_lod_entity("a.ymap", 1, Some(0), None, None, center, true),
+            synthetic_lod_entity("b.ymap", 3, Some(0), None, None, center, true),
+        ]);
+        assert_eq!(
+            incomplete.suppressed(&camera, &mut state),
+            HashSet::from([1])
+        );
+    }
 
     #[test]
     fn texture_mipmap_chain_size_matches_gpu_allocation() {

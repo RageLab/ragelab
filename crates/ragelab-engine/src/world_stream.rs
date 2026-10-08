@@ -2083,14 +2083,23 @@ mod tests {
                 asset_ref: Some(index),
                 asset_kind: Some(AssetKind::Ydr),
                 transform: (index != 449).then_some(crate::SpatialTransform {
-                    translation: [index as f32 * 5.0, -300.0, 0.0],
+                    translation: [
+                        if index == 1 {
+                            900.0
+                        } else {
+                            index as f32 * 5.0
+                        },
+                        -300.0,
+                        0.0,
+                    ],
                     rotation: [0.0, 0.0, 0.0, 1.0],
                     scale: Some([1.0; 3]),
                 }),
                 lod_dist: Some(1000.0),
-                child_lod_dist: None,
+                child_lod_dist: (index == 0).then_some(100.0),
                 lod_level: None,
-                num_children: None,
+                num_children: (index == 0).then_some(1),
+                parent_index: (index == 1).then_some(0),
                 resolution: SceneResolutionState::Resolved,
                 reason: None,
                 collision: None,
@@ -2133,6 +2142,8 @@ mod tests {
         assert!(pages.len() >= 3);
         let mut seen_entities = BTreeSet::new();
         let mut seen_archetypes = BTreeSet::new();
+        let mut parent_page = None;
+        let mut child_page = None;
         for (page_index, page) in pages.iter().enumerate() {
             assert!(page.assets.len() <= 192);
             assert!(page
@@ -2142,6 +2153,15 @@ mod tests {
                 .to_string()
                 .ends_with(&format!("#world-page-{page_index}")));
             for node in &page.nodes {
+                if node.entity_index == 0 {
+                    parent_page = Some(page_index);
+                    assert_eq!(node.num_children, Some(1));
+                    assert_eq!(node.child_lod_dist, Some(100.0));
+                }
+                if node.entity_index == 1 {
+                    child_page = Some(page_index);
+                    assert_eq!(node.parent_index, Some(0));
+                }
                 assert!(seen_entities.insert(node.entity_index));
                 assert!(node.asset_ref.is_some_and(|id| id < page.assets.len()));
                 assert_eq!(
@@ -2154,6 +2174,8 @@ mod tests {
         assert_eq!(seen_entities.len(), count);
         assert_eq!(seen_archetypes.len(), count);
         assert!(seen_entities.contains(&449)); // no-transform nodes are not dropped
+        assert!(parent_page.is_some() && child_page.is_some());
+        assert_ne!(parent_page, child_page); // original hierarchy survives separate pages
     }
 
     #[test]

@@ -319,6 +319,8 @@ pub struct RenderInstanceDescriptor {
     pub child_lod_dist: Option<f32>,
     pub lod_level: Option<i32>,
     pub num_children: Option<u32>,
+    #[serde(default)]
+    pub parent_index: Option<i32>,
     pub resolution: String,
     pub reason: Option<RenderResolutionReason>,
     pub collision: Option<RenderCollisionReference>,
@@ -1271,6 +1273,7 @@ fn render_instance(node: &SceneNode) -> Result<RenderInstanceDescriptor, io::Err
         child_lod_dist: node.child_lod_dist,
         lod_level: node.lod_level,
         num_children: node.num_children,
+        parent_index: node.parent_index,
         resolution: node.resolution.as_str().to_string(),
         reason: node.reason.as_ref().map(|reason| RenderResolutionReason {
             code: reason.code.as_str().to_string(),
@@ -2134,6 +2137,41 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn render_descriptor_preserves_ymap_lod_parent_and_reads_legacy_packets() {
+        let node = SceneNode {
+            index: 0,
+            source_ymap: "nested.ymap".into(),
+            entity_index: 42,
+            archetype_hash: 0xAABBCCDD,
+            provider_path: None,
+            asset_ref: None,
+            asset_kind: None,
+            transform: None,
+            lod_dist: Some(300.0),
+            child_lod_dist: Some(80.0),
+            lod_level: Some(1),
+            num_children: Some(2),
+            parent_index: Some(7),
+            resolution: crate::SceneResolutionState::Unresolved,
+            reason: None,
+            collision: None,
+            interior: None,
+        };
+        let descriptor = render_instance(&node).expect("serialize YMAP node metadata");
+        assert_eq!(descriptor.source_ymap, "nested.ymap");
+        assert_eq!(descriptor.entity_index, 42);
+        assert_eq!(descriptor.parent_index, Some(7));
+        assert_eq!(descriptor.child_lod_dist, Some(80.0));
+        assert_eq!(descriptor.num_children, Some(2));
+
+        let mut json = serde_json::to_value(&descriptor).unwrap();
+        assert_eq!(json["parentIndex"], 7);
+        json.as_object_mut().unwrap().remove("parentIndex");
+        let legacy: RenderInstanceDescriptor = serde_json::from_value(json).unwrap();
+        assert_eq!(legacy.parent_index, None);
+    }
 
     fn fixture(relative: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
