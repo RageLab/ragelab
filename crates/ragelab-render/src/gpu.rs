@@ -312,6 +312,8 @@ struct LodEntityKey {
 struct LodEntity {
     key: LodEntityKey,
     node_index: u32,
+    map_hash: Option<u32>,
+    parent_map_hash: Option<u32>,
     parent_index: Option<i32>,
     num_children: Option<u32>,
     child_lod_dist: Option<f32>,
@@ -362,6 +364,8 @@ impl LodHierarchy {
                                 entity_index: instance.entity_index,
                             },
                             node_index,
+                            map_hash: package.descriptor.scene.root.name_hash,
+                            parent_map_hash: instance.parent_map_hash,
                             parent_index: instance.parent_index,
                             num_children: instance.num_children,
                             child_lod_dist: instance.child_lod_dist,
@@ -375,11 +379,19 @@ impl LodHierarchy {
     }
 
     fn from_nodes(nodes: Vec<LodEntity>) -> Self {
-        let mut by_entity = HashMap::new();
+        // GTA YMAP parentIndex normally indexes an entity of the *parent YMAP*,
+        // designated by the map's parent hash, not the child's own YMAP.
+        // Pages from the same map can arrive independently and in any order.
+        let mut by_map_entity = HashMap::new();
+        let mut by_source_entity = HashMap::new();
         for (index, node) in nodes.iter().enumerate() {
-            // Interior nodes can share their parent entity index. Keep the
-            // original YMAP entity as the canonical hierarchy anchor.
-            by_entity.entry(node.key.clone()).or_insert(index);
+            // Interior nodes may share an index with their owning entity.
+            by_source_entity.entry(node.key.clone()).or_insert(index);
+            if let Some(map_hash) = node.map_hash {
+                by_map_entity
+                    .entry((map_hash, node.key.entity_index))
+                    .or_insert(index);
+            }
         }
         let mut children = vec![Vec::new(); nodes.len()];
         let mut has_parent = vec![false; nodes.len()];
@@ -390,15 +402,20 @@ impl LodHierarchy {
             else {
                 continue;
             };
-            let parent_key = LodEntityKey {
-                source_ymap: node.key.source_ymap.clone(),
-                entity_index: parent_index,
+            let parent = if let Some(parent_map_hash) = node.parent_map_hash {
+                // Never connect a child to a coincidentally matching local
+                // index while its actual parent map is not resident.
+                by_map_entity.get(&(parent_map_hash, parent_index)).copied()
+            } else {
+                let parent_key = LodEntityKey {
+                    source_ymap: node.key.source_ymap.clone(),
+                    entity_index: parent_index,
+                };
+                by_source_entity.get(&parent_key).copied()
             };
-            if let Some(&parent) = by_entity.get(&parent_key) {
-                if parent != index {
-                    children[parent].push(index);
-                    has_parent[index] = true;
-                }
+            if let Some(parent) = parent.filter(|&parent| parent != index) {
+                children[parent].push(index);
+                has_parent[index] = true;
             }
         }
         let roots = has_parent
@@ -3342,6 +3359,8 @@ mod tests {
                 entity_index,
             },
             node_index: entity_index,
+            map_hash: None,
+            parent_map_hash: None,
             parent_index,
             num_children,
             child_lod_dist,
@@ -3430,6 +3449,87 @@ mod tests {
             incomplete.suppressed(&camera, &mut state),
             HashSet::from([1])
         );
+    }
+
+    #[test]
+    fn lod_switches_across_santamon_style_parent_ymap_chain() {
+        let camera = OrbitCamera::around_world_position([0.0; 3], 120.0, Projection::Perspective);
+        let center = camera.eye() + camera.forward() * 80.0;
+        let mut slod =
+            synthetic_lod_entity("sm_lod.ymap", 20, None, Some(1), Some(130.0), center, true);
+        slod.map_hash = Some(0x100);
+        slod.node_index = 0;
+        let mut proxy = synthetic_lod_entity(
+            "sm_23.ymap",
+            2,
+            Some(20),
+            Some(2),
+            Some(100.0),
+            center,
+            true,
+        );
+        proxy.map_hash = Some(0x200);
+        proxy.parent_map_hash = Some(0x100);
+        proxy.node_index = 1;
+        let mut detail_a =
+            synthetic_lod_entity("sm_23_strm_0.ymap", 0, Some(2), None, None, center, true);
+        detail_a.map_hash = Some(0x300);
+        detail_a.parent_map_hash = Some(0x200);
+        detail_a.node_index = 2;
+        let mut detail_b =
+            synthetic_lod_entity("sm_23_strm_1.ymap", 0, Some(2), None, None, center, true);
+        detail_b.map_hash = Some(0x301);
+        detail_b.parent_map_hash = Some(0x200);
+        detail_b.node_index = 3;
+
+        let mut state = HashMap::new();
+        let initial = LodHierarchy::from_nodes(vec![slod.clone(), proxy.clone()]);
+        assert_eq!(initial.suppressed(&camera, &mut state), HashSet::from([0]));
+
+        let one_page =
+            LodHierarchy::from_nodes(vec![slod.clone(), proxy.clone(), detail_a.clone()]);
+        assert_eq!(
+            one_page.suppressed(&camera, &mut state),
+            HashSet::from([0, 2])
+        );
+
+        let complete = LodHierarchy::from_nodes(vec![slod, proxy, detail_a, detail_b]);
+        assert_eq!(
+            complete.suppressed(&camera, &mut state),
+            HashSet::from([0, 1])
+        );
+    }
+
+    #[test]
+    fn lod_parent_map_hash_prevents_false_local_parent_attachment() {
+        let camera = OrbitCamera::around_world_position([0.0; 3], 120.0, Projection::Perspective);
+        let center = camera.eye() + camera.forward() * 80.0;
+        let mut local = synthetic_lod_entity(
+            "sm_23_strm_0.ymap",
+            2,
+            None,
+            Some(1),
+            Some(100.0),
+            center,
+            true,
+        );
+        local.map_hash = Some(0x300);
+        local.node_index = 9;
+        let mut external_child =
+            synthetic_lod_entity("sm_23_strm_0.ymap", 0, Some(2), None, None, center, true);
+        external_child.map_hash = Some(0x300);
+        external_child.parent_map_hash = Some(0x200);
+        external_child.node_index = 10;
+        let mut state = HashMap::new();
+        let no_parent = LodHierarchy::from_nodes(vec![local, external_child.clone()]);
+        assert!(no_parent.suppressed(&camera, &mut state).is_empty());
+
+        let mut real_parent =
+            synthetic_lod_entity("sm_23.ymap", 2, None, Some(1), Some(100.0), center, true);
+        real_parent.map_hash = Some(0x200);
+        real_parent.node_index = 11;
+        let linked = LodHierarchy::from_nodes(vec![real_parent, external_child]);
+        assert_eq!(linked.suppressed(&camera, &mut state), HashSet::from([11]));
     }
 
     #[test]

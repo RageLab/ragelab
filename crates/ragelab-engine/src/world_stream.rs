@@ -1661,8 +1661,8 @@ impl WorldStreamingRuntime {
             .filter(|instance| instance.asset_ref.is_some())
         {
             match instance.lod_level {
-                Some(0) => hd_lod_instances += 1,
-                Some(level) if level > 0 => proxy_lod_instances += 1,
+                Some(0 | 5) => hd_lod_instances += 1,    // HD and ORPHANHD
+                Some(1..=4) => proxy_lod_instances += 1, // LOD, SLOD1-3
                 _ => unknown_lod_instances += 1,
             }
         }
@@ -2005,6 +2005,20 @@ mod tests {
     }
 
     #[test]
+    fn gta_lod_level_five_is_orphan_hd_not_proxy() {
+        let levels = [Some(0), Some(5), Some(1), Some(2), Some(3), Some(4), None];
+        let hd = levels
+            .iter()
+            .filter(|level| matches!(level, Some(0 | 5)))
+            .count();
+        let proxy = levels
+            .iter()
+            .filter(|level| matches!(level, Some(1..=4)))
+            .count();
+        assert_eq!((hd, proxy), (2, 4));
+    }
+
+    #[test]
     fn world_subchunk_grid_is_stable_during_small_movements_and_for_negative_coordinates() {
         let config = WorldStreamConfig {
             load_radius: 450.0,
@@ -2100,6 +2114,7 @@ mod tests {
                 lod_level: None,
                 num_children: (index == 0).then_some(1),
                 parent_index: (index == 1).then_some(0),
+                parent_map_hash: None,
                 resolution: SceneResolutionState::Resolved,
                 reason: None,
                 collision: None,

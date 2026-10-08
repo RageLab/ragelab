@@ -321,6 +321,8 @@ pub struct RenderInstanceDescriptor {
     pub num_children: Option<u32>,
     #[serde(default)]
     pub parent_index: Option<i32>,
+    #[serde(default)]
+    pub parent_map_hash: Option<u32>,
     pub resolution: String,
     pub reason: Option<RenderResolutionReason>,
     pub collision: Option<RenderCollisionReference>,
@@ -1274,6 +1276,7 @@ fn render_instance(node: &SceneNode) -> Result<RenderInstanceDescriptor, io::Err
         lod_level: node.lod_level,
         num_children: node.num_children,
         parent_index: node.parent_index,
+        parent_map_hash: node.parent_map_hash,
         resolution: node.resolution.as_str().to_string(),
         reason: node.reason.as_ref().map(|reason| RenderResolutionReason {
             code: reason.code.as_str().to_string(),
@@ -2154,6 +2157,7 @@ mod tests {
             lod_level: Some(1),
             num_children: Some(2),
             parent_index: Some(7),
+            parent_map_hash: Some(0x13579BDF),
             resolution: crate::SceneResolutionState::Unresolved,
             reason: None,
             collision: None,
@@ -2163,14 +2167,18 @@ mod tests {
         assert_eq!(descriptor.source_ymap, "nested.ymap");
         assert_eq!(descriptor.entity_index, 42);
         assert_eq!(descriptor.parent_index, Some(7));
+        assert_eq!(descriptor.parent_map_hash, Some(0x13579BDF));
         assert_eq!(descriptor.child_lod_dist, Some(80.0));
         assert_eq!(descriptor.num_children, Some(2));
 
         let mut json = serde_json::to_value(&descriptor).unwrap();
         assert_eq!(json["parentIndex"], 7);
+        assert_eq!(json["parentMapHash"], 0x13579BDF_u32);
         json.as_object_mut().unwrap().remove("parentIndex");
+        json.as_object_mut().unwrap().remove("parentMapHash");
         let legacy: RenderInstanceDescriptor = serde_json::from_value(json).unwrap();
         assert_eq!(legacy.parent_index, None);
+        assert_eq!(legacy.parent_map_hash, None);
     }
 
     fn fixture(relative: &str) -> PathBuf {
