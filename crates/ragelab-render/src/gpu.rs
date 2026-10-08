@@ -462,11 +462,17 @@ impl LodHierarchy {
                 let parent_ready = node
                     .bounds
                     .is_some_and(|bounds| camera.lod_visible(bounds, node.lod_dist));
+                // A loaded mesh is not necessarily a drawable LOD at this
+                // distance. Suppressing the proxy while its children fail
+                // their own lodDist leaves a hole between LOD rings.
                 let children_ready = managed
                     && self.children[index].len() == expected
-                    && self.children[index]
-                        .iter()
-                        .all(|&child| self.nodes[child].bounds.is_some());
+                    && self.children[index].iter().all(|&child| {
+                        let descendant = &self.nodes[child];
+                        descendant
+                            .bounds
+                            .is_some_and(|bounds| camera.lod_visible(bounds, descendant.lod_dist))
+                    });
                 let use_children = if !parent_ready {
                     // Never suppress a drawable child behind a missing parent.
                     true
@@ -1563,7 +1569,11 @@ impl OrbitCamera {
             distance,
             radius,
             projection,
-            far_radius_multiplier: 6.0,
+            // Native GTA world uses a 120m focus radius; the default 6x
+            // multiplier clipped distant city/terrain at roughly 880m.
+            // Keep long-range proxy LODs in the frustum while the stream
+            // controls actual residency and the entity's lodDist controls draws.
+            far_radius_multiplier: 22.0,
         }
     }
 
@@ -3406,6 +3416,20 @@ mod tests {
     }
 
     #[test]
+    fn lod_proxy_stays_visible_when_all_loaded_children_expire_at_distance() {
+        let camera = OrbitCamera::around_world_position([0.0; 3], 120.0, Projection::Perspective);
+        let center = camera.eye() + camera.forward() * 220.0;
+        let parent = synthetic_lod_entity("map.ymap", 0, None, Some(2), Some(280.0), center, true);
+        let mut child_a = synthetic_lod_entity("map.ymap", 1, Some(0), None, None, center, true);
+        let mut child_b = synthetic_lod_entity("map.ymap", 2, Some(0), None, None, center, true);
+        child_a.lod_dist = Some(70.0);
+        child_b.lod_dist = Some(70.0);
+        let tree = LodHierarchy::from_nodes(vec![parent, child_a, child_b]);
+        let mut state = HashMap::new();
+        assert_eq!(tree.suppressed(&camera, &mut state), HashSet::from([1, 2]));
+    }
+
+    #[test]
     fn lod_hysteresis_avoids_thrashing_and_returns_to_detail() {
         let mut camera =
             OrbitCamera::around_world_position([0.0; 3], 120.0, Projection::Perspective);
@@ -3631,6 +3655,19 @@ mod tests {
             select_lru_key([(&right, 7), (&left, 7)].into_iter(), &protected),
             Some(left)
         );
+    }
+
+    #[test]
+    fn world_camera_keeps_distant_proxy_geometry_in_frustum() {
+        let camera = OrbitCamera::around_world_position([0.0; 3], 120.0, Projection::Perspective);
+        assert!(camera.far_distance() >= 2_500.0);
+        let proxy_center = camera.eye() + camera.forward() * 1_850.0;
+        let proxy_bounds = Aabb {
+            min: proxy_center - Vec3::splat(25.0),
+            max: proxy_center + Vec3::splat(25.0),
+        };
+        assert!(camera.aabb_visible(proxy_bounds, 1280, 800));
+        assert!(camera.lod_visible(proxy_bounds, Some(4_000.0)));
     }
 
     #[test]

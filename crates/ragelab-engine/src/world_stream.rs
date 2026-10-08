@@ -53,12 +53,12 @@ impl Default for WorldStreamConfig {
         render_options.max_assets = WORLD_STREAM_MAX_ASSETS_PER_SUBCHUNK;
 
         Self {
-            load_radius: 750.0,
-            retain_radius: 950.0,
-            max_active_maps: 16,
+            load_radius: 1_150.0,
+            retain_radius: 1_500.0,
+            max_active_maps: 20,
             max_chunk_loads_per_update: 2,
-            max_cpu_chunks: 32,
-            max_cpu_bytes: 512 * 1024 * 1024,
+            max_cpu_chunks: 48,
+            max_cpu_bytes: 768 * 1024 * 1024,
             scene_options: SceneAssemblyOptions::default(),
             render_options,
         }
