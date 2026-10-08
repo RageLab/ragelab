@@ -31,6 +31,10 @@ const PREFETCH_CHUNK_LOADS_PER_UPDATE: usize = 1;
 const WORLD_STREAM_MAX_ASSETS_PER_SUBCHUNK: usize = 192;
 const WORLD_STREAM_SUBCHUNK_RADIUS_FACTOR: f32 = 0.4;
 const WORLD_STREAM_TILE_STEP_FACTOR: f32 = 1.0;
+// Nearby real entity positions are a stronger signal of useful HD detail
+// than enormous overlapping YMAP streaming bounds or their centroid.
+const WORLD_STREAM_NEAR_ENTITY_RADIUS: f32 = 320.0;
+const WORLD_STREAM_ENTITY_PRIORITY_TILE: f32 = 40.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WorldStreamConfig {
@@ -744,6 +748,16 @@ fn compile_pending_world_page(
     Ok(true)
 }
 
+fn candidate_near_entity_distance_squared(
+    candidate: &Candidate,
+    nearby_entity_distance: &BTreeMap<u32, f32>,
+) -> f32 {
+    nearby_entity_distance
+        .get(&candidate.key.map_hash)
+        .copied()
+        .unwrap_or(f32::INFINITY)
+}
+
 fn candidate_center_distance_squared(candidate: &Candidate, position: GtaRpfWorldPoint) -> f32 {
     let Some(center) = candidate.bounds.center() else {
         return f32::INFINITY;
@@ -768,6 +782,8 @@ pub struct WorldStreamingRuntime {
     prefetch_failures: BTreeSet<WorldStreamChunkKey>,
     last_view_position: Option<GtaRpfWorldPoint>,
     prefetch_direction_xy: Option<[f32; 2]>,
+    entity_priority_tile: Option<(i32, i32)>,
+    nearby_entity_distance: BTreeMap<u32, f32>,
     active: BTreeSet<WorldStreamChunkKey>,
     overlay_packages: Vec<Arc<RenderPackage>>,
     overlay_map_hashes: BTreeSet<u32>,
@@ -812,6 +828,8 @@ impl WorldStreamingRuntime {
             prefetch_failures: BTreeSet::new(),
             last_view_position: None,
             prefetch_direction_xy: None,
+            entity_priority_tile: None,
+            nearby_entity_distance: BTreeMap::new(),
             active: BTreeSet::new(),
             overlay_packages: Vec::new(),
             overlay_map_hashes: BTreeSet::new(),
@@ -1116,6 +1134,34 @@ impl WorldStreamingRuntime {
                 z: view.position.z,
             }
         });
+        // Cache a small near-camera entity query for each ~40 m navigation
+        // tile. Do not scan the full 1.5 km world entity index each update.
+        let entity_tile = (
+            (view.position.x / WORLD_STREAM_ENTITY_PRIORITY_TILE).floor() as i32,
+            (view.position.y / WORLD_STREAM_ENTITY_PRIORITY_TILE).floor() as i32,
+        );
+        if self.entity_priority_tile != Some(entity_tile) {
+            let nearby = self.index.query_world_radius(
+                view.position,
+                WORLD_STREAM_NEAR_ENTITY_RADIUS,
+                true,
+            )?;
+            self.nearby_entity_distance.clear();
+            for hit in nearby.entities {
+                let dx = hit.entity.position.x - view.position.x;
+                let dy = hit.entity.position.y - view.position.y;
+                let distance_squared = dx * dx + dy * dy;
+                self.nearby_entity_distance
+                    .entry(hit.map_hash)
+                    .and_modify(|nearest| {
+                        if distance_squared < *nearest {
+                            *nearest = distance_squared;
+                        }
+                    })
+                    .or_insert(distance_squared);
+            }
+            self.entity_priority_tile = Some(entity_tile);
+        }
         let previous_active = self.active.clone();
         let query =
             self.index
@@ -1189,6 +1235,13 @@ impl WorldStreamingRuntime {
                 .cmp(&candidate_locality_class(right, self.config.retain_radius))
                 .then_with(|| candidate_detail_tier(left).cmp(&candidate_detail_tier(right)))
                 .then_with(|| right.visible.cmp(&left.visible))
+                .then_with(|| {
+                    candidate_near_entity_distance_squared(left, &self.nearby_entity_distance)
+                        .total_cmp(&candidate_near_entity_distance_squared(
+                            right,
+                            &self.nearby_entity_distance,
+                        ))
+                })
                 .then_with(|| {
                     candidate_center_distance_squared(left, view.position)
                         .total_cmp(&candidate_center_distance_squared(right, view.position))
@@ -1319,6 +1372,13 @@ impl WorldStreamingRuntime {
                 })
                 .then_with(|| candidate_detail_tier(left).cmp(&candidate_detail_tier(right)))
                 .then_with(|| right.visible.cmp(&left.visible))
+                .then_with(|| {
+                    candidate_near_entity_distance_squared(left, &self.nearby_entity_distance)
+                        .total_cmp(&candidate_near_entity_distance_squared(
+                            right,
+                            &self.nearby_entity_distance,
+                        ))
+                })
                 .then_with(|| {
                     candidate_center_distance_squared(left, view.position)
                         .total_cmp(&candidate_center_distance_squared(right, view.position))
@@ -2609,6 +2669,62 @@ mod tests {
             select_active_chunk_load_batch(&missing[1..], &parents, 2),
             vec![parent_b, leaf]
         );
+    }
+
+    #[test]
+    fn nearest_real_ymap_entities_beat_misleading_map_bounds_centers() {
+        let make = |hash: u32, center_x: f32| Candidate {
+            key: WorldStreamChunkKey {
+                map_hash: hash,
+                provider: GtaRpfIndexLocator {
+                    archive_relative: "test.rpf".into(),
+                    nested: Vec::new(),
+                    entry: format!("sm_{hash}_strm_0.ymap"),
+                    load_rank: 1,
+                },
+            },
+            bounds: GtaRpfWorldBounds {
+                min: GtaRpfWorldPoint {
+                    x: center_x - 1200.0,
+                    y: -100.0,
+                    z: -20.0,
+                },
+                max: GtaRpfWorldPoint {
+                    x: center_x + 1200.0,
+                    y: 100.0,
+                    z: 100.0,
+                },
+            },
+            distance_squared: 0.0,
+            visible: true,
+            entity_count: 350,
+            mlo_roots: 0,
+            parent_hash: None,
+            flags: Some(0),
+            content_flags: Some(65),
+        };
+        let position = GtaRpfWorldPoint {
+            x: 0.0,
+            y: 0.0,
+            z: 30.0,
+        };
+        // Map 1 centroid is close, but its actual entities are >300 m away.
+        // Map 2 is a large YMAP whose entities are just beside the camera.
+        let misleading = make(1, 0.0);
+        let relevant = make(2, 450.0);
+        assert!(
+            candidate_center_distance_squared(&misleading, position)
+                < candidate_center_distance_squared(&relevant, position)
+        );
+        let nearest = BTreeMap::from([(1, 290.0_f32.powi(2)), (2, 18.0_f32.powi(2))]);
+        assert!(
+            candidate_near_entity_distance_squared(&relevant, &nearest)
+                < candidate_near_entity_distance_squared(&misleading, &nearest)
+        );
+        assert!(
+            candidate_near_entity_distance_squared(&misleading, &BTreeMap::new()).is_infinite()
+        );
+        assert_eq!(WORLD_STREAM_ENTITY_PRIORITY_TILE, 40.0);
     }
 
     #[test]
