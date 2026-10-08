@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
-    sync::{mpsc, Arc},
+    sync::{mpsc, Arc, OnceLock},
     time::Instant,
 };
 
@@ -414,7 +414,7 @@ impl OffscreenRenderer {
             address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
 
@@ -867,7 +867,10 @@ impl OffscreenRenderer {
         self.texture_cache_meta.insert(
             key,
             GpuTextureCacheMeta {
-                bytes: descriptor.data.byte_length,
+                bytes: gpu_texture_mip_bytes(
+                    u32::from(descriptor.width),
+                    u32::from(descriptor.height),
+                ),
                 last_used: epoch,
             },
         );
@@ -1666,11 +1669,13 @@ impl SurfaceRenderer {
             format,
         );
 
-        let camera_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("RageLab persistent viewport camera uniform"),
-            contents: bytemuck::bytes_of(&CameraUniform::zeroed()),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
+        let camera_buffer = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("RageLab persistent viewport camera uniform"),
+                contents: bytemuck::bytes_of(&CameraUniform::zeroed()),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
         let camera_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("RageLab persistent viewport camera bind group"),
             layout: &gpu.camera_layout,
@@ -2164,11 +2169,9 @@ impl SurfaceRenderer {
         })?;
 
         let camera_uniform = camera.uniform(self.options.width, self.options.height);
-        self.gpu.queue.write_buffer(
-            &self.camera_buffer,
-            0,
-            bytemuck::bytes_of(&camera_uniform),
-        );
+        self.gpu
+            .queue
+            .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniform));
         let overlay_options = OffscreenOptions {
             width: self.options.width,
             height: self.options.height,
@@ -2592,6 +2595,96 @@ fn ray_aabb(origin: Vec3, direction: Vec3, bounds: Aabb) -> Option<f32> {
     }
 }
 
+fn gpu_texture_mip_count(width: u32, height: u32) -> u32 {
+    32 - width.max(height).max(1).leading_zeros()
+}
+
+fn gpu_texture_mip_bytes(width: u32, height: u32) -> u64 {
+    let (mut width, mut height) = (width.max(1), height.max(1));
+    let mut total = 0_u64;
+    loop {
+        total = total.saturating_add(u64::from(width) * u64::from(height) * 4);
+        if width == 1 && height == 1 {
+            break;
+        }
+        width = (width / 2).max(1);
+        height = (height / 2).max(1);
+    }
+    total
+}
+
+fn srgb_decode_table() -> &'static [f32; 256] {
+    static TABLE: OnceLock<[f32; 256]> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        std::array::from_fn(|index| {
+            let value = index as f32 / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        })
+    })
+}
+
+fn linear_to_srgb8(linear: f32) -> u8 {
+    // Generate the nonlinear transfer curve once. A lookup avoids three
+    // powf calls per RGBA texel on the GPU upload/render thread.
+    const STEPS: usize = 8192;
+    static TABLE: OnceLock<[u8; STEPS + 1]> = OnceLock::new();
+    let encode = TABLE.get_or_init(|| {
+        std::array::from_fn(|index| {
+            let value = index as f32 / STEPS as f32;
+            let encoded = if value <= 0.0031308 {
+                value * 12.92
+            } else {
+                1.055 * value.powf(1.0 / 2.4) - 0.055
+            };
+            (encoded * 255.0).round() as u8
+        })
+    });
+    let index = (linear.clamp(0.0, 1.0) * STEPS as f32).round() as usize;
+    encode[index]
+}
+
+// RGBA8 albedo mips are generated in linear-light and with alpha weighting,
+// to avoid dark halos on GTA vegetation/window cutout texture edges.
+fn downsample_rgba_srgb(source: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let next_width = (width / 2).max(1);
+    let next_height = (height / 2).max(1);
+    let mut output = vec![0_u8; next_width as usize * next_height as usize * 4];
+    let decode = srgb_decode_table();
+    for y in 0..next_height {
+        for x in 0..next_width {
+            let mut alpha_sum = 0.0_f32;
+            let mut linear_premultiplied = [0.0_f32; 3];
+            for oy in 0..2 {
+                for ox in 0..2 {
+                    let sx = (x * 2 + ox).min(width - 1);
+                    let sy = (y * 2 + oy).min(height - 1);
+                    let source_index = ((sy * width + sx) * 4) as usize;
+                    let alpha = source[source_index + 3] as f32 / 255.0;
+                    alpha_sum += alpha;
+                    for channel in 0..3 {
+                        linear_premultiplied[channel] +=
+                            decode[source[source_index + channel] as usize] * alpha;
+                    }
+                }
+            }
+            let out_index = ((y * next_width + x) * 4) as usize;
+            for channel in 0..3 {
+                output[out_index + channel] = if alpha_sum > 0.0 {
+                    linear_to_srgb8(linear_premultiplied[channel] / alpha_sum)
+                } else {
+                    0
+                };
+            }
+            output[out_index + 3] = (alpha_sum * 0.25 * 255.0).round() as u8;
+        }
+    }
+    output
+}
+
 fn create_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -2628,32 +2721,50 @@ fn create_texture(
             height,
             depth_or_array_layers: 1,
         },
-        mip_level_count: 1,
+        mip_level_count: gpu_texture_mip_count(width, height),
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: COLOR_FORMAT,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    queue.write_texture(
-        wgpu::ImageCopyTexture {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        rgba,
-        wgpu::ImageDataLayout {
-            offset: 0,
-            bytes_per_row: Some(width.saturating_mul(4)),
-            rows_per_image: Some(height),
-        },
-        wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-    );
+    let upload_mip = |mip_level: u32, width: u32, height: u32, pixels: &[u8]| {
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &texture,
+                mip_level,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            pixels,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+    };
+    upload_mip(0, width, height, rgba);
+    // Keep only the current reduced mip in CPU memory: do not clone level 0
+    // or retain every mipmap during texture uploads.
+    let (mut mip_width, mut mip_height) = (width, height);
+    let mut mip_pixels = Vec::new();
+    for level in 1..gpu_texture_mip_count(width, height) {
+        let new_pixels = downsample_rgba_srgb(
+            if level == 1 { rgba } else { &mip_pixels },
+            mip_width,
+            mip_height,
+        );
+        mip_width = (mip_width / 2).max(1);
+        mip_height = (mip_height / 2).max(1);
+        upload_mip(level, mip_width, mip_height, &new_pixels);
+        mip_pixels = new_pixels;
+    }
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     Ok(GpuTexture {
         _texture: texture,
@@ -2996,6 +3107,39 @@ fn nice_grid_spacing(target: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn texture_mipmap_chain_size_matches_gpu_allocation() {
+        assert_eq!(gpu_texture_mip_count(1, 1), 1);
+        assert_eq!(gpu_texture_mip_count(3, 5), 3);
+        assert_eq!(gpu_texture_mip_count(256, 128), 9);
+        assert_eq!(gpu_texture_mip_bytes(1, 1), 4);
+        assert_eq!(gpu_texture_mip_bytes(4, 4), 84);
+        assert_eq!(gpu_texture_mip_bytes(3, 5), 60 + 8 + 4);
+    }
+
+    #[test]
+    fn texture_mips_average_srgb_in_linear_light() {
+        // 2x2 black/white checkerboard, all pixels opaque.
+        let pixels = [
+            0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 255,
+        ];
+        let mip = downsample_rgba_srgb(&pixels, 2, 2);
+        assert_eq!(mip.len(), 4);
+        // Linear-light average of black/white is ~188 sRGB, not 128.
+        assert!((mip[0] as i32 - 188).abs() <= 1);
+        assert_eq!(mip[0], mip[1]);
+        assert_eq!(mip[1], mip[2]);
+        assert_eq!(mip[3], 255);
+    }
+
+    #[test]
+    fn texture_mips_preserve_opaque_color_under_transparent_cutout() {
+        let pixels = [255, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mip = downsample_rgba_srgb(&pixels, 2, 2);
+        assert_eq!(&mip[..3], &[255, 0, 0]);
+        assert_eq!(mip[3], 64);
+    }
 
     #[test]
     fn package_node_rebasing_preserves_local_identity_when_page_inserted() {

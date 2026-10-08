@@ -26,7 +26,7 @@ use crate::{
     SceneAssemblyOptions, SceneGameIndexSource, SceneManifest, SceneResolutionState,
 };
 
-pub const WORLD_STREAM_SCHEMA_VERSION: u32 = 6;
+pub const WORLD_STREAM_SCHEMA_VERSION: u32 = 7;
 const PREFETCH_CHUNK_LOADS_PER_UPDATE: usize = 1;
 const WORLD_STREAM_MAX_ASSETS_PER_SUBCHUNK: usize = 192;
 const WORLD_STREAM_SUBCHUNK_RADIUS_FACTOR: f32 = 0.4;
@@ -185,6 +185,9 @@ pub struct WorldStreamReport {
     pub visible_maps: usize,
     pub active_maps: usize,
     pub active_entities: usize,
+    pub hd_lod_instances: usize,
+    pub proxy_lod_instances: usize,
+    pub unknown_lod_instances: usize,
     pub spatial_omitted_nodes: usize,
     pub spatial_omitted_assets: usize,
     pub render_omitted_assets: usize,
@@ -1582,6 +1585,22 @@ impl WorldStreamingRuntime {
             .filter_map(|key| self.unique_record(key))
             .map(|record| record.entities.len())
             .sum::<usize>();
+        let mut hd_lod_instances = 0;
+        let mut proxy_lod_instances = 0;
+        let mut unknown_lod_instances = 0;
+        for instance in final_order
+            .iter()
+            .filter_map(|key| self.cache.get(key))
+            .flat_map(|chunk| &chunk.packages)
+            .flat_map(|package| &package.descriptor.scene.instances)
+            .filter(|instance| instance.asset_ref.is_some())
+        {
+            match instance.lod_level {
+                Some(0) => hd_lod_instances += 1,
+                Some(level) if level > 0 => proxy_lod_instances += 1,
+                _ => unknown_lod_instances += 1,
+            }
+        }
         let spatial_omitted_nodes = final_order
             .iter()
             .filter_map(|key| self.cache.get(key))
@@ -1680,6 +1699,9 @@ impl WorldStreamingRuntime {
                 visible_maps,
                 active_maps: self.active.len(),
                 active_entities,
+                hd_lod_instances,
+                proxy_lod_instances,
+                unknown_lod_instances,
                 spatial_omitted_nodes,
                 spatial_omitted_assets,
                 render_omitted_assets,
