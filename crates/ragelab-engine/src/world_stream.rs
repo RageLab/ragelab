@@ -285,6 +285,60 @@ fn candidate_locality_class(candidate: &Candidate, retain_radius: f32) -> u8 {
     }
 }
 
+// GTA map bounds often overlap by kilometers. A local *_long_* YMAP can
+// contain the camera but still be a billboard/LOD proxy. Prefer STRM
+// detail while preserving parent chains as fallbacks until child pages load.
+fn world_map_detail_tier(entry: &str) -> u8 {
+    let name = entry.rsplit(['/', '\\']).next().unwrap_or(entry);
+    let name = name.to_ascii_lowercase();
+    if name.contains("_strm_") {
+        0
+    } else if name.contains("_critical_") {
+        1
+    } else if name.contains("_long_")
+        || name.contains("_slod")
+        || name.ends_with("_lod.ymap")
+        || name.contains("_lod_")
+    {
+        3
+    } else {
+        2
+    }
+}
+
+fn candidate_detail_tier(candidate: &Candidate) -> u8 {
+    world_map_detail_tier(&candidate.key.provider.entry)
+}
+
+fn select_active_chunk_load_batch(
+    missing: &[WorldStreamChunkKey],
+    parent_keys: &BTreeSet<WorldStreamChunkKey>,
+    max_loads: usize,
+) -> Vec<WorldStreamChunkKey> {
+    let mut result = Vec::with_capacity(max_loads.min(missing.len()));
+    if max_loads >= 2 {
+        // Give the renderer a cheap LOD fallback AND an HD leaf in the
+        // same update, rather than loading all parents before any detail.
+        if let Some(parent) = missing.iter().find(|key| parent_keys.contains(*key)) {
+            result.push(parent.clone());
+        }
+        if let Some(detail) = missing.iter().find(|key| {
+            !parent_keys.contains(*key) && world_map_detail_tier(&key.provider.entry) <= 1
+        }) {
+            result.push(detail.clone());
+        }
+    }
+    for key in missing {
+        if result.len() == max_loads {
+            break;
+        }
+        if !result.contains(key) {
+            result.push(key.clone());
+        }
+    }
+    result
+}
+
 fn candidate_variant_key(candidate: &Candidate) -> [u64; 9] {
     [
         u64::from(candidate.bounds.min.x.to_bits()),
@@ -837,6 +891,7 @@ impl WorldStreamingRuntime {
         candidates.sort_by(|left, right| {
             candidate_locality_class(left, self.config.retain_radius)
                 .cmp(&candidate_locality_class(right, self.config.retain_radius))
+                .then_with(|| candidate_detail_tier(left).cmp(&candidate_detail_tier(right)))
                 .then_with(|| {
                     candidate_center_distance_squared(left, position)
                         .total_cmp(&candidate_center_distance_squared(right, position))
@@ -862,6 +917,7 @@ impl WorldStreamingRuntime {
 
             let is_detail_leaf = candidate_locality_class(candidate, self.config.retain_radius)
                 == 0
+                && candidate_detail_tier(candidate) <= 1
                 && !hierarchy_map_hashes.contains(&candidate.key.map_hash);
             if is_detail_leaf && selected_detail_maps >= detail_budget {
                 continue;
@@ -944,6 +1000,7 @@ impl WorldStreamingRuntime {
                     candidate_locality_class(left, self.config.retain_radius)
                         .cmp(&candidate_locality_class(right, self.config.retain_radius))
                 })
+                .then_with(|| candidate_detail_tier(left).cmp(&candidate_detail_tier(right)))
                 .then_with(|| {
                     candidate_center_distance_squared(left, position)
                         .total_cmp(&candidate_center_distance_squared(right, position))
@@ -1091,6 +1148,7 @@ impl WorldStreamingRuntime {
         candidates.sort_by(|left, right| {
             candidate_locality_class(left, self.config.retain_radius)
                 .cmp(&candidate_locality_class(right, self.config.retain_radius))
+                .then_with(|| candidate_detail_tier(left).cmp(&candidate_detail_tier(right)))
                 .then_with(|| right.visible.cmp(&left.visible))
                 .then_with(|| {
                     candidate_center_distance_squared(left, view.position)
@@ -1124,6 +1182,7 @@ impl WorldStreamingRuntime {
 
             let is_detail_leaf = candidate_locality_class(candidate, self.config.retain_radius)
                 == 0
+                && candidate_detail_tier(candidate) <= 1
                 && !hierarchy_map_hashes.contains(&candidate.key.map_hash);
             if is_detail_leaf && selected_detail_maps >= detail_budget {
                 continue;
@@ -1219,6 +1278,7 @@ impl WorldStreamingRuntime {
                     candidate_locality_class(left, self.config.retain_radius)
                         .cmp(&candidate_locality_class(right, self.config.retain_radius))
                 })
+                .then_with(|| candidate_detail_tier(left).cmp(&candidate_detail_tier(right)))
                 .then_with(|| right.visible.cmp(&left.visible))
                 .then_with(|| {
                     candidate_center_distance_squared(left, view.position)
@@ -1277,11 +1337,16 @@ impl WorldStreamingRuntime {
                 }
             })
             .collect::<Vec<_>>();
-        let active_missing = missing_all
-            .iter()
-            .take(self.config.max_chunk_loads_per_update)
-            .cloned()
-            .collect::<Vec<_>>();
+        let active_load_budget = if self.active.is_empty() {
+            // A lightweight parent LOD should reach the screen immediately.
+            // Defer the heavy HD leaf to the next background update rather
+            // than holding the first visible frame for both chunk builds.
+            1
+        } else {
+            self.config.max_chunk_loads_per_update
+        };
+        let active_missing =
+            select_active_chunk_load_batch(&missing_all, &parent_keys, active_load_budget);
         let prefetch_missing = if cache_misses == 0
             && !ordered_keys.iter().any(|key| {
                 self.cache
@@ -2314,6 +2379,49 @@ mod tests {
             ),
             0
         );
+    }
+
+    #[test]
+    fn world_load_batch_interleaves_fallback_and_hd_detail() {
+        let make = |hash, entry: &str| WorldStreamChunkKey {
+            map_hash: hash,
+            provider: GtaRpfIndexLocator {
+                archive_relative: "test.rpf".into(),
+                nested: Vec::new(),
+                entry: entry.into(),
+                load_rank: 1,
+            },
+        };
+        let parent_a = make(1, "hei_kt1_09.ymap");
+        let parent_b = make(2, "hei_kt1_lod.ymap");
+        let leaf = make(3, "hei_kt1_09_strm_0.ymap");
+        let missing = vec![parent_a.clone(), parent_b.clone(), leaf.clone()];
+        let parents = BTreeSet::from([parent_a.clone(), parent_b.clone()]);
+        assert_eq!(
+            select_active_chunk_load_batch(&missing, &parents, 2),
+            vec![parent_a.clone(), leaf.clone()]
+        );
+        assert_eq!(
+            select_active_chunk_load_batch(&missing, &parents, 1),
+            vec![parent_a]
+        );
+        assert_eq!(
+            select_active_chunk_load_batch(&missing[1..], &parents, 2),
+            vec![parent_b, leaf]
+        );
+    }
+
+    #[test]
+    fn nearby_strm_details_precede_long_distance_lod_proxies() {
+        assert_eq!(world_map_detail_tier("dt1_20_strm_0.ymap"), 0);
+        assert_eq!(world_map_detail_tier("hei_kt1_08_strm_0.ymap"), 0);
+        assert_eq!(world_map_detail_tier("sm_23_critical_0.ymap"), 1);
+        assert_eq!(world_map_detail_tier("dt1_09.ymap"), 2);
+        assert_eq!(world_map_detail_tier("dt1_09_long_0.ymap"), 3);
+        assert_eq!(world_map_detail_tier("bh1_rd_long_2.ymap"), 3);
+        assert_eq!(world_map_detail_tier("dt1_lod.ymap"), 3);
+        assert_eq!(world_map_detail_tier("maps\\vb_lod.ymap"), 3);
+        assert_eq!(world_map_detail_tier("sm_slod2.ymap"), 3);
     }
 
     #[test]
