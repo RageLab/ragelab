@@ -19,12 +19,12 @@ use serde_json::Value;
 
 use crate::{
     parse_model_preview_source, parse_ydd_model_preview_source, prepare_scene_asset_preview_input,
-    resolve_diffuse_textures_with_cache, workspace_scene_manifest_from_ymap_with_sources,
-    workspace_scene_manifest_with_sources, ModelPreviewSource, PreviewOptions,
-    PreviewTextureDictionaryCache, PreviewTextureDictionarySource, ResolvedDiffuseTexture,
-    SceneAssemblyOptions, SceneAssetPreviewSources, SceneAssetReference, SceneAssetSelector,
-    SceneManifest, SceneNode, SpatialTransform, MODEL_DIFFUSE_TEXTURE_LIMIT,
-    MODEL_DIFFUSE_TEXTURE_MAX_DIMENSION,
+    resolve_diffuse_textures_with_cache_at_dimension,
+    workspace_scene_manifest_from_ymap_with_sources, workspace_scene_manifest_with_sources,
+    ModelPreviewSource, PreviewOptions, PreviewTextureDictionaryCache,
+    PreviewTextureDictionarySource, ResolvedDiffuseTexture, SceneAssemblyOptions,
+    SceneAssetPreviewSources, SceneAssetReference, SceneAssetSelector, SceneManifest, SceneNode,
+    SpatialTransform, MODEL_DIFFUSE_TEXTURE_LIMIT, MODEL_DIFFUSE_TEXTURE_MAX_DIMENSION,
 };
 
 pub const RENDER_PACKAGE_SCHEMA_VERSION: u32 = 2;
@@ -1038,6 +1038,7 @@ pub fn render_asset_package_bytes_as(
         asset_type,
         bytes,
         options.preview,
+        MODEL_DIFFUSE_TEXTURE_MAX_DIMENSION,
         external_texture_dictionaries,
         &[],
     )?;
@@ -1069,6 +1070,53 @@ pub fn render_asset_package_bytes_as(
 pub(crate) fn build_scene_render_package(
     manifest: &SceneManifest,
     options: RenderPackageOptions,
+) -> Result<RenderPackage, io::Error> {
+    build_scene_render_package_at_focus(manifest, options, None)
+}
+
+pub(crate) fn build_world_render_package(
+    manifest: &SceneManifest,
+    options: RenderPackageOptions,
+    world_focus: [f32; 3],
+) -> Result<RenderPackage, io::Error> {
+    build_scene_render_package_at_focus(manifest, options, Some(world_focus))
+}
+
+fn world_asset_texture_dimension(
+    manifest: &SceneManifest,
+    asset_id: usize,
+    focus: [f32; 3],
+) -> u16 {
+    let nearest = manifest
+        .nodes
+        .iter()
+        .filter(|node| node.asset_ref == Some(asset_id))
+        .filter_map(|node| node.transform.map(|transform| transform.translation))
+        .map(|pos| {
+            let dx = pos[0] - focus[0];
+            let dy = pos[1] - focus[1];
+            dx * dx + dy * dy
+        })
+        .fold(f32::INFINITY, f32::min);
+    world_texture_dimension_for_distance_squared(nearest)
+}
+
+fn world_texture_dimension_for_distance_squared(nearest: f32) -> u16 {
+    // Prefer near-camera detail, release VRAM from distant LOD and terrain.
+    // Fallback for unplaced assets is 128px rather than inventing proximity.
+    if nearest <= 230.0 * 230.0 {
+        512
+    } else if nearest <= 750.0 * 750.0 {
+        256
+    } else {
+        128
+    }
+}
+
+fn build_scene_render_package_at_focus(
+    manifest: &SceneManifest,
+    options: RenderPackageOptions,
+    world_focus: Option<[f32; 3]>,
 ) -> Result<RenderPackage, io::Error> {
     let mut builder = PackageBuilder::new(options.max_blob_bytes);
     let mut assets = Vec::with_capacity(manifest.assets.len());
@@ -1123,6 +1171,9 @@ pub(crate) fn build_scene_render_package(
                     input.asset_type,
                     &input.bytes,
                     input.options,
+                    world_focus.map_or(MODEL_DIFFUSE_TEXTURE_MAX_DIMENSION, |focus| {
+                        world_asset_texture_dimension(manifest, asset.id, focus)
+                    }),
                     &external,
                     &input.external_texture_errors,
                 )?;
@@ -1180,6 +1231,14 @@ pub(crate) fn build_scene_render_package(
         &builder.textures,
         builder.blob.data.len(),
     );
+    let mut limits = render_limits(options, omitted_assets);
+    limits.max_texture_dimension = builder
+        .textures
+        .iter()
+        .map(|texture| texture.width.max(texture.height))
+        .max()
+        .unwrap_or(MODEL_DIFFUSE_TEXTURE_MAX_DIMENSION)
+        .max(MODEL_DIFFUSE_TEXTURE_MAX_DIMENSION);
     let descriptor = RenderPackageDescriptor {
         schema_version: RENDER_PACKAGE_SCHEMA_VERSION,
         scene: RenderSceneDescriptor {
@@ -1193,7 +1252,7 @@ pub(crate) fn build_scene_render_package(
         textures: builder.textures,
         diagnostics: builder.diagnostics,
         summary,
-        limits: render_limits(options, omitted_assets),
+        limits,
     };
     let package = RenderPackage {
         descriptor,
@@ -1426,6 +1485,7 @@ impl PackageBuilder {
         asset_type: &str,
         bytes: &[u8],
         options: PreviewOptions,
+        max_texture_dimension: u16,
         external_texture_dictionaries: &[PreviewTextureDictionarySource<'_>],
         external_texture_errors: &[String],
     ) -> Result<RenderAssetDescriptor, io::Error> {
@@ -1468,13 +1528,14 @@ impl PackageBuilder {
             });
         }
 
-        let resolution = resolve_diffuse_textures_with_cache(
+        let resolution = resolve_diffuse_textures_with_cache_at_dimension(
             &parsed.model,
             parsed.embedded_textures.as_ref(),
             path_label,
             external_texture_dictionaries,
             options,
             &mut self.texture_dictionary_cache,
+            max_texture_dimension,
         );
         for details in &resolution.external_dictionary_errors {
             self.diagnostics.push(RenderDiagnostic {
@@ -2140,6 +2201,31 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn world_texture_tiers_prioritize_near_assets_with_bounded_distance() {
+        assert_eq!(world_texture_dimension_for_distance_squared(0.0), 512);
+        assert_eq!(
+            world_texture_dimension_for_distance_squared(230.0_f32.powi(2)),
+            512
+        );
+        assert_eq!(
+            world_texture_dimension_for_distance_squared(231.0_f32.powi(2)),
+            256
+        );
+        assert_eq!(
+            world_texture_dimension_for_distance_squared(750.0_f32.powi(2)),
+            256
+        );
+        assert_eq!(
+            world_texture_dimension_for_distance_squared(751.0_f32.powi(2)),
+            128
+        );
+        assert_eq!(
+            world_texture_dimension_for_distance_squared(f32::INFINITY),
+            128
+        );
+    }
 
     #[test]
     fn render_descriptor_preserves_ymap_lod_parent_and_reads_legacy_packets() {

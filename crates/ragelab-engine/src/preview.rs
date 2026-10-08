@@ -419,6 +419,29 @@ pub(crate) fn resolve_diffuse_textures_with_cache(
     options: PreviewOptions,
     dictionary_cache: &mut PreviewTextureDictionaryCache,
 ) -> DiffuseTextureResolution {
+    resolve_diffuse_textures_with_cache_at_dimension(
+        model,
+        embedded_textures,
+        embedded_source_path,
+        external_texture_dictionaries,
+        options,
+        dictionary_cache,
+        MODEL_DIFFUSE_TEXTURE_MAX_DIMENSION,
+    )
+}
+
+// World streaming may use larger near-camera textures without changing the
+// established headless preview contract or its 256px resource budget.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_diffuse_textures_with_cache_at_dimension(
+    model: &YdrModel,
+    embedded_textures: Option<&YtdDictionary>,
+    embedded_source_path: &str,
+    external_texture_dictionaries: &[PreviewTextureDictionarySource<'_>],
+    options: PreviewOptions,
+    dictionary_cache: &mut PreviewTextureDictionaryCache,
+    max_dimension: u16,
+) -> DiffuseTextureResolution {
     let mut requested = BTreeMap::<u32, String>::new();
     for shader in model.shaders.iter().take(options.max_shaders) {
         if let Some(name) = shader.diffuse_texture_name() {
@@ -499,6 +522,7 @@ pub(crate) fn resolve_diffuse_textures_with_cache(
                     texture,
                     "embedded",
                     embedded_source_path,
+                    max_dimension,
                 )),
                 Err(error) => unresolved.push(json!({
                     "name": name,
@@ -534,6 +558,7 @@ pub(crate) fn resolve_diffuse_textures_with_cache(
                     texture,
                     source.source,
                     source.path,
+                    max_dimension,
                 )),
                 Err(error) => unresolved.push(json!({
                     "name": name,
@@ -572,10 +597,11 @@ fn resolved_diffuse_texture(
     texture: DecodedTexture,
     source: &str,
     source_path: &str,
+    max_dimension: u16,
 ) -> ResolvedDiffuseTexture {
     let original_width = texture.width;
     let original_height = texture.height;
-    let bounded = bound_decoded_texture(texture, MODEL_DIFFUSE_TEXTURE_MAX_DIMENSION);
+    let bounded = bound_decoded_texture(texture, max_dimension);
 
     ResolvedDiffuseTexture {
         name: name.to_string(),
@@ -621,6 +647,7 @@ fn diffuse_texture_json(
         texture,
         source,
         source_path,
+        MODEL_DIFFUSE_TEXTURE_MAX_DIMENSION,
     ))
 }
 

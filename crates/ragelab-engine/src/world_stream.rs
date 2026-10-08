@@ -19,7 +19,7 @@ use ragelab_ymap::Ymap;
 use serde::Serialize;
 
 use crate::{
-    assemble_ymap_scene, build_scene_render_package, mount_loaded_game_index_for_archetypes,
+    assemble_ymap_scene, build_world_render_package, mount_loaded_game_index_for_archetypes,
     GtaRpfArchetypeBrowserResolution, GtaRpfAssetIndex, GtaRpfIndexLocator, GtaRpfWorldBounds,
     GtaRpfWorldEntityRecord, GtaRpfWorldFrustum, GtaRpfWorldMapHit, GtaRpfWorldMapRecord,
     GtaRpfWorldPoint, RenderPackage, RenderPackageOptions, RenderPackageSummary,
@@ -679,7 +679,8 @@ fn compile_pending_world_page(
         return Ok(false);
     };
     let started = Instant::now();
-    let result = build_scene_render_package(&page, options);
+    let focus = chunk.build_position;
+    let result = build_world_render_package(&page, options, [focus.x, focus.y, focus.z]);
     let package = match result {
         Ok(package) => package,
         Err(error) => {
@@ -1868,7 +1869,11 @@ impl WorldStreamingRuntime {
         if !first.interiors.is_empty() {
             render_options.max_assets = render_options.max_assets.max(first.assets.len());
         }
-        let package = build_scene_render_package(&first, render_options.validate()?)?;
+        let package = build_world_render_package(
+            &first,
+            render_options.validate()?,
+            [tile_center.x, tile_center.y, tile_center.z],
+        )?;
         let render_package_ms = render_started.elapsed().as_secs_f64() * 1000.0;
         let report = package.report();
         let (render_omitted_assets, render_omitted_geometry) = package_render_omissions(&package);
