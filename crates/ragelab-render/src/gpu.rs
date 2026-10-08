@@ -327,7 +327,42 @@ struct LodEntity {
     num_children: Option<u32>,
     child_lod_dist: Option<f32>,
     lod_dist: Option<f32>,
+    lod_level: Option<i32>,
     bounds: Option<Aabb>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum LodDebugMode {
+    #[default]
+    Normal,
+    DetailOnly,
+    ProxyOnly,
+}
+
+impl LodDebugMode {
+    fn next(self) -> Self {
+        match self {
+            Self::Normal => Self::DetailOnly,
+            Self::DetailOnly => Self::ProxyOnly,
+            Self::ProxyOnly => Self::Normal,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::DetailOnly => "HD + ORPHANHD",
+            Self::ProxyOnly => "LOD / proxy",
+        }
+    }
+
+    fn includes(self, lod_level: Option<i32>) -> bool {
+        match self {
+            Self::Normal => true,
+            Self::DetailOnly => !matches!(lod_level, Some(1..=4)),
+            Self::ProxyOnly => matches!(lod_level, Some(1..=4)),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -335,6 +370,7 @@ struct LodHierarchy {
     nodes: Vec<LodEntity>,
     children: Vec<Vec<usize>>,
     roots: Vec<usize>,
+    lod_by_node: HashMap<u32, Option<i32>>,
 }
 
 impl LodHierarchy {
@@ -379,6 +415,7 @@ impl LodHierarchy {
                             num_children: instance.num_children,
                             child_lod_dist: instance.child_lod_dist,
                             lod_dist: instance.lod_dist,
+                            lod_level: instance.lod_level,
                             bounds: bounds_by_node.get(&node_index).copied(),
                         }
                     })
@@ -427,6 +464,10 @@ impl LodHierarchy {
                 has_parent[index] = true;
             }
         }
+        let lod_by_node = nodes
+            .iter()
+            .map(|node| (node.node_index, node.lod_level))
+            .collect();
         let roots = has_parent
             .iter()
             .enumerate()
@@ -436,6 +477,7 @@ impl LodHierarchy {
             nodes,
             children,
             roots,
+            lod_by_node,
         }
     }
 
@@ -1844,6 +1886,7 @@ pub struct SurfaceRenderer {
     packages: Vec<Arc<RenderPackage>>,
     draws: Vec<DrawInstance>,
     lod_hierarchy: LodHierarchy,
+    lod_debug_mode: LodDebugMode,
     lod_selections: HashMap<LodEntityKey, bool>,
     lod_suppressed: HashSet<u32>,
     world_bounds: Option<Aabb>,
@@ -1955,6 +1998,7 @@ impl SurfaceRenderer {
             packages: Vec::new(),
             draws: Vec::new(),
             lod_hierarchy: LodHierarchy::default(),
+            lod_debug_mode: LodDebugMode::default(),
             lod_selections: HashMap::new(),
             lod_suppressed: HashSet::new(),
             world_bounds: None,
@@ -2367,7 +2411,10 @@ impl SurfaceRenderer {
     }
 
     fn draw_visible(&self, draw: &DrawInstance) -> bool {
-        (!draw.collision_overlay || self.show_collision)
+        self.lod_debug_mode.includes(
+            draw.node_index
+                .and_then(|node| self.lod_hierarchy.lod_by_node.get(&node).copied().flatten()),
+        ) && (!draw.collision_overlay || self.show_collision)
             && draw_visibility(
                 draw.node_index,
                 draw.local_overlay,
@@ -2382,6 +2429,11 @@ impl SurfaceRenderer {
         for draw in &self.draws {
             self.gpu.update_model_binding(draw, node_index, true);
         }
+    }
+
+    pub fn cycle_lod_debug_mode(&mut self) -> &'static str {
+        self.lod_debug_mode = self.lod_debug_mode.next();
+        self.lod_debug_mode.label()
     }
 
     pub fn camera_snapshot(&self) -> Option<CameraSnapshot> {
@@ -2439,9 +2491,14 @@ impl SurfaceRenderer {
         let camera = self.camera.as_ref().ok_or_else(|| {
             RenderError::InvalidInput("native viewport has no camera state".into())
         })?;
-        self.lod_suppressed = self
-            .lod_hierarchy
-            .suppressed(camera, &mut self.lod_selections);
+        // Diagnostic A/B shows raw HD and proxy layers independently,
+        // without parent/child suppression hiding either class.
+        self.lod_suppressed = if self.lod_debug_mode == LodDebugMode::Normal {
+            self.lod_hierarchy
+                .suppressed(camera, &mut self.lod_selections)
+        } else {
+            HashSet::new()
+        };
         let world_bounds = self.world_bounds.ok_or_else(|| {
             RenderError::InvalidInput("native viewport has no world bounds".into())
         })?;
@@ -3418,6 +3475,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn lod_debug_filters_make_raw_hd_and_proxy_layers_independently_inspectable() {
+        assert_eq!(LodDebugMode::default(), LodDebugMode::Normal);
+        let detail = LodDebugMode::Normal.next();
+        assert_eq!(detail.label(), "HD + ORPHANHD");
+        assert!(detail.includes(Some(0)));
+        assert!(detail.includes(Some(5)));
+        assert!(detail.includes(None));
+        assert!(!detail.includes(Some(1)));
+        assert!(!detail.includes(Some(4)));
+        let proxy = detail.next();
+        assert_eq!(proxy.label(), "LOD / proxy");
+        assert!(proxy.includes(Some(1)));
+        assert!(proxy.includes(Some(4)));
+        assert!(!proxy.includes(Some(0)));
+        assert!(!proxy.includes(Some(5)));
+        assert!(!proxy.includes(None));
+        assert_eq!(proxy.next(), LodDebugMode::Normal);
+    }
+
+    #[test]
     fn material_alpha_classifies_binary_cutouts_without_discarding_soft_glass() {
         let binary = [0, 0, 0, 0, 1, 1, 1, 255, 1, 1, 1, 255, 0, 0, 0, 0];
         assert_eq!(alpha_cutoff_for_rgba(&binary), 0.5);
@@ -3450,6 +3527,7 @@ mod tests {
             num_children,
             child_lod_dist,
             lod_dist: Some(500.0),
+            lod_level: None,
             bounds: ready.then_some(Aabb {
                 min: center - Vec3::splat(1.0),
                 max: center + Vec3::splat(1.0),
