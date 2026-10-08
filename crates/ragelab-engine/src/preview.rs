@@ -292,40 +292,47 @@ pub(crate) fn parse_model_preview_source(
             })
         }
         "YDD" => {
-            let drawable_index = options.drawable_index.ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "YDD preview requires --drawable-index <n>",
-                )
-            })?;
             let dictionary = YddDictionary::from_bytes(bytes).map_err(validation_error)?;
-            let entry = dictionary.entries().get(drawable_index).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "drawable index {drawable_index} exceeds dictionary size {}",
-                        dictionary.entries().len()
-                    ),
-                )
-            })?;
-            let document = dictionary
-                .document(drawable_index)
-                .map_err(validation_error)?;
-            Ok(ModelPreviewSource {
-                model: document.model,
-                embedded_textures: document.embedded_textures,
-                selector: json!({
-                    "drawableIndex": entry.index,
-                    "nameHash": format!("0x{:08X}", entry.name_hash),
-                    "name": entry.name,
-                }),
-            })
+            parse_ydd_model_preview_source(&dictionary, options)
         }
         _ => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             format!("headless model preview is unavailable for {asset_type}"),
         )),
     }
+}
+
+pub(crate) fn parse_ydd_model_preview_source(
+    dictionary: &YddDictionary,
+    options: PreviewOptions,
+) -> Result<ModelPreviewSource, io::Error> {
+    let drawable_index = options.drawable_index.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "YDD preview requires --drawable-index <n>",
+        )
+    })?;
+    let entry = dictionary.entries().get(drawable_index).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "drawable index {drawable_index} exceeds dictionary size {}",
+                dictionary.entries().len()
+            ),
+        )
+    })?;
+    let document = dictionary
+        .document(drawable_index)
+        .map_err(validation_error)?;
+    Ok(ModelPreviewSource {
+        model: document.model,
+        embedded_textures: document.embedded_textures,
+        selector: json!({
+            "drawableIndex": entry.index,
+            "nameHash": format!("0x{:08X}", entry.name_hash),
+            "name": entry.name,
+        }),
+    })
 }
 
 fn append_diffuse_texture_preview(
@@ -370,12 +377,47 @@ fn append_diffuse_texture_preview(
     );
 }
 
+pub(crate) struct PreviewTextureDictionaryCache {
+    dictionaries: BTreeMap<String, Result<YtdDictionary, String>>,
+    source_bytes: usize,
+    max_source_bytes: usize,
+}
+
+impl PreviewTextureDictionaryCache {
+    pub(crate) fn new(max_source_bytes: usize) -> Self {
+        Self {
+            dictionaries: BTreeMap::new(),
+            source_bytes: 0,
+            max_source_bytes,
+        }
+    }
+}
+
 pub(crate) fn resolve_diffuse_textures(
     model: &YdrModel,
     embedded_textures: Option<&YtdDictionary>,
     embedded_source_path: &str,
     external_texture_dictionaries: &[PreviewTextureDictionarySource<'_>],
     options: PreviewOptions,
+) -> DiffuseTextureResolution {
+    let mut dictionary_cache = PreviewTextureDictionaryCache::new(usize::MAX);
+    resolve_diffuse_textures_with_cache(
+        model,
+        embedded_textures,
+        embedded_source_path,
+        external_texture_dictionaries,
+        options,
+        &mut dictionary_cache,
+    )
+}
+
+pub(crate) fn resolve_diffuse_textures_with_cache(
+    model: &YdrModel,
+    embedded_textures: Option<&YtdDictionary>,
+    embedded_source_path: &str,
+    external_texture_dictionaries: &[PreviewTextureDictionarySource<'_>],
+    options: PreviewOptions,
+    dictionary_cache: &mut PreviewTextureDictionaryCache,
 ) -> DiffuseTextureResolution {
     let mut requested = BTreeMap::<u32, String>::new();
     for shader in model.shaders.iter().take(options.max_shaders) {
@@ -388,20 +430,53 @@ pub(crate) fn resolve_diffuse_textures(
 
     let requested_count = requested.len();
     let truncated = requested_count > MODEL_DIFFUSE_TEXTURE_LIMIT;
-    let external = external_texture_dictionaries
+    let mut uncached_external = Vec::<(String, Result<YtdDictionary, String>)>::new();
+    for source in external_texture_dictionaries {
+        if dictionary_cache.dictionaries.contains_key(source.path) {
+            continue;
+        }
+
+        let source_bytes = source.bytes.len();
+        if source_bytes
+            <= dictionary_cache
+                .max_source_bytes
+                .saturating_sub(dictionary_cache.source_bytes)
+        {
+            let parsed = YtdDictionary::from_bytes(source.bytes).map_err(|error| error.to_string());
+            dictionary_cache
+                .dictionaries
+                .insert(source.path.to_string(), parsed);
+            dictionary_cache.source_bytes =
+                dictionary_cache.source_bytes.saturating_add(source_bytes);
+        } else {
+            uncached_external.push((
+                source.path.to_string(),
+                YtdDictionary::from_bytes(source.bytes).map_err(|error| error.to_string()),
+            ));
+        }
+    }
+
+    let dictionary_for = |path: &str| {
+        dictionary_cache.dictionaries.get(path).or_else(|| {
+            uncached_external
+                .iter()
+                .find(|(candidate, _)| candidate == path)
+                .map(|(_, dictionary)| dictionary)
+        })
+    };
+
+    let external_dictionary_errors = external_texture_dictionaries
         .iter()
-        .map(|source| (source, YtdDictionary::from_bytes(source.bytes)))
-        .collect::<Vec<_>>();
-    let external_dictionary_errors = external
-        .iter()
-        .filter_map(|(source, dictionary)| {
-            dictionary.as_ref().err().map(|error| {
-                json!({
-                    "source": source.source,
-                    "sourcePath": source.path,
-                    "message": error.to_string(),
+        .filter_map(|source| {
+            dictionary_for(source.path)
+                .and_then(|dictionary| dictionary.as_ref().err())
+                .map(|error| {
+                    json!({
+                        "source": source.source,
+                        "sourcePath": source.path,
+                        "message": error,
+                    })
                 })
-            })
         })
         .collect::<Vec<_>>();
 
@@ -438,9 +513,9 @@ pub(crate) fn resolve_diffuse_textures(
 
         let mut matched = false;
         let mut searched_sources = Vec::new();
-        for (source, dictionary) in &external {
+        for source in external_texture_dictionaries {
             searched_sources.push(source.path);
-            let Ok(dictionary) = dictionary else {
+            let Some(Ok(dictionary)) = dictionary_for(source.path) else {
                 continue;
             };
             let Some(index) = dictionary

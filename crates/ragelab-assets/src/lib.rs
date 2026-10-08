@@ -9,6 +9,7 @@ use std::{
     error::Error,
     fmt, fs, io,
     path::{Path, PathBuf},
+    sync::{Arc, RwLock},
 };
 
 use ragelab_hash::joaat;
@@ -451,6 +452,8 @@ struct TextureParentRecord {
     source: PathBuf,
 }
 
+type SceneYddCache = Arc<RwLock<BTreeMap<SceneAssetLocator, Result<Arc<YddDictionary>, String>>>>;
+
 #[derive(Debug, Clone)]
 pub struct WorkspaceIndex {
     root: PathBuf,
@@ -465,6 +468,7 @@ pub struct WorkspaceIndex {
     ymap_children: BTreeMap<u32, BTreeMap<u32, Vec<PathBuf>>>,
     texture_parents: BTreeMap<u32, Vec<TextureParentRecord>>,
     scene_rpf_texture_parents: BTreeMap<u32, Vec<TextureParentRelationship>>,
+    scene_ydd_cache: SceneYddCache,
     pub warnings: Vec<String>,
 }
 
@@ -488,6 +492,7 @@ impl WorkspaceIndex {
             ymap_children: BTreeMap::new(),
             texture_parents: BTreeMap::new(),
             scene_rpf_texture_parents: BTreeMap::new(),
+            scene_ydd_cache: Arc::new(RwLock::new(BTreeMap::new())),
             warnings: Vec::new(),
         }
     }
@@ -995,6 +1000,32 @@ impl WorkspaceIndex {
             .unwrap_or_default()
     }
 
+    fn cached_scene_ydd(&self, locator: &SceneAssetLocator) -> Result<Arc<YddDictionary>, String> {
+        if let Ok(cache) = self.scene_ydd_cache.read() {
+            if let Some(value) = cache.get(locator) {
+                return value.clone();
+            }
+        }
+
+        let parsed = locator
+            .read_bytes()
+            .map_err(|error| format!("read failed: {error}"))
+            .and_then(|bytes| {
+                YddDictionary::from_bytes(&bytes)
+                    .map(Arc::new)
+                    .map_err(|error| format!("parse failed: {error}"))
+            });
+
+        if let Ok(mut cache) = self.scene_ydd_cache.write() {
+            return cache
+                .entry(locator.clone())
+                .or_insert_with(|| parsed.clone())
+                .clone();
+        }
+
+        parsed
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -1284,31 +1315,19 @@ impl WorkspaceIndex {
                     });
                 }
                 let locator = candidates[0].clone();
-                let bytes = locator
-                    .read_bytes()
-                    .map_err(|error| SceneAssetLookupError {
-                        code: SceneAssetLookupErrorCode::DictionaryUnreadable,
-                        archetype_hash,
-                        provider: Some(provider.provenance()),
-                        expected_kind: Some(AssetKind::Ydd),
-                        hash: Some(dictionary_hash.0),
-                        message: format!(
-                            "drawable dictionary 0x{:08X} could not be read: {error}",
-                            dictionary_hash.0
-                        ),
-                    })?;
                 let dictionary =
-                    YddDictionary::from_bytes(&bytes).map_err(|error| SceneAssetLookupError {
-                        code: SceneAssetLookupErrorCode::DictionaryUnreadable,
-                        archetype_hash,
-                        provider: Some(provider.provenance()),
-                        expected_kind: Some(AssetKind::Ydd),
-                        hash: Some(dictionary_hash.0),
-                        message: format!(
-                            "drawable dictionary 0x{:08X} could not be parsed: {error}",
-                            dictionary_hash.0
-                        ),
-                    })?;
+                    self.cached_scene_ydd(&locator)
+                        .map_err(|error| SceneAssetLookupError {
+                            code: SceneAssetLookupErrorCode::DictionaryUnreadable,
+                            archetype_hash,
+                            provider: Some(provider.provenance()),
+                            expected_kind: Some(AssetKind::Ydd),
+                            hash: Some(dictionary_hash.0),
+                            message: format!(
+                                "drawable dictionary 0x{:08X} could not be loaded: {error}",
+                                dictionary_hash.0
+                            ),
+                        })?;
                 let Some(entry) = dictionary.entry_by_hash(entry_hash.0) else {
                     return Err(SceneAssetLookupError {
                         code: SceneAssetLookupErrorCode::DictionaryEntryMissing,

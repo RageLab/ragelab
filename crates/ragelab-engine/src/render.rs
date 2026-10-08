@@ -12,24 +12,29 @@ use std::{
 use ragelab_assets::AssetKind;
 use ragelab_hash::joaat;
 use ragelab_ybn::YbnCollision;
+use ragelab_ydd::YddDictionary;
 use ragelab_ymap::Ymap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    parse_model_preview_source, prepare_scene_asset_preview_input, resolve_diffuse_textures,
-    workspace_scene_manifest_from_ymap_with_sources, workspace_scene_manifest_with_sources,
-    PreviewOptions, PreviewTextureDictionarySource, ResolvedDiffuseTexture, SceneAssemblyOptions,
-    SceneAssetPreviewSources, SceneAssetReference, SceneAssetSelector, SceneManifest, SceneNode,
-    SpatialTransform, MODEL_DIFFUSE_TEXTURE_LIMIT, MODEL_DIFFUSE_TEXTURE_MAX_DIMENSION,
+    parse_model_preview_source, parse_ydd_model_preview_source, prepare_scene_asset_preview_input,
+    resolve_diffuse_textures_with_cache, workspace_scene_manifest_from_ymap_with_sources,
+    workspace_scene_manifest_with_sources, ModelPreviewSource, PreviewOptions,
+    PreviewTextureDictionaryCache, PreviewTextureDictionarySource, ResolvedDiffuseTexture,
+    SceneAssemblyOptions, SceneAssetPreviewSources, SceneAssetReference, SceneAssetSelector,
+    SceneManifest, SceneNode, SpatialTransform, MODEL_DIFFUSE_TEXTURE_LIMIT,
+    MODEL_DIFFUSE_TEXTURE_MAX_DIMENSION,
 };
 
-pub const RENDER_PACKAGE_SCHEMA_VERSION: u32 = 1;
+pub const RENDER_PACKAGE_SCHEMA_VERSION: u32 = 2;
 pub const DEFAULT_RENDER_MAX_ASSETS: usize = 96;
-pub const HARD_RENDER_MAX_ASSETS: usize = 512;
+pub const HARD_RENDER_MAX_ASSETS: usize = 2_048;
 pub const DEFAULT_RENDER_MAX_BLOB_BYTES: usize = 128 * 1024 * 1024;
 pub const HARD_RENDER_MAX_BLOB_BYTES: usize = 512 * 1024 * 1024;
 
+const RENDER_YTD_CACHE_MAX_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+const RENDER_YDD_CACHE_MAX_SOURCE_BYTES: usize = 64 * 1024 * 1024;
 const MAGIC: &[u8; 8] = b"RLRPKT01";
 const HEADER_BYTES: usize = 24;
 const HARD_METADATA_BYTES: usize = 32 * 1024 * 1024;
@@ -310,6 +315,10 @@ pub struct RenderInstanceDescriptor {
     pub asset_ref: Option<u32>,
     pub asset_kind: Option<String>,
     pub transform: Option<RenderTransform>,
+    pub lod_dist: Option<f32>,
+    pub child_lod_dist: Option<f32>,
+    pub lod_level: Option<i32>,
+    pub num_children: Option<u32>,
     pub resolution: String,
     pub reason: Option<RenderResolutionReason>,
     pub collision: Option<RenderCollisionReference>,
@@ -695,6 +704,52 @@ pub fn workspace_scene_render_package_from_ymap_bytes_with_game_index(
     build_scene_render_package(&manifest, options)
 }
 
+fn render_asset_state_priority(state: RenderAssetState) -> u8 {
+    match state {
+        RenderAssetState::Ready => 3,
+        RenderAssetState::Error => 2,
+        RenderAssetState::Unsupported => 1,
+        RenderAssetState::Omitted => 0,
+    }
+}
+
+fn copy_merged_asset(
+    package: &RenderPackage,
+    asset: &RenderAssetDescriptor,
+    asset_ref: u32,
+    texture_map: &BTreeMap<u32, u32>,
+    blob: &mut Vec<u8>,
+) -> Result<RenderAssetDescriptor, io::Error> {
+    let mut merged = asset.clone();
+    merged.asset_ref = asset_ref;
+    for mesh in &mut merged.meshes {
+        mesh.positions = copy_render_view(package, mesh.positions, blob)?;
+        mesh.indices = copy_render_view(package, mesh.indices, blob)?;
+        mesh.normals = mesh
+            .normals
+            .map(|view| copy_render_view(package, view, blob))
+            .transpose()?;
+        mesh.uv0 = mesh
+            .uv0
+            .map(|view| copy_render_view(package, view, blob))
+            .transpose()?;
+    }
+    for material in &mut merged.materials {
+        material.diffuse_texture_ref = material
+            .diffuse_texture_ref
+            .map(|old| {
+                texture_map.get(&old).copied().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "material texture ref missing from merge mapping",
+                    )
+                })
+            })
+            .transpose()?;
+    }
+    Ok(merged)
+}
+
 pub fn merge_render_packages(
     root: RenderSceneRoot,
     packages: &[&RenderPackage],
@@ -744,15 +799,21 @@ pub fn merge_render_packages(
         let mut mapping = BTreeMap::new();
         for asset in &package.descriptor.assets {
             let key = asset.stable_key();
-            let merged_ref = if let Some(existing) = asset_keys.get(&key) {
-                let existing_asset = &assets[*existing as usize];
-                if existing_asset.state != asset.state {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("stable render asset key has inconsistent states: {key}"),
-                    ));
+            let merged_ref = if let Some(existing) = asset_keys.get(&key).copied() {
+                let existing_index = existing as usize;
+                let existing_state = assets[existing_index].state;
+                if render_asset_state_priority(asset.state)
+                    > render_asset_state_priority(existing_state)
+                {
+                    assets[existing_index] = copy_merged_asset(
+                        package,
+                        asset,
+                        existing,
+                        &texture_maps[package_index],
+                        &mut blob,
+                    )?;
                 }
-                *existing
+                existing
             } else {
                 if assets.len() >= HARD_RENDER_MAX_ASSETS {
                     return Err(io::Error::new(
@@ -766,36 +827,13 @@ pub fn merge_render_packages(
                 let asset_ref = u32::try_from(assets.len()).map_err(|_| {
                     io::Error::new(io::ErrorKind::InvalidData, "asset count exceeds u32")
                 })?;
-                let mut merged = asset.clone();
-                merged.asset_ref = asset_ref;
-                for mesh in &mut merged.meshes {
-                    mesh.positions = copy_render_view(package, mesh.positions, &mut blob)?;
-                    mesh.indices = copy_render_view(package, mesh.indices, &mut blob)?;
-                    mesh.normals = mesh
-                        .normals
-                        .map(|view| copy_render_view(package, view, &mut blob))
-                        .transpose()?;
-                    mesh.uv0 = mesh
-                        .uv0
-                        .map(|view| copy_render_view(package, view, &mut blob))
-                        .transpose()?;
-                }
-                for material in &mut merged.materials {
-                    material.diffuse_texture_ref = material
-                        .diffuse_texture_ref
-                        .map(|old| {
-                            texture_maps[package_index]
-                                .get(&old)
-                                .copied()
-                                .ok_or_else(|| {
-                                    io::Error::new(
-                                        io::ErrorKind::InvalidData,
-                                        "material texture ref missing from merge mapping",
-                                    )
-                                })
-                        })
-                        .transpose()?;
-                }
+                let merged = copy_merged_asset(
+                    package,
+                    asset,
+                    asset_ref,
+                    &texture_maps[package_index],
+                    &mut blob,
+                )?;
                 asset_keys.insert(key, asset_ref);
                 assets.push(merged);
                 asset_ref
@@ -1229,6 +1267,10 @@ fn render_instance(node: &SceneNode) -> Result<RenderInstanceDescriptor, io::Err
             .transpose()?,
         asset_kind: node.asset_kind.map(|kind| kind.to_string()),
         transform: node.transform.map(RenderTransform::from),
+        lod_dist: node.lod_dist,
+        child_lod_dist: node.child_lod_dist,
+        lod_level: node.lod_level,
+        num_children: node.num_children,
         resolution: node.resolution.as_str().to_string(),
         reason: node.reason.as_ref().map(|reason| RenderResolutionReason {
             code: reason.code.as_str().to_string(),
@@ -1306,6 +1348,9 @@ struct PackageBuilder {
     blob: BlobBuilder,
     textures: Vec<RenderTextureDescriptor>,
     texture_ids: BTreeMap<TextureIdentityKey, u32>,
+    texture_dictionary_cache: PreviewTextureDictionaryCache,
+    model_ydd_cache: BTreeMap<String, Result<YddDictionary, String>>,
+    model_ydd_cache_source_bytes: usize,
     diagnostics: Vec<RenderDiagnostic>,
 }
 
@@ -1315,7 +1360,51 @@ impl PackageBuilder {
             blob: BlobBuilder::new(max_blob_bytes),
             textures: Vec::new(),
             texture_ids: BTreeMap::new(),
+            texture_dictionary_cache: PreviewTextureDictionaryCache::new(
+                RENDER_YTD_CACHE_MAX_SOURCE_BYTES,
+            ),
+            model_ydd_cache: BTreeMap::new(),
+            model_ydd_cache_source_bytes: 0,
             diagnostics: Vec::new(),
+        }
+    }
+
+    fn parse_model_source(
+        &mut self,
+        path_label: &str,
+        asset_type: &str,
+        bytes: &[u8],
+        options: PreviewOptions,
+    ) -> Result<ModelPreviewSource, io::Error> {
+        if asset_type != "YDD" {
+            return parse_model_preview_source(asset_type, bytes, options);
+        }
+
+        if !self.model_ydd_cache.contains_key(path_label) {
+            let source_bytes = bytes.len();
+            if source_bytes
+                <= RENDER_YDD_CACHE_MAX_SOURCE_BYTES
+                    .saturating_sub(self.model_ydd_cache_source_bytes)
+            {
+                let parsed = YddDictionary::from_bytes(bytes).map_err(|error| error.to_string());
+                self.model_ydd_cache.insert(path_label.to_string(), parsed);
+                self.model_ydd_cache_source_bytes = self
+                    .model_ydd_cache_source_bytes
+                    .saturating_add(source_bytes);
+            } else {
+                let dictionary = YddDictionary::from_bytes(bytes).map_err(|error| {
+                    io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+                })?;
+                return parse_ydd_model_preview_source(&dictionary, options);
+            }
+        }
+
+        match self.model_ydd_cache.get(path_label) {
+            Some(Ok(dictionary)) => parse_ydd_model_preview_source(dictionary, options),
+            Some(Err(error)) => Err(io::Error::new(io::ErrorKind::InvalidData, error.clone())),
+            None => Err(io::Error::other(
+                "model YDD cache entry disappeared during package build",
+            )),
         }
     }
 
@@ -1334,7 +1423,7 @@ impl PackageBuilder {
         external_texture_dictionaries: &[PreviewTextureDictionarySource<'_>],
         external_texture_errors: &[String],
     ) -> Result<RenderAssetDescriptor, io::Error> {
-        let parsed = match parse_model_preview_source(asset_type, bytes, options) {
+        let parsed = match self.parse_model_source(path_label, asset_type, bytes, options) {
             Ok(parsed) => parsed,
             Err(error) => {
                 self.diagnostics.push(RenderDiagnostic {
@@ -1373,12 +1462,13 @@ impl PackageBuilder {
             });
         }
 
-        let resolution = resolve_diffuse_textures(
+        let resolution = resolve_diffuse_textures_with_cache(
             &parsed.model,
             parsed.embedded_textures.as_ref(),
             path_label,
             external_texture_dictionaries,
             options,
+            &mut self.texture_dictionary_cache,
         );
         for details in &resolution.external_dictionary_errors {
             self.diagnostics.push(RenderDiagnostic {

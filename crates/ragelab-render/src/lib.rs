@@ -301,6 +301,7 @@ pub struct ViewportStats {
     pub uploaded_payload_bytes: u64,
     pub scene_load_ms: f64,
     pub last_frame_ms: f64,
+    pub visible_instances: u32,
     pub selected_node_index: Option<u32>,
 }
 

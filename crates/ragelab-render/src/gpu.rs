@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
-    sync::mpsc,
+    sync::{mpsc, Arc},
     time::Instant,
 };
 
@@ -261,6 +261,7 @@ struct DrawInstance {
     local_overlay: bool,
     collision_overlay: bool,
     world_bounds: Aabb,
+    lod_dist: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -594,7 +595,7 @@ impl OffscreenRenderer {
             }
         }
 
-        let draws = self.build_draw_instances(package, false)?;
+        let draws = self.build_draw_instances(package, false, 0)?;
         if draws.is_empty() {
             return Err(RenderError::Unsupported(
                 "render package has no ready drawable instances".into(),
@@ -1047,11 +1048,10 @@ impl OffscreenRenderer {
         (asset_bytes, texture_bytes)
     }
 
-    fn evict_to_budget(&mut self, package: &RenderPackage, budget: GpuCacheBudget) -> bool {
-        let protected_assets = package
-            .descriptor
-            .assets
+    fn evict_to_budget(&mut self, packages: &[Arc<RenderPackage>], budget: GpuCacheBudget) -> bool {
+        let protected_assets = packages
             .iter()
+            .flat_map(|package| package.descriptor.assets.iter())
             .filter(|asset| asset.state == RenderAssetState::Ready)
             .map(asset_key)
             .collect::<HashSet<_>>();
@@ -1077,10 +1077,9 @@ impl OffscreenRenderer {
             self.cache_evictions = self.cache_evictions.saturating_add(1);
         }
 
-        let active_textures = package
-            .descriptor
-            .textures
+        let active_textures = packages
             .iter()
+            .flat_map(|package| package.descriptor.textures.iter())
             .map(texture_key)
             .collect::<HashSet<_>>();
 
@@ -1199,6 +1198,7 @@ impl OffscreenRenderer {
         &self,
         package: &RenderPackage,
         emphasize_local: bool,
+        node_base: u32,
     ) -> RenderResult<Vec<DrawInstance>> {
         let mut draws = Vec::new();
 
@@ -1217,6 +1217,7 @@ impl OffscreenRenderer {
                     local_overlay: false,
                     collision_overlay: false,
                     world_bounds,
+                    lod_dist: None,
                 });
             }
             return Ok(draws);
@@ -1276,10 +1277,11 @@ impl OffscreenRenderer {
                         asset_key: asset_key(asset),
                         model,
                         model_binding: self.create_model_binding(model, style),
-                        node_index: Some(instance.node_index),
+                        node_index: Some(node_base.saturating_add(instance.node_index)),
                         local_overlay,
                         collision_overlay: false,
                         world_bounds: asset_world_bounds(asset, model)?,
+                        lod_dist: instance.lod_dist,
                     });
                 }
             }
@@ -1301,10 +1303,11 @@ impl OffscreenRenderer {
                         asset_key: asset_key(asset),
                         model,
                         model_binding: self.create_model_binding(model, [0.0; 4]),
-                        node_index: Some(instance.node_index),
+                        node_index: Some(node_base.saturating_add(instance.node_index)),
                         local_overlay,
                         collision_overlay: true,
                         world_bounds: asset_world_bounds(asset, model)?,
+                        lod_dist: instance.lod_dist,
                     });
                 }
             }
@@ -1322,6 +1325,7 @@ struct OrbitCamera {
     distance: f32,
     radius: f32,
     projection: Projection,
+    far_radius_multiplier: f32,
 }
 
 impl OrbitCamera {
@@ -1339,6 +1343,24 @@ impl OrbitCamera {
             distance,
             radius,
             projection,
+            far_radius_multiplier: 6.0,
+        }
+    }
+
+    fn around_world_position(target: [f32; 3], local_radius: f32, projection: Projection) -> Self {
+        let direction = Vec3::new(1.0, -1.0, 0.68).normalize();
+        let yaw = direction.y.atan2(direction.x);
+        let pitch = direction.z.asin();
+        let radius = local_radius.max(64.0);
+        let distance = (radius * 1.35).max(120.0);
+        Self {
+            target: Vec3::from_array(target),
+            yaw,
+            pitch,
+            distance,
+            radius,
+            projection,
+            far_radius_multiplier: 6.0,
         }
     }
 
@@ -1360,12 +1382,16 @@ impl OrbitCamera {
         self.forward().cross(Vec3::Z).normalize_or_zero()
     }
 
+    fn far_distance(&self) -> f32 {
+        self.distance + self.radius * self.far_radius_multiplier + 1.0
+    }
+
     fn view_projection(&self, width: u32, height: u32) -> Mat4 {
         let eye = self.eye();
         let view = Mat4::look_at_rh(eye, self.target, Vec3::Z);
         let aspect = (width as f32 / height.max(1) as f32).max(0.0001);
         let near = (self.radius * 0.01).max(0.01);
-        let far = self.distance + self.radius * 6.0 + 1.0;
+        let far = self.far_distance();
         let projection = match self.projection {
             Projection::Perspective => {
                 Mat4::perspective_rh(45.0_f32.to_radians(), aspect, near, far)
@@ -1390,6 +1416,48 @@ impl OrbitCamera {
             view_proj: self.view_projection(width, height).to_cols_array_2d(),
             light_dir: [0.45, -0.65, 0.62, 0.0],
             camera_pos: [eye.x, eye.y, eye.z, 1.0],
+        }
+    }
+
+    fn lod_visible(&self, bounds: Aabb, lod_dist: Option<f32>) -> bool {
+        let Some(lod_dist) = lod_dist.filter(|value| value.is_finite() && *value > 0.0) else {
+            return true;
+        };
+        let surface_distance = ((bounds.center() - self.eye()).length() - bounds.radius()).max(0.0);
+        surface_distance <= lod_dist * 1.15
+    }
+
+    fn aabb_visible(&self, bounds: Aabb, width: u32, height: u32) -> bool {
+        let eye = self.eye();
+        let forward = self.forward();
+        let right = self.right();
+        let up = right.cross(forward).normalize_or_zero();
+        let to_center = bounds.center() - eye;
+        let radius = bounds.radius();
+        let depth = to_center.dot(forward);
+        let near = (self.radius * 0.01).max(0.01);
+        let far = self.far_distance();
+
+        if depth + radius < near || depth - radius > far {
+            return false;
+        }
+
+        let aspect = (width as f32 / height.max(1) as f32).max(0.0001);
+        let horizontal = to_center.dot(right).abs();
+        let vertical = to_center.dot(up).abs();
+
+        match self.projection {
+            Projection::Perspective => {
+                let half_vertical = depth.max(near) * (45.0_f32.to_radians() * 0.5).tan();
+                let half_horizontal = half_vertical * aspect;
+                horizontal <= half_horizontal + radius && vertical <= half_vertical + radius
+            }
+            Projection::Orthographic => {
+                let half_vertical =
+                    self.radius * 1.35 * (self.distance / self.fit_distance()).max(0.05);
+                let half_horizontal = half_vertical * aspect;
+                horizontal <= half_horizontal + radius && vertical <= half_vertical + radius
+            }
         }
     }
 
@@ -1475,17 +1543,52 @@ impl OrbitCamera {
     }
 }
 
+fn rebase_package_node(old_node: u32, old_base: u32, new_base: u32) -> u32 {
+    old_node.saturating_sub(old_base).saturating_add(new_base)
+}
+
+fn package_node_bases(packages: &[Arc<RenderPackage>]) -> Vec<u32> {
+    let mut next = 0_u32;
+    packages
+        .iter()
+        .map(|package| {
+            let start = next;
+            next = next.saturating_add(
+                u32::try_from(package.descriptor.scene.instances.len()).unwrap_or(u32::MAX),
+            );
+            start
+        })
+        .collect()
+}
+
+fn package_index_at_node(
+    packages: &[Arc<RenderPackage>],
+    bases: &[u32],
+    node: u32,
+) -> Option<usize> {
+    packages.iter().enumerate().find_map(|(index, package)| {
+        let start = bases[index];
+        let end = start.saturating_add(
+            u32::try_from(package.descriptor.scene.instances.len()).unwrap_or(u32::MAX),
+        );
+        (node >= start && node < end).then_some(index)
+    })
+}
+
 pub struct SurfaceRenderer {
     gpu: OffscreenRenderer,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
+    camera_buffer: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup,
+    identity_model: ModelBinding,
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
     mesh_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
     gizmo_pipeline: wgpu::RenderPipeline,
     options: ViewportOptions,
-    package: Option<RenderPackage>,
+    packages: Vec<Arc<RenderPackage>>,
     draws: Vec<DrawInstance>,
     world_bounds: Option<Aabb>,
     camera: Option<OrbitCamera>,
@@ -1499,6 +1602,7 @@ pub struct SurfaceRenderer {
     gpu_budget_overflow: bool,
     scene_load_ms: f64,
     last_frame_ms: f64,
+    last_visible_instances: u32,
 }
 
 impl SurfaceRenderer {
@@ -1562,17 +1666,35 @@ impl SurfaceRenderer {
             format,
         );
 
+        let camera_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("RageLab persistent viewport camera uniform"),
+            contents: bytemuck::bytes_of(&CameraUniform::zeroed()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let camera_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("RageLab persistent viewport camera bind group"),
+            layout: &gpu.camera_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
+        });
+        let identity_model = gpu.create_model_binding(Mat4::IDENTITY, [0.0; 4]);
+
         Ok(Self {
             gpu,
             surface,
             config,
+            camera_buffer,
+            camera_bind_group,
+            identity_model,
             depth_texture,
             depth_view,
             mesh_pipeline,
             line_pipeline,
             gizmo_pipeline,
             options,
-            package: None,
+            packages: Vec::new(),
             draws: Vec::new(),
             world_bounds: None,
             camera: None,
@@ -1586,23 +1708,29 @@ impl SurfaceRenderer {
             gpu_budget_overflow: false,
             scene_load_ms: 0.0,
             last_frame_ms: 0.0,
+            last_visible_instances: 0,
         })
     }
 
     pub fn set_package(&mut self, package: RenderPackage) -> RenderResult<()> {
-        self.replace_package(package, false)
+        self.replace_packages(vec![Arc::new(package)], false)
     }
 
     pub fn update_streaming_package(&mut self, package: RenderPackage) -> RenderResult<()> {
-        self.replace_package(package, true)
+        self.replace_packages(vec![Arc::new(package)], true)
+    }
+
+    pub fn update_streaming_packages(
+        &mut self,
+        packages: Vec<Arc<RenderPackage>>,
+    ) -> RenderResult<()> {
+        self.replace_packages(packages, true)
     }
 
     pub fn set_gpu_cache_budget(&mut self, budget: GpuCacheBudget) -> RenderResult<()> {
         let budget = budget.validate()?;
         self.gpu_cache_budget = budget;
-        if let Some(package) = self.package.as_ref() {
-            self.gpu_budget_overflow = self.gpu.evict_to_budget(package, budget);
-        }
+        self.gpu_budget_overflow = self.gpu.evict_to_budget(&self.packages, budget);
         Ok(())
     }
 
@@ -1610,30 +1738,158 @@ impl SurfaceRenderer {
         self.gpu_cache_budget
     }
 
-    fn replace_package(
+    fn replace_packages(
         &mut self,
-        package: RenderPackage,
+        packages: Vec<Arc<RenderPackage>>,
         preserve_camera: bool,
     ) -> RenderResult<()> {
         let started = Instant::now();
-        package
-            .validate()
-            .map_err(|error| RenderError::InvalidInput(error.to_string()))?;
-        for texture in &package.descriptor.textures {
-            self.gpu.ensure_texture(&package, texture)?;
-        }
-        for asset in &package.descriptor.assets {
-            if asset.state == RenderAssetState::Ready {
-                self.gpu.ensure_asset(&package, asset)?;
+
+        if packages.is_empty() {
+            self.packages.clear();
+            self.draws.clear();
+            self.world_bounds = None;
+            self.selected_node_index = None;
+            self.hidden_node_indices.clear();
+            if !preserve_camera {
+                self.camera = None;
             }
+            self.gpu_budget_overflow = self
+                .gpu
+                .evict_to_budget(&self.packages, self.gpu_cache_budget);
+            self.scene_load_ms = started.elapsed().as_secs_f64() * 1000.0;
+            return Ok(());
         }
-        let draws = self.gpu.build_draw_instances(&package, true)?;
-        if draws.is_empty() {
+
+        // Build only new package draws. Model buffers/bind groups belonging to
+        // unchanged Arc<RenderPackage>s survive residency updates.
+        let previous_bases = package_node_bases(&self.packages);
+        let next_bases = package_node_bases(&packages);
+        let mut claimed = HashSet::new();
+        let previous_matches = packages
+            .iter()
+            .map(|package| {
+                if package.descriptor.scene.instances.is_empty() {
+                    return None;
+                }
+                self.packages
+                    .iter()
+                    .enumerate()
+                    .find(|(index, old)| !claimed.contains(index) && Arc::ptr_eq(package, old))
+                    .map(|(index, _)| {
+                        claimed.insert(index);
+                        index
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        let mut new_draws = Vec::with_capacity(packages.len());
+        for (index, package) in packages.iter().enumerate() {
+            if previous_matches[index].is_some() {
+                // This exact package remained resident across updates. GPU
+                // eviction protects active packages, so its assets, textures
+                // and model bindings do not need to be rebuilt or revalidated.
+                new_draws.push(None);
+                continue;
+            }
+
+            package
+                .validate()
+                .map_err(|error| RenderError::InvalidInput(error.to_string()))?;
+            for texture in &package.descriptor.textures {
+                self.gpu.ensure_texture(package, texture)?;
+            }
+            for asset in &package.descriptor.assets {
+                if asset.state == RenderAssetState::Ready {
+                    self.gpu.ensure_asset(package, asset)?;
+                }
+            }
+            new_draws.push(Some(self.gpu.build_draw_instances(
+                package,
+                true,
+                next_bases[index],
+            )?));
+        }
+
+        let reusable_old = previous_matches
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<HashSet<_>>();
+        let reuse_count = self
+            .draws
+            .iter()
+            .filter(|draw| {
+                draw.node_index.is_some_and(|node| {
+                    package_index_at_node(&self.packages, &previous_bases, node)
+                        .is_some_and(|index| reusable_old.contains(&index))
+                })
+            })
+            .count();
+        let fresh_count = new_draws
+            .iter()
+            .filter_map(Option::as_ref)
+            .map(Vec::len)
+            .sum::<usize>();
+        if reuse_count == 0 && fresh_count == 0 {
             return Err(RenderError::Unsupported(
-                "render package has no ready drawable instances".into(),
+                "render packages have no ready drawable instances".into(),
             ));
         }
-        let world_bounds = package_world_bounds(&package, &draws)?;
+
+        // Validate the *future* scene before moving model bindings out of
+        // self.draws. A failed update must not erase the last good frame.
+        let mut world_bounds = Aabb::empty();
+        for draw in &self.draws {
+            if draw.node_index.is_some_and(|node| {
+                package_index_at_node(&self.packages, &previous_bases, node)
+                    .is_some_and(|index| reusable_old.contains(&index))
+            }) {
+                world_bounds.include(draw.world_bounds.min);
+                world_bounds.include(draw.world_bounds.max);
+            }
+        }
+        for draw in new_draws.iter().filter_map(Option::as_ref).flatten() {
+            world_bounds.include(draw.world_bounds.min);
+            world_bounds.include(draw.world_bounds.max);
+        }
+        if !world_bounds.is_valid() {
+            return Err(RenderError::InvalidInput(
+                "render packages produced invalid world bounds".into(),
+            ));
+        }
+
+        let mut previous_draws = std::iter::repeat_with(Vec::new)
+            .take(self.packages.len())
+            .collect::<Vec<Vec<DrawInstance>>>();
+        for draw in std::mem::take(&mut self.draws) {
+            if let Some(index) = draw
+                .node_index
+                .and_then(|node| package_index_at_node(&self.packages, &previous_bases, node))
+            {
+                previous_draws[index].push(draw);
+            }
+        }
+
+        let mut draws = Vec::with_capacity(reuse_count + fresh_count);
+        for (index, previous_index) in previous_matches.into_iter().enumerate() {
+            if let Some(old_index) = previous_index {
+                for mut draw in std::mem::take(&mut previous_draws[old_index]) {
+                    if let Some(old_node) = draw.node_index {
+                        draw.node_index = Some(rebase_package_node(
+                            old_node,
+                            previous_bases[old_index],
+                            next_bases[index],
+                        ));
+                    }
+                    draws.push(draw);
+                }
+            } else if let Some(mut added) = new_draws[index].take() {
+                draws.append(&mut added);
+            }
+        }
+        draws.sort_by_key(|draw| (draw.local_overlay, draw.collision_overlay));
+
         let camera = if preserve_camera {
             self.camera
                 .take()
@@ -1641,12 +1897,28 @@ impl SurfaceRenderer {
         } else {
             OrbitCamera::fit(world_bounds, self.options.projection)
         };
-        let selected_node_index = preserve_camera
-            .then_some(self.selected_node_index)
-            .flatten()
-            .filter(|selected| draws.iter().any(|draw| draw.node_index == Some(*selected)));
-        let gpu_budget_overflow = self.gpu.evict_to_budget(&package, self.gpu_cache_budget);
-        self.package = Some(package);
+        let selected_node_index = if preserve_camera {
+            self.selected_node_index
+                .and_then(|old_node| {
+                    let old_package_index =
+                        package_index_at_node(&self.packages, &previous_bases, old_node)?;
+                    let old_package = &self.packages[old_package_index];
+                    let new_package_index = packages
+                        .iter()
+                        .position(|package| Arc::ptr_eq(package, old_package))?;
+                    Some(rebase_package_node(
+                        old_node,
+                        previous_bases[old_package_index],
+                        next_bases[new_package_index],
+                    ))
+                })
+                .filter(|selected| draws.iter().any(|draw| draw.node_index == Some(*selected)))
+        } else {
+            None
+        };
+        let gpu_budget_overflow = self.gpu.evict_to_budget(&packages, self.gpu_cache_budget);
+
+        self.packages = packages;
         self.draws = draws;
         self.world_bounds = Some(world_bounds);
         self.camera = Some(camera);
@@ -1723,6 +1995,14 @@ impl SurfaceRenderer {
         if let Some(camera) = self.camera.as_mut() {
             camera.fly(forward, right, up);
         }
+    }
+
+    pub fn focus_world_position(&mut self, target: [f32; 3], local_radius: f32) {
+        self.camera = Some(OrbitCamera::around_world_position(
+            target,
+            local_radius,
+            self.options.projection,
+        ));
     }
 
     pub fn pick(&self, x: f32, y: f32) -> Option<PickResult> {
@@ -1830,18 +2110,20 @@ impl SurfaceRenderer {
 
     pub fn stats(&self) -> ViewportStats {
         let (instances, assets, meshes, materials, textures, uploaded_payload_bytes) =
-            if let Some(package) = self.package.as_ref() {
-                (
-                    package.descriptor.summary.instances,
-                    package.descriptor.summary.assets,
-                    package.descriptor.summary.meshes,
-                    package.descriptor.summary.materials,
-                    package.descriptor.summary.textures,
-                    package.blob.len() as u64,
-                )
-            } else {
-                (0, 0, 0, 0, 0, 0)
-            };
+            self.packages.iter().fold(
+                (0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u64),
+                |(instances, assets, meshes, materials, textures, bytes), package| {
+                    let summary = package.descriptor.summary;
+                    (
+                        instances.saturating_add(summary.instances),
+                        assets.saturating_add(summary.assets),
+                        meshes.saturating_add(summary.meshes),
+                        materials.saturating_add(summary.materials),
+                        textures.saturating_add(summary.textures),
+                        bytes.saturating_add(package.blob.len() as u64),
+                    )
+                },
+            );
         let (gpu_asset_cache_bytes, gpu_texture_cache_bytes) = self.gpu.cache_bytes();
         ViewportStats {
             width: self.options.width,
@@ -1862,15 +2144,18 @@ impl SurfaceRenderer {
             uploaded_payload_bytes,
             scene_load_ms: self.scene_load_ms,
             last_frame_ms: self.last_frame_ms,
+            visible_instances: self.last_visible_instances,
             selected_node_index: self.selected_node_index,
         }
     }
 
     pub fn render_frame(&mut self) -> RenderResult<()> {
         let started = Instant::now();
-        let package = self.package.as_ref().ok_or_else(|| {
-            RenderError::InvalidInput("native viewport has no loaded render package".into())
-        })?;
+        if self.packages.is_empty() {
+            return Err(RenderError::InvalidInput(
+                "native viewport has no loaded render packages".into(),
+            ));
+        }
         let camera = self.camera.as_ref().ok_or_else(|| {
             RenderError::InvalidInput("native viewport has no camera state".into())
         })?;
@@ -1879,26 +2164,11 @@ impl SurfaceRenderer {
         })?;
 
         let camera_uniform = camera.uniform(self.options.width, self.options.height);
-        let camera_buffer = self
-            .gpu
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("RageLab viewport camera uniform"),
-                contents: bytemuck::bytes_of(&camera_uniform),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-        let camera_bind_group = self
-            .gpu
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("RageLab viewport camera bind group"),
-                layout: &self.gpu.camera_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_buffer.as_entire_binding(),
-                }],
-            });
-        let identity_model = self.gpu.create_model_binding(Mat4::IDENTITY, [0.0; 4]);
+        self.gpu.queue.write_buffer(
+            &self.camera_buffer,
+            0,
+            bytemuck::bytes_of(&camera_uniform),
+        );
         let overlay_options = OffscreenOptions {
             width: self.options.width,
             height: self.options.height,
@@ -1936,6 +2206,7 @@ impl SurfaceRenderer {
                     Some(build_transform_gizmo_vertices(center, size, mode))
                 })
                 .unwrap_or_default();
+        let mut visible_instances = 0_u32;
         let gizmo_buffer = (!gizmo_vertices.is_empty()).then(|| {
             self.gpu
                 .device
@@ -1994,12 +2265,21 @@ impl SurfaceRenderer {
                 occlusion_query_set: None,
             });
 
-            pass.set_bind_group(0, &camera_bind_group, &[]);
+            pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_pipeline(&self.mesh_pipeline);
             for draw in &self.draws {
-                if draw.collision_overlay || !self.draw_visible(draw) {
+                if draw.collision_overlay
+                    || !self.draw_visible(draw)
+                    || !camera.aabb_visible(
+                        draw.world_bounds,
+                        self.options.width,
+                        self.options.height,
+                    )
+                    || !camera.lod_visible(draw.world_bounds, draw.lod_dist)
+                {
                     continue;
                 }
+                visible_instances = visible_instances.saturating_add(1);
                 let asset = self.gpu.asset_cache.get(&draw.asset_key).ok_or_else(|| {
                     RenderError::Gpu(format!("GPU asset cache missing {}", draw.asset_key))
                 })?;
@@ -2022,6 +2302,12 @@ impl SurfaceRenderer {
                 pass.set_pipeline(&self.line_pipeline);
                 for draw in &self.draws {
                     if !self.draw_visible(draw)
+                        || !camera.aabb_visible(
+                            draw.world_bounds,
+                            self.options.width,
+                            self.options.height,
+                        )
+                        || !camera.lod_visible(draw.world_bounds, draw.lod_dist)
                         || (!self.options.wireframe && !draw.collision_overlay)
                     {
                         continue;
@@ -2046,7 +2332,7 @@ impl SurfaceRenderer {
 
             if let Some(buffer) = overlay_buffer.as_ref() {
                 pass.set_pipeline(&self.line_pipeline);
-                pass.set_bind_group(1, &identity_model.bind_group, &[]);
+                pass.set_bind_group(1, &self.identity_model.bind_group, &[]);
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..overlay_vertices.len() as u32, 0..1);
             }
@@ -2060,8 +2346,8 @@ impl SurfaceRenderer {
 
         self.gpu.queue.submit(Some(encoder.finish()));
         frame.present();
+        self.last_visible_instances = visible_instances;
         self.last_frame_ms = started.elapsed().as_secs_f64() * 1000.0;
-        let _ = package;
         Ok(())
     }
 }
@@ -2505,6 +2791,10 @@ fn draw_visibility(
 }
 
 fn package_world_bounds(_package: &RenderPackage, draws: &[DrawInstance]) -> RenderResult<Aabb> {
+    draws_world_bounds(draws)
+}
+
+fn draws_world_bounds(draws: &[DrawInstance]) -> RenderResult<Aabb> {
     let mut bounds = Aabb::empty();
     for draw in draws {
         bounds.include(draw.world_bounds.min);
@@ -2708,6 +2998,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn package_node_rebasing_preserves_local_identity_when_page_inserted() {
+        // A page of three instances was formerly at base 10. Two new
+        // instances are inserted before it, so its base moves to 12.
+        assert_eq!(rebase_package_node(10, 10, 12), 12);
+        assert_eq!(rebase_package_node(11, 10, 12), 13);
+        assert_eq!(rebase_package_node(12, 10, 12), 14);
+        assert_eq!(rebase_package_node(14, 12, 3), 5);
+    }
+
+    #[test]
     fn gpu_eviction_selection_is_lru_stable_and_can_release_texture_pressure() {
         let active_asset = "active".to_string();
         let old_asset = "asset-a".to_string();
@@ -2763,6 +3063,58 @@ mod tests {
             select_lru_key([(&right, 7), (&left, 7)].into_iter(), &protected),
             Some(left)
         );
+    }
+
+    #[test]
+    fn orbit_camera_respects_entity_lod_distance_conservatively() {
+        let camera =
+            OrbitCamera::around_world_position([0.0, 0.0, 0.0], 120.0, Projection::Perspective);
+        let eye = camera.eye();
+        let forward = camera.forward();
+
+        let near_center = eye + forward * 80.0;
+        let near = Aabb {
+            min: near_center - Vec3::splat(5.0),
+            max: near_center + Vec3::splat(5.0),
+        };
+        assert!(camera.lod_visible(near, Some(100.0)));
+        assert!(camera.lod_visible(near, None));
+        assert!(camera.lod_visible(near, Some(0.0)));
+
+        let far_center = eye + forward * 220.0;
+        let far = Aabb {
+            min: far_center - Vec3::splat(5.0),
+            max: far_center + Vec3::splat(5.0),
+        };
+        assert!(!camera.lod_visible(far, Some(100.0)));
+    }
+
+    #[test]
+    fn orbit_camera_culls_bounds_behind_and_outside_frustum() {
+        let camera =
+            OrbitCamera::around_world_position([0.0, 0.0, 0.0], 450.0, Projection::Perspective);
+        let near_target = Aabb {
+            min: Vec3::splat(-5.0),
+            max: Vec3::splat(5.0),
+        };
+        assert!(camera.aabb_visible(near_target, 1280, 800));
+
+        let eye = camera.eye();
+        let forward = camera.forward();
+        let right = camera.right();
+        let behind_center = eye - forward * 100.0;
+        let behind = Aabb {
+            min: behind_center - Vec3::splat(2.0),
+            max: behind_center + Vec3::splat(2.0),
+        };
+        assert!(!camera.aabb_visible(behind, 1280, 800));
+
+        let side_center = eye + forward * 150.0 + right * 800.0;
+        let outside_side = Aabb {
+            min: side_center - Vec3::splat(2.0),
+            max: side_center + Vec3::splat(2.0),
+        };
+        assert!(!camera.aabb_visible(outside_side, 1280, 800));
     }
 
     #[test]

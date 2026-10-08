@@ -35,6 +35,12 @@ pub struct YmapEntity {
     pub scale_xy: Option<f32>,
     pub scale_z: Option<f32>,
     pub flags: u32,
+    /// Maximum entity draw distance from the YMAP `CEntityDef`, when exposed.
+    pub lod_dist: Option<f32>,
+    /// Distance at which child LODs should take over, when exposed.
+    pub child_lod_dist: Option<f32>,
+    pub lod_level: Option<i32>,
+    pub num_children: Option<u32>,
     /// `None` corresponds to the common on-disk sentinel `-1`.
     pub parent_index: Option<i32>,
 }
@@ -988,6 +994,10 @@ fn parse_entity(structure: &MetaStructureInfo, bytes: &[u8]) -> Result<YmapEntit
         },
         scale_xy: read_optional_f32_field(structure, bytes, "scaleXY")?,
         scale_z: read_optional_f32_field(structure, bytes, "scaleZ")?,
+        lod_dist: read_optional_f32_field(structure, bytes, "lodDist")?,
+        child_lod_dist: read_optional_f32_field(structure, bytes, "childLodDist")?,
+        lod_level: read_optional_i32_field(structure, bytes, "lodLevel")?,
+        num_children: read_optional_u32_field(structure, bytes, "numChildren")?,
     })
 }
 
@@ -1050,6 +1060,18 @@ fn read_optional_u32_field(
         return Ok(None);
     };
     Ok(Some(read_u32(bytes, field.data_offset)?))
+}
+
+fn read_optional_i32_field(
+    structure: &MetaStructureInfo,
+    bytes: &[u8],
+    name: &str,
+) -> Result<Option<i32>, ResourceError> {
+    let hash = MetaHash(jenkins(name));
+    let Some(field) = structure.field(hash) else {
+        return Ok(None);
+    };
+    Ok(Some(read_i32(bytes, field.data_offset)?))
 }
 
 fn read_optional_f32_field(
