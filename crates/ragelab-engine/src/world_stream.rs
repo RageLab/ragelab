@@ -671,6 +671,44 @@ fn package_render_omissions(package: &RenderPackage) -> (usize, usize) {
     (assets, geometry)
 }
 
+// Foreground loads and deferred YMAP pages must both make progress during
+// sustained movement. Previously, any missing chunk stalled *all* pages,
+// leaving nearby buildings in their first-page state indefinitely.
+fn should_compile_world_page(tick: u64, has_pending_pages: bool, missing_chunks: usize) -> bool {
+    has_pending_pages && (missing_chunks == 0 || tick % 3 == 0)
+}
+
+fn nearest_pending_world_page(
+    cache: &BTreeMap<WorldStreamChunkKey, CachedChunk>,
+    active_order: &[WorldStreamChunkKey],
+    position: GtaRpfWorldPoint,
+) -> Option<WorldStreamChunkKey> {
+    active_order
+        .iter()
+        .filter_map(|key| {
+            let chunk = cache.get(key)?;
+            if chunk.page_error.is_some() {
+                return None;
+            }
+            let page = chunk.pending_pages.front()?;
+            let distance_squared = page
+                .nodes
+                .iter()
+                .filter_map(|node| node.transform)
+                .map(|transform| {
+                    let dx = transform.translation[0] - position.x;
+                    let dy = transform.translation[1] - position.y;
+                    dx * dx + dy * dy
+                })
+                .fold(f32::INFINITY, f32::min);
+            Some((distance_squared, key))
+        })
+        .min_by(|(dist_a, key_a), (dist_b, key_b)| {
+            dist_a.total_cmp(dist_b).then_with(|| key_a.cmp(key_b))
+        })
+        .map(|(_, key)| key.clone())
+}
+
 fn compile_pending_world_page(
     chunk: &mut CachedChunk,
     options: RenderPackageOptions,
@@ -1338,11 +1376,20 @@ impl WorldStreamingRuntime {
                 }
             })
             .collect::<Vec<_>>();
+        let has_pending_pages = ordered_keys.iter().any(|key| {
+            self.cache
+                .get(key)
+                .is_some_and(|chunk| !chunk.pending_pages.is_empty() && chunk.page_error.is_none())
+        });
+        let compile_page_this_update =
+            should_compile_world_page(self.tick, has_pending_pages, missing_all.len());
         let active_load_budget = if self.active.is_empty() {
-            // A lightweight parent LOD should reach the screen immediately.
-            // Defer the heavy HD leaf to the next background update rather
-            // than holding the first visible frame for both chunk builds.
+            // Preserve a fast first frame; no deferred pages exist yet.
             1
+        } else if compile_page_this_update && !missing_all.is_empty() {
+            // Reserve one unit of foreground work for a deferred page every
+            // third tick. Otherwise moving forever can starve all HD pages.
+            self.config.max_chunk_loads_per_update.saturating_sub(1)
         } else {
             self.config.max_chunk_loads_per_update
         };
@@ -1510,28 +1557,25 @@ impl WorldStreamingRuntime {
         }
         let pending_chunks = cache_misses.saturating_sub(loaded_chunks);
         let mut compiled_pages_now = 0;
-        if pending_chunks == 0 && load_requests.is_empty() {
-            // Compile only one deferred page per update, outside the render
-            // thread. Foreground YMAP loads always take precedence.
-            for key in &ordered_keys {
-                let Some(chunk) = self.cache.get_mut(key) else {
-                    continue;
-                };
-                if chunk.pending_pages.is_empty() || chunk.page_error.is_some() {
-                    continue;
-                }
-                match compile_pending_world_page(chunk, self.config.render_options) {
-                    Ok(true) => compiled_pages_now += 1,
-                    Ok(false) => {}
-                    Err(error) => {
-                        chunk.page_error = Some(error.to_string());
-                        load_errors.push(WorldStreamChunkError {
-                            chunk: key.clone(),
-                            message: format!("world page compile failed: {error}"),
-                        });
+        if compile_page_this_update {
+            // Pages are compiled on the background world worker. Prefer the
+            // page with geometry nearest the *current* camera, not the
+            // hierarchy's parent-first load order.
+            if let Some(key) = nearest_pending_world_page(&self.cache, &ordered_keys, view.position)
+            {
+                if let Some(chunk) = self.cache.get_mut(&key) {
+                    match compile_pending_world_page(chunk, self.config.render_options) {
+                        Ok(true) => compiled_pages_now += 1,
+                        Ok(false) => {}
+                        Err(error) => {
+                            chunk.page_error = Some(error.to_string());
+                            load_errors.push(WorldStreamChunkError {
+                                chunk: key,
+                                message: format!("world page compile failed: {error}"),
+                            });
+                        }
                     }
                 }
-                break;
             }
         }
         let prefetch_pending = prefetch_window
@@ -2007,6 +2051,120 @@ mod tests {
             ..WorldStreamConfig::default()
         };
         assert!(invalid_chunks.validate().is_err());
+    }
+
+    #[test]
+    fn deferred_pages_progress_during_sustained_camera_movement() {
+        assert!(!should_compile_world_page(3, false, 8));
+        assert!(should_compile_world_page(1, true, 0));
+        assert!(!should_compile_world_page(1, true, 8));
+        assert!(!should_compile_world_page(2, true, 7));
+        assert!(should_compile_world_page(3, true, 8));
+        assert!(!should_compile_world_page(4, true, 9));
+        assert!(should_compile_world_page(6, true, 2));
+        assert!(should_compile_world_page(9, true, 1));
+    }
+
+    #[test]
+    fn nearest_pending_world_page_wins_over_parent_first_order() {
+        let point = |x| GtaRpfWorldPoint {
+            x,
+            y: -900.0,
+            z: 15.0,
+        };
+        let key = |hash: u32| WorldStreamChunkKey {
+            map_hash: hash,
+            provider: GtaRpfIndexLocator {
+                archive_relative: "synthetic.rpf".into(),
+                nested: Vec::new(),
+                entry: format!("maps/{hash}.ymap"),
+                load_rank: 1,
+            },
+        };
+        let chunk = |x: f32| {
+            let manifest = SceneManifest {
+                schema_version: 1,
+                root: crate::SceneRoot {
+                    path: "test.ymap".into(),
+                    name_hash: Some(99),
+                },
+                nodes: vec![crate::SceneNode {
+                    index: 0,
+                    source_ymap: "test.ymap".into(),
+                    entity_index: 0,
+                    archetype_hash: 1,
+                    provider_path: None,
+                    asset_ref: None,
+                    asset_kind: None,
+                    transform: Some(crate::SpatialTransform {
+                        translation: [x, -900.0, 0.0],
+                        rotation: [0.0, 0.0, 0.0, 1.0],
+                        scale: Some([1.0; 3]),
+                    }),
+                    lod_dist: None,
+                    child_lod_dist: None,
+                    lod_level: None,
+                    num_children: None,
+                    parent_index: None,
+                    parent_map_hash: None,
+                    resolution: SceneResolutionState::Resolved,
+                    reason: None,
+                    collision: None,
+                    interior: None,
+                }],
+                interiors: Vec::new(),
+                assets: Vec::new(),
+                summary: crate::SceneSummary {
+                    total_entities: 1,
+                    emitted_nodes: 1,
+                    resolved_nodes: 1,
+                    unresolved_nodes: 0,
+                    asset_references: 0,
+                },
+                warnings: Vec::new(),
+                limits: crate::SceneLimits {
+                    max_nodes: 100,
+                    truncated: false,
+                    omitted_entities: 0,
+                },
+            };
+            CachedChunk {
+                packages: Vec::new(),
+                pending_pages: VecDeque::from([manifest]),
+                page_error: None,
+                bytes: 0,
+                read_ms: 0.0,
+                parse_ms: 0.0,
+                assemble_ms: 0.0,
+                render_package_ms: 0.0,
+                build_position: point(x),
+                spatialized: true,
+                spatial_omitted_nodes: 1,
+                spatial_omitted_assets: 0,
+                render_omitted_assets: 0,
+                render_omitted_geometry: 0,
+                last_used_tick: 1,
+            }
+        };
+        let far = key(1);
+        let near = key(2);
+        let mut cache =
+            BTreeMap::from([(far.clone(), chunk(-900.0)), (near.clone(), chunk(-1360.0))]);
+        let order = vec![far.clone(), near.clone()];
+        assert_eq!(
+            nearest_pending_world_page(&cache, &order, point(-1350.0)),
+            Some(near.clone())
+        );
+        cache.get_mut(&near).unwrap().pending_pages.clear();
+        assert_eq!(
+            nearest_pending_world_page(&cache, &order, point(-1350.0)),
+            Some(far.clone())
+        );
+        cache.get_mut(&far).unwrap().page_error = Some("failed".into());
+        assert_eq!(
+            nearest_pending_world_page(&cache, &order, point(-1350.0)),
+            None
+        );
     }
 
     #[test]
