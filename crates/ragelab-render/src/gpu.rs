@@ -202,7 +202,7 @@ struct GpuMesh {
     uv0: wgpu::Buffer,
     indices: wgpu::Buffer,
     index_count: u32,
-    wire_indices: wgpu::Buffer,
+    wire_indices: Option<wgpu::Buffer>,
     wire_index_count: u32,
     material_ref: Option<u32>,
 }
@@ -234,6 +234,23 @@ fn select_lru_key<'a>(
         .filter(|(key, _)| !protected.contains(*key))
         .min_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(right.0)))
         .map(|(key, _)| key.clone())
+}
+
+// World render packages can carry YTD entries that no READY drawable uses.
+// Upload only references in live materials; unreferenced texture blobs must
+// not consume VRAM or block eviction.
+fn referenced_texture_indices(package: &RenderPackage) -> HashSet<usize> {
+    referenced_texture_indices_for_assets(&package.descriptor.assets)
+}
+
+fn referenced_texture_indices_for_assets(assets: &[RenderAssetDescriptor]) -> HashSet<usize> {
+    assets
+        .iter()
+        .filter(|asset| asset.state == RenderAssetState::Ready)
+        .flat_map(|asset| asset.materials.iter())
+        .filter_map(|material| material.diffuse_texture_ref)
+        .map(|index| index as usize)
+        .collect()
 }
 
 fn textures_referenced_by_assets<'a>(
@@ -869,8 +886,11 @@ impl OffscreenRenderer {
             .validate()
             .map_err(|error| RenderError::InvalidInput(error.to_string()))?;
 
-        for texture in &package.descriptor.textures {
-            self.ensure_texture(package, texture)?;
+        let used_texture_indices = referenced_texture_indices(package);
+        for (index, texture) in package.descriptor.textures.iter().enumerate() {
+            if used_texture_indices.contains(&index) {
+                self.ensure_texture(package, texture)?;
+            }
         }
         for asset in &package.descriptor.assets {
             if asset.state == RenderAssetState::Ready {
@@ -878,6 +898,9 @@ impl OffscreenRenderer {
             }
         }
 
+        if options.wireframe {
+            self.ensure_wire_indices(package)?;
+        }
         let draws = self.build_draw_instances(package, false, 0)?;
         if draws.is_empty() {
             return Err(RenderError::Unsupported(
@@ -1035,10 +1058,10 @@ impl OffscreenRenderer {
                             continue;
                         }
                         pass.set_vertex_buffer(0, mesh.positions.slice(..));
-                        pass.set_index_buffer(
-                            mesh.wire_indices.slice(..),
-                            wgpu::IndexFormat::Uint32,
-                        );
+                        let Some(wire_indices) = mesh.wire_indices.as_ref() else {
+                            continue;
+                        };
+                        pass.set_index_buffer(wire_indices.slice(..), wgpu::IndexFormat::Uint32);
                         pass.draw_indexed(0..mesh.wire_index_count, 0, 0..1);
                     }
                 }
@@ -1238,7 +1261,8 @@ impl OffscreenRenderer {
                 &uv_owned
             };
             let indices = view_bytes(package, mesh.indices, RenderElementType::U32, 1, "indices")?;
-            let wire = wire_indices(indices)?;
+            // Wireframe index generation is deferred until explicitly enabled.
+            // GTA world mode never requests it during normal navigation.
             gpu_bytes = gpu_bytes
                 .saturating_add(mesh.positions.byte_length)
                 .saturating_add(mesh.indices.byte_length)
@@ -1251,8 +1275,7 @@ impl OffscreenRenderer {
                     mesh.uv0
                         .map(|view| view.byte_length)
                         .unwrap_or((vertex_count as u64).saturating_mul(8)),
-                )
-                .saturating_add((wire.len() as u64).saturating_mul(4));
+                );
 
             meshes.push(GpuMesh {
                 positions: self
@@ -1284,16 +1307,8 @@ impl OffscreenRenderer {
                         usage: wgpu::BufferUsages::INDEX,
                     }),
                 index_count: mesh.indices.count,
-                wire_indices: self
-                    .device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("RageLab wire indices"),
-                        contents: bytemuck::cast_slice(&wire),
-                        usage: wgpu::BufferUsages::INDEX,
-                    }),
-                wire_index_count: wire.len().try_into().map_err(|_| {
-                    RenderError::InvalidInput("wireframe index count exceeds u32".into())
-                })?,
+                wire_indices: None,
+                wire_index_count: 0,
                 material_ref: mesh.material_ref,
             });
         }
@@ -1314,6 +1329,45 @@ impl OffscreenRenderer {
                 texture_keys,
             },
         );
+        Ok(())
+    }
+
+    // Create optional wire edges only after the user enables wireframe or
+    // collision diagnostics. Normal GTA streaming avoids this CPU expansion,
+    // index upload and VRAM consumption for every mesh.
+    fn ensure_wire_indices(&mut self, package: &RenderPackage) -> RenderResult<()> {
+        for descriptor in &package.descriptor.assets {
+            if descriptor.state != RenderAssetState::Ready {
+                continue;
+            }
+            let key = asset_key(descriptor);
+            let Some(asset) = self.asset_cache.get_mut(&key) else {
+                continue;
+            };
+            let mut allocated_bytes = 0_u64;
+            for (gpu_mesh, mesh) in asset.meshes.iter_mut().zip(&descriptor.meshes) {
+                if gpu_mesh.wire_indices.is_some() {
+                    continue;
+                }
+                let indices =
+                    view_bytes(package, mesh.indices, RenderElementType::U32, 1, "indices")?;
+                let wire = wire_indices(indices)?;
+                gpu_mesh.wire_index_count = wire.len().try_into().map_err(|_| {
+                    RenderError::InvalidInput("wireframe index count exceeds u32".into())
+                })?;
+                allocated_bytes = allocated_bytes.saturating_add((wire.len() as u64) * 4);
+                gpu_mesh.wire_indices = Some(self.device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("RageLab on-demand wire indices"),
+                        contents: bytemuck::cast_slice(&wire),
+                        usage: wgpu::BufferUsages::INDEX,
+                    },
+                ));
+            }
+            if let Some(meta) = self.asset_cache_meta.get_mut(&key) {
+                meta.bytes = meta.bytes.saturating_add(allocated_bytes);
+            }
+        }
         Ok(())
     }
 
@@ -1362,8 +1416,16 @@ impl OffscreenRenderer {
 
         let active_textures = packages
             .iter()
-            .flat_map(|package| package.descriptor.textures.iter())
-            .map(texture_key)
+            .flat_map(|package| {
+                let used = referenced_texture_indices(package);
+                package
+                    .descriptor
+                    .textures
+                    .iter()
+                    .enumerate()
+                    .filter(move |(index, _)| used.contains(index))
+                    .map(|(_, texture)| texture_key(texture))
+            })
             .collect::<HashSet<_>>();
 
         loop {
@@ -2104,8 +2166,11 @@ impl SurfaceRenderer {
             package
                 .validate()
                 .map_err(|error| RenderError::InvalidInput(error.to_string()))?;
-            for texture in &package.descriptor.textures {
-                self.gpu.ensure_texture(package, texture)?;
+            let used_texture_indices = referenced_texture_indices(package);
+            for (texture_index, texture) in package.descriptor.textures.iter().enumerate() {
+                if used_texture_indices.contains(&texture_index) {
+                    self.gpu.ensure_texture(package, texture)?;
+                }
             }
             for asset in &package.descriptor.assets {
                 if asset.state == RenderAssetState::Ready {
@@ -2499,6 +2564,11 @@ impl SurfaceRenderer {
         } else {
             HashSet::new()
         };
+        if self.options.wireframe || self.show_collision {
+            for package in &self.packages {
+                self.gpu.ensure_wire_indices(package)?;
+            }
+        }
         let world_bounds = self.world_bounds.ok_or_else(|| {
             RenderError::InvalidInput("native viewport has no world bounds".into())
         })?;
@@ -2667,10 +2737,10 @@ impl SurfaceRenderer {
                             continue;
                         }
                         pass.set_vertex_buffer(0, mesh.positions.slice(..));
-                        pass.set_index_buffer(
-                            mesh.wire_indices.slice(..),
-                            wgpu::IndexFormat::Uint32,
-                        );
+                        let Some(wire_indices) = mesh.wire_indices.as_ref() else {
+                            continue;
+                        };
+                        pass.set_index_buffer(wire_indices.slice(..), wgpu::IndexFormat::Uint32);
                         pass.draw_indexed(0..mesh.wire_index_count, 0, 0..1);
                     }
                 }
@@ -3473,6 +3543,46 @@ fn nice_grid_spacing(target: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpu_only_uploads_textures_used_by_ready_assets() {
+        use ragelab_engine::{RenderMaterialDescriptor, RenderSourceDescriptor};
+        let asset = |state, texture_ref| RenderAssetDescriptor {
+            asset_ref: 0,
+            kind: "ydr".into(),
+            hash: None,
+            source: RenderSourceDescriptor {
+                source_type: "archive".into(),
+                path: "test.ydr".into(),
+            },
+            selector: None,
+            state,
+            coordinate_convention: None,
+            name: None,
+            lod: None,
+            bounds: None,
+            meshes: Vec::new(),
+            materials: vec![RenderMaterialDescriptor {
+                id: 0,
+                source_shader_index: 0,
+                shader_name_hash: 0,
+                shader_file_hash: 0,
+                diffuse_texture_name: None,
+                diffuse_texture_ref: texture_ref,
+            }],
+        };
+        let assets = [
+            asset(RenderAssetState::Ready, Some(2)),
+            asset(RenderAssetState::Omitted, Some(4)),
+            asset(RenderAssetState::Error, Some(5)),
+            asset(RenderAssetState::Ready, None),
+            asset(RenderAssetState::Ready, Some(2)),
+        ];
+        assert_eq!(
+            referenced_texture_indices_for_assets(&assets),
+            HashSet::from([2])
+        );
+    }
 
     #[test]
     fn lod_debug_filters_make_raw_hd_and_proxy_layers_independently_inspectable() {
