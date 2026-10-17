@@ -11,7 +11,7 @@ use ragelab_engine::RenderPackage;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-pub use gpu::{OffscreenRenderer, SurfaceRenderer};
+pub use gpu::{LodDiagnosticSnapshot, LodNodeDiagnostic, OffscreenRenderer, SurfaceRenderer};
 
 pub const SCREENSHOT_METADATA_SCHEMA_VERSION: u32 = 1;
 

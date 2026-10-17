@@ -382,6 +382,47 @@ impl LodDebugMode {
     }
 }
 
+/// A single-epoch account of why one resident GTA YMAP entity is drawn or hidden.
+/// The three visibility flags are computed without changing the camera or packages.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LodNodeDiagnostic {
+    pub source_ymap: String,
+    pub entity_index: u32,
+    pub node_index: u32,
+    pub map_hash: Option<u32>,
+    pub parent_map_hash: Option<u32>,
+    pub parent_index: Option<i32>,
+    pub parent_resident: bool,
+    pub lod_level: Option<i32>,
+    pub lod_dist: Option<f32>,
+    pub child_lod_dist: Option<f32>,
+    pub expected_children: u32,
+    pub linked_children: usize,
+    pub mesh_ready_children: usize,
+    pub lod_ready_children: usize,
+    pub mesh_ready: bool,
+    pub distance_m: Option<f32>,
+    pub in_frustum: bool,
+    pub in_lod_range: bool,
+    pub layer_visible: bool,
+    pub visible_normal: bool,
+    pub visible_hd: bool,
+    pub visible_proxy: bool,
+    pub normal_reason: &'static str,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LodDiagnosticSnapshot {
+    pub camera: CameraSnapshot,
+    pub total_nodes: usize,
+    pub normal_visible: usize,
+    pub hd_visible: usize,
+    pub proxy_visible: usize,
+    pub nodes: Vec<LodNodeDiagnostic>,
+}
+
 #[derive(Default)]
 struct LodHierarchy {
     nodes: Vec<LodEntity>,
@@ -571,6 +612,118 @@ impl LodHierarchy {
             }
         }
         suppressed
+    }
+
+    /// Evaluate Normal/HD-only/proxy-only using one immutable residency epoch.
+    /// The hysteresis selection is copied, so taking a snapshot cannot change
+    /// which entities the next real frame renders.
+    fn diagnostic_snapshot(
+        &self,
+        camera: &OrbitCamera,
+        selections: &HashMap<LodEntityKey, bool>,
+        layer_visible: impl Fn(u32) -> bool,
+        in_frustum: impl Fn(Aabb) -> bool,
+        limit: usize,
+    ) -> LodDiagnosticSnapshot {
+        let mut selections = selections.clone();
+        let suppressed = self.suppressed(camera, &mut selections);
+        let linked = self
+            .children
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<HashSet<_>>();
+        let mut nodes = Vec::with_capacity(self.nodes.len());
+        let mut normal_visible = 0;
+        let mut hd_visible = 0;
+        let mut proxy_visible = 0;
+        for (index, node) in self.nodes.iter().enumerate() {
+            let mesh_ready = node.bounds.is_some();
+            let in_lod_range = node
+                .bounds
+                .is_some_and(|bounds| camera.lod_visible(bounds, node.lod_dist));
+            let in_frustum = node.bounds.is_some_and(&in_frustum);
+            let layer_visible = layer_visible(node.node_index);
+            let raw_visible = mesh_ready && in_lod_range && in_frustum && layer_visible;
+            let visible_normal = raw_visible && !suppressed.contains(&node.node_index);
+            let visible_hd = raw_visible && LodDebugMode::DetailOnly.includes(node.lod_level);
+            let visible_proxy = raw_visible && LodDebugMode::ProxyOnly.includes(node.lod_level);
+            normal_visible += usize::from(visible_normal);
+            hd_visible += usize::from(visible_hd);
+            proxy_visible += usize::from(visible_proxy);
+            let children = &self.children[index];
+            let mesh_ready_children = children
+                .iter()
+                .filter(|&&child| self.nodes[child].bounds.is_some())
+                .count();
+            let lod_ready_children = children
+                .iter()
+                .filter(|&&child| {
+                    let descendant = &self.nodes[child];
+                    descendant
+                        .bounds
+                        .is_some_and(|bounds| camera.lod_visible(bounds, descendant.lod_dist))
+                })
+                .count();
+            let distance_m = node.bounds.map(|bounds| {
+                ((bounds.center() - camera.eye()).length() - bounds.radius()).max(0.0)
+            });
+            let normal_reason = if !mesh_ready {
+                "missing_gpu_mesh"
+            } else if !layer_visible {
+                "layer_hidden"
+            } else if !in_frustum {
+                "frustum_culled"
+            } else if !in_lod_range {
+                "lod_distance_culled"
+            } else if !visible_normal {
+                "hierarchy_suppressed"
+            } else {
+                "visible"
+            };
+            nodes.push(LodNodeDiagnostic {
+                source_ymap: node.key.source_ymap.clone(),
+                entity_index: node.key.entity_index,
+                node_index: node.node_index,
+                map_hash: node.map_hash,
+                parent_map_hash: node.parent_map_hash,
+                parent_index: node.parent_index,
+                parent_resident: linked.contains(&index),
+                lod_level: node.lod_level,
+                lod_dist: node.lod_dist,
+                child_lod_dist: node.child_lod_dist,
+                expected_children: node.num_children.unwrap_or(0),
+                linked_children: children.len(),
+                mesh_ready_children,
+                lod_ready_children,
+                mesh_ready,
+                distance_m,
+                in_frustum,
+                in_lod_range,
+                layer_visible,
+                visible_normal,
+                visible_hd,
+                visible_proxy,
+                normal_reason,
+            });
+        }
+        // Missing meshes lack GPU bounds and sort last, but remain counted in
+        // total_nodes; their resident parents disclose missing-ready children.
+        nodes.sort_by(|a, b| {
+            a.distance_m
+                .unwrap_or(f32::INFINITY)
+                .total_cmp(&b.distance_m.unwrap_or(f32::INFINITY))
+                .then_with(|| a.source_ymap.cmp(&b.source_ymap))
+                .then_with(|| a.entity_index.cmp(&b.entity_index))
+        });
+        LodDiagnosticSnapshot {
+            camera: camera.snapshot(),
+            total_nodes: nodes.len(),
+            normal_visible,
+            hd_visible,
+            proxy_visible,
+            nodes: nodes.into_iter().take(limit).collect(),
+        }
     }
 }
 
@@ -2505,6 +2658,34 @@ impl SurfaceRenderer {
         self.camera.as_ref().map(OrbitCamera::snapshot)
     }
 
+    /// Inspect all three LOD layers at the identical camera and residency
+    /// state, regardless of the active F7 view. No GPU work or state changes.
+    pub fn lod_diagnostic_snapshot(&self, limit: usize) -> Option<LodDiagnosticSnapshot> {
+        let camera = self.camera.as_ref()?;
+        let enabled_draws = self
+            .draws
+            .iter()
+            .filter(|draw| !draw.collision_overlay)
+            .filter(|draw| {
+                draw_visibility(
+                    draw.node_index,
+                    draw.local_overlay,
+                    &self.hidden_node_indices,
+                    self.show_base_game,
+                    self.show_local_overlays,
+                )
+            })
+            .filter_map(|draw| draw.node_index)
+            .collect::<HashSet<_>>();
+        Some(self.lod_hierarchy.diagnostic_snapshot(
+            camera,
+            &self.lod_selections,
+            |index| enabled_draws.contains(&index),
+            |bounds| camera.aabb_visible(bounds, self.options.width, self.options.height),
+            limit,
+        ))
+    }
+
     pub fn stats(&self) -> ViewportStats {
         let (instances, assets, meshes, materials, textures, uploaded_payload_bytes) =
             self.packages.iter().fold(
@@ -3643,6 +3824,78 @@ mod tests {
                 max: center + Vec3::splat(1.0),
             }),
         }
+    }
+
+    #[test]
+    fn lod_snapshot_explains_proxy_fallback_and_computes_all_layers_without_mutating_state() {
+        let camera = OrbitCamera::around_world_position([0.0; 3], 120.0, Projection::Perspective);
+        let center = camera.eye() + camera.forward() * 80.0;
+        let mut parent =
+            synthetic_lod_entity("sm_23.ymap", 0, None, Some(2), Some(100.0), center, true);
+        parent.lod_level = Some(2);
+        let mut child_a = synthetic_lod_entity("sm_23.ymap", 1, Some(0), None, None, center, true);
+        child_a.lod_level = Some(0);
+        let mut child_b = synthetic_lod_entity("sm_23.ymap", 2, Some(0), None, None, center, false);
+        child_b.lod_level = Some(0);
+
+        let missing =
+            LodHierarchy::from_nodes(vec![parent.clone(), child_a.clone(), child_b.clone()]);
+        let state = HashMap::new();
+        let snapshot = missing.diagnostic_snapshot(&camera, &state, |_| true, |_| true, 10);
+        assert!(state.is_empty());
+        assert_eq!(snapshot.total_nodes, 3);
+        assert_eq!(snapshot.normal_visible, 1);
+        assert_eq!(snapshot.hd_visible, 1);
+        assert_eq!(snapshot.proxy_visible, 1);
+        let proxy = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.entity_index == 0)
+            .unwrap();
+        assert_eq!(proxy.expected_children, 2);
+        assert_eq!(proxy.linked_children, 2);
+        assert_eq!(proxy.mesh_ready_children, 1);
+        assert_eq!(proxy.lod_ready_children, 1);
+        assert_eq!(proxy.normal_reason, "visible");
+        assert!(proxy.visible_proxy);
+        let hd = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.entity_index == 1)
+            .unwrap();
+        assert!(hd.visible_hd);
+        assert!(!hd.visible_normal);
+        assert_eq!(hd.normal_reason, "hierarchy_suppressed");
+        let absent = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.entity_index == 2)
+            .unwrap();
+        assert_eq!(absent.normal_reason, "missing_gpu_mesh");
+        assert!(!absent.visible_hd);
+
+        child_b.bounds = child_a.bounds;
+        let ready = LodHierarchy::from_nodes(vec![parent, child_a, child_b]);
+        let finished = ready.diagnostic_snapshot(&camera, &state, |_| true, |_| true, 2);
+        assert_eq!(finished.total_nodes, 3);
+        assert_eq!(finished.nodes.len(), 2);
+        assert_eq!(finished.normal_visible, 2);
+        assert_eq!(finished.hd_visible, 2);
+        assert_eq!(finished.proxy_visible, 1);
+        assert!(state.is_empty());
+        let full = ready.diagnostic_snapshot(&camera, &state, |_| true, |_| true, 3);
+        let proxy = full
+            .nodes
+            .iter()
+            .find(|node| node.entity_index == 0)
+            .unwrap();
+        assert_eq!(proxy.normal_reason, "hierarchy_suppressed");
+        assert_eq!(proxy.lod_ready_children, 2);
+        let second = ready.diagnostic_snapshot(&camera, &state, |_| true, |_| true, 3);
+        assert_eq!(
+            serde_json::to_value(&full).unwrap(),
+            serde_json::to_value(&second).unwrap()
+        );
     }
 
     #[test]
