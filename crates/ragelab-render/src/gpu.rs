@@ -1735,6 +1735,21 @@ impl OffscreenRenderer {
         emphasize_local: bool,
         node_base: u32,
     ) -> RenderResult<Vec<DrawInstance>> {
+        self.build_draw_instances_range(
+            package,
+            emphasize_local,
+            node_base,
+            0..package.descriptor.scene.instances.len(),
+        )
+    }
+
+    fn build_draw_instances_range(
+        &self,
+        package: &RenderPackage,
+        emphasize_local: bool,
+        node_base: u32,
+        range: std::ops::Range<usize>,
+    ) -> RenderResult<Vec<DrawInstance>> {
         let mut draws = Vec::new();
 
         if package.descriptor.scene.instances.is_empty() {
@@ -1758,7 +1773,7 @@ impl OffscreenRenderer {
             return Ok(draws);
         }
 
-        for instance in &package.descriptor.scene.instances {
+        for instance in package.descriptor.scene.instances[range].iter() {
             let transform = instance.transform.ok_or_else(|| {
                 RenderError::Unsupported(format!(
                     "scene instance {} has no proven render transform",
@@ -2115,9 +2130,19 @@ fn package_index_at_node(
 }
 
 enum StreamingUploadWork {
-    Texture { package: usize, index: usize },
-    Asset { package: usize, index: usize },
-    BuildDraws { package: usize },
+    Texture {
+        package: usize,
+        index: usize,
+    },
+    Asset {
+        package: usize,
+        index: usize,
+    },
+    BuildDraws {
+        package: usize,
+        start: usize,
+        end: usize,
+    },
 }
 
 struct PendingStreamingUpload {
@@ -2129,7 +2154,23 @@ struct PendingStreamingUpload {
 }
 
 const STREAMING_UPLOAD_MAX_ITEMS_PER_FRAME: usize = 2;
+const STREAMING_DRAW_INSTANCES_PER_ITEM: usize = 32;
 const STREAMING_UPLOAD_TIME_BUDGET: Duration = Duration::from_millis(4);
+
+fn streaming_draw_ranges(count: usize) -> Vec<std::ops::Range<usize>> {
+    if count == 0 {
+        return vec![0..0]; // Standalone asset packages still require one build.
+    }
+    (0..count)
+        .step_by(STREAMING_DRAW_INSTANCES_PER_ITEM)
+        .map(|start| {
+            start
+                ..start
+                    .saturating_add(STREAMING_DRAW_INSTANCES_PER_ITEM)
+                    .min(count)
+        })
+        .collect()
+}
 
 fn process_streaming_upload_batch<T>(
     work: &mut VecDeque<T>,
@@ -2351,9 +2392,13 @@ impl SurfaceRenderer {
                     });
                 }
             }
-            work.push_back(StreamingUploadWork::BuildDraws {
-                package: package_index,
-            });
+            for range in streaming_draw_ranges(package.descriptor.scene.instances.len()) {
+                work.push_back(StreamingUploadWork::BuildDraws {
+                    package: package_index,
+                    start: range.start,
+                    end: range.end,
+                });
+            }
         }
         self.pending_streaming_upload = Some(PendingStreamingUpload {
             packages,
@@ -2420,12 +2465,21 @@ impl SurfaceRenderer {
                     self.gpu
                         .ensure_asset(source, &source.descriptor.assets[index])
                 }
-                StreamingUploadWork::BuildDraws { package } => {
+                StreamingUploadWork::BuildDraws {
+                    package,
+                    start,
+                    end,
+                } => {
                     let base = package_node_bases(&pending.packages)[package];
-                    let draws =
-                        self.gpu
-                            .build_draw_instances(&pending.packages[package], true, base)?;
-                    pending.prepared_draws[package] = Some(draws);
+                    let draws = self.gpu.build_draw_instances_range(
+                        &pending.packages[package],
+                        true,
+                        base,
+                        start..end,
+                    )?;
+                    pending.prepared_draws[package]
+                        .get_or_insert_with(Vec::new)
+                        .extend(draws);
                     Ok(())
                 }
             },
@@ -3957,6 +4011,19 @@ fn nice_grid_spacing(target: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streamed_instance_bindings_are_partitioned_without_loss_or_overlap() {
+        assert_eq!(streaming_draw_ranges(0), vec![0..0]);
+        assert_eq!(streaming_draw_ranges(1), vec![0..1]);
+        assert_eq!(streaming_draw_ranges(64), vec![0..32, 32..64]);
+        assert_eq!(streaming_draw_ranges(65), vec![0..32, 32..64, 64..65]);
+        let ranges = streaming_draw_ranges(203);
+        assert_eq!(ranges.first().unwrap().start, 0);
+        assert_eq!(ranges.last().unwrap().end, 203);
+        assert_eq!(ranges.iter().map(|r| r.len()).sum::<usize>(), 203);
+        assert!(ranges.iter().all(|range| range.len() <= 32));
+    }
 
     #[test]
     fn streaming_upload_batch_limits_items_and_preserves_remaining_order() {
