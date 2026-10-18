@@ -1,8 +1,8 @@
 use std::{
     borrow::Cow,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{mpsc, Arc, OnceLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use bytemuck::{Pod, Zeroable};
@@ -226,6 +226,7 @@ struct GpuTextureCacheMeta {
     last_used: u64,
 }
 
+#[cfg(test)]
 fn select_lru_key<'a>(
     entries: impl Iterator<Item = (&'a String, u64)>,
     protected: &HashSet<String>,
@@ -253,6 +254,7 @@ fn referenced_texture_indices_for_assets(assets: &[RenderAssetDescriptor]) -> Ha
         .collect()
 }
 
+#[cfg(test)]
 fn textures_referenced_by_assets<'a>(
     assets: impl Iterator<Item = &'a GpuAssetCacheMeta>,
 ) -> HashSet<String> {
@@ -261,6 +263,7 @@ fn textures_referenced_by_assets<'a>(
         .collect()
 }
 
+#[cfg(test)]
 fn select_asset_releasing_texture<'a>(
     entries: impl Iterator<Item = (&'a String, &'a GpuAssetCacheMeta)>,
     protected_assets: &HashSet<String>,
@@ -1538,6 +1541,9 @@ impl OffscreenRenderer {
         (asset_bytes, texture_bytes)
     }
 
+    // Eviction is on the render thread. Rebuilding and sorting candidate sets
+    // inside every eviction previously made scene commit O(N^2), producing
+    // multi-second stalls when large GTA YMAP sets were replaced.
     fn evict_to_budget(&mut self, packages: &[Arc<RenderPackage>], budget: GpuCacheBudget) -> bool {
         let protected_assets = packages
             .iter()
@@ -1546,25 +1552,26 @@ impl OffscreenRenderer {
             .map(asset_key)
             .collect::<HashSet<_>>();
 
-        loop {
-            let (asset_bytes, _) = self.cache_bytes();
+        let (mut asset_bytes, mut texture_bytes) = self.cache_bytes();
+        let mut asset_candidates = self
+            .asset_cache_meta
+            .iter()
+            .filter(|(key, _)| !protected_assets.contains(*key))
+            .map(|(key, meta)| (meta.last_used, key.clone()))
+            .collect::<Vec<_>>();
+        asset_candidates.sort_unstable();
+
+        for (_, key) in &asset_candidates {
             if self.asset_cache.len() <= budget.max_assets as usize
                 && asset_bytes <= budget.max_asset_bytes
             {
                 break;
             }
-            let victim = select_lru_key(
-                self.asset_cache_meta
-                    .iter()
-                    .map(|(key, meta)| (key, meta.last_used)),
-                &protected_assets,
-            );
-            let Some(key) = victim else {
-                break;
-            };
-            self.asset_cache.remove(&key);
-            self.asset_cache_meta.remove(&key);
-            self.cache_evictions = self.cache_evictions.saturating_add(1);
+            if let Some(meta) = self.asset_cache_meta.remove(key) {
+                self.asset_cache.remove(key);
+                asset_bytes = asset_bytes.saturating_sub(meta.bytes);
+                self.cache_evictions = self.cache_evictions.saturating_add(1);
+            }
         }
 
         let active_textures = packages
@@ -1581,50 +1588,72 @@ impl OffscreenRenderer {
             })
             .collect::<HashSet<_>>();
 
-        loop {
-            let (_, texture_bytes) = self.cache_bytes();
-            if self.texture_cache.len() <= budget.max_textures as usize
-                && texture_bytes <= budget.max_texture_bytes
-            {
-                break;
+        // Reference counts let us unlock an orphan texture in O(1) when an
+        // unprotected asset is evicted; the min-heap retains exact LRU order.
+        let mut references = HashMap::<String, usize>::new();
+        for asset in self.asset_cache_meta.values() {
+            for key in &asset.texture_keys {
+                *references.entry(key.clone()).or_default() += 1;
             }
+        }
+        let mut releasable = std::collections::BinaryHeap::new();
+        for (key, meta) in &self.texture_cache_meta {
+            if !active_textures.contains(key) && !references.contains_key(key) {
+                releasable.push(std::cmp::Reverse((meta.last_used, key.clone())));
+            }
+        }
 
-            let referenced_textures = textures_referenced_by_assets(self.asset_cache_meta.values());
-            let mut protected_textures = active_textures.clone();
-            protected_textures.extend(referenced_textures);
-
-            if let Some(key) = select_lru_key(
-                self.texture_cache_meta
-                    .iter()
-                    .map(|(key, meta)| (key, meta.last_used)),
-                &protected_textures,
-            ) {
-                self.texture_cache.remove(&key);
-                self.texture_cache_meta.remove(&key);
-                self.cache_evictions = self.cache_evictions.saturating_add(1);
+        let mut asset_candidate_index = 0;
+        while self.texture_cache.len() > budget.max_textures as usize
+            || texture_bytes > budget.max_texture_bytes
+        {
+            if let Some(std::cmp::Reverse((_, key))) = releasable.pop() {
+                if let Some(meta) = self.texture_cache_meta.remove(&key) {
+                    self.texture_cache.remove(&key);
+                    texture_bytes = texture_bytes.saturating_sub(meta.bytes);
+                    self.cache_evictions = self.cache_evictions.saturating_add(1);
+                }
                 continue;
             }
 
-            let resident_textures = self
-                .texture_cache_meta
-                .keys()
-                .cloned()
-                .collect::<HashSet<_>>();
-            let releasable_asset = select_asset_releasing_texture(
-                self.asset_cache_meta.iter(),
-                &protected_assets,
-                &active_textures,
-                &resident_textures,
-            );
-            let Some(key) = releasable_asset else {
+            // When every orphan is gone, only release inactive assets whose
+            // textures are not required by the desired active world.
+            let mut released = false;
+            while let Some((_, key)) = asset_candidates.get(asset_candidate_index) {
+                asset_candidate_index += 1;
+                let Some(meta) = self.asset_cache_meta.get(key) else {
+                    continue;
+                };
+                if !meta.texture_keys.iter().any(|texture| {
+                    !active_textures.contains(texture)
+                        && self.texture_cache_meta.contains_key(texture)
+                }) {
+                    continue;
+                }
+                if let Some(meta) = self.asset_cache_meta.remove(key) {
+                    self.asset_cache.remove(key);
+                    asset_bytes = asset_bytes.saturating_sub(meta.bytes);
+                    self.cache_evictions = self.cache_evictions.saturating_add(1);
+                    for texture in meta.texture_keys {
+                        if let Some(count) = references.get_mut(&texture) {
+                            *count = count.saturating_sub(1);
+                            if *count == 0 && !active_textures.contains(&texture) {
+                                if let Some(metadata) = self.texture_cache_meta.get(&texture) {
+                                    releasable
+                                        .push(std::cmp::Reverse((metadata.last_used, texture)));
+                                }
+                            }
+                        }
+                    }
+                    released = true;
+                    break;
+                }
+            }
+            if !released {
                 break;
-            };
-            self.asset_cache.remove(&key);
-            self.asset_cache_meta.remove(&key);
-            self.cache_evictions = self.cache_evictions.saturating_add(1);
+            }
         }
 
-        let (asset_bytes, texture_bytes) = self.cache_bytes();
         self.asset_cache.len() > budget.max_assets as usize
             || self.texture_cache.len() > budget.max_textures as usize
             || asset_bytes > budget.max_asset_bytes
@@ -2085,6 +2114,45 @@ fn package_index_at_node(
     })
 }
 
+enum StreamingUploadWork {
+    Texture { package: usize, index: usize },
+    Asset { package: usize, index: usize },
+    BuildDraws { package: usize },
+}
+
+struct PendingStreamingUpload {
+    packages: Vec<Arc<RenderPackage>>,
+    work: VecDeque<StreamingUploadWork>,
+    // Bindings are created in small per-package batches instead of during
+    // final publication of the whole desired scene.
+    prepared_draws: Vec<Option<Vec<DrawInstance>>>,
+}
+
+const STREAMING_UPLOAD_MAX_ITEMS_PER_FRAME: usize = 2;
+const STREAMING_UPLOAD_TIME_BUDGET: Duration = Duration::from_millis(4);
+
+fn process_streaming_upload_batch<T>(
+    work: &mut VecDeque<T>,
+    max_items: usize,
+    time_budget: Duration,
+    mut upload: impl FnMut(&T) -> RenderResult<()>,
+) -> RenderResult<usize> {
+    let started = Instant::now();
+    let mut completed = 0;
+    while completed < max_items {
+        let Some(next) = work.front() else {
+            break;
+        };
+        upload(next)?;
+        work.pop_front();
+        completed += 1;
+        if started.elapsed() >= time_budget {
+            break;
+        }
+    }
+    Ok(completed)
+}
+
 pub struct SurfaceRenderer {
     gpu: OffscreenRenderer,
     surface: wgpu::Surface<'static>,
@@ -2099,6 +2167,11 @@ pub struct SurfaceRenderer {
     gizmo_pipeline: wgpu::RenderPipeline,
     options: ViewportOptions,
     packages: Vec<Arc<RenderPackage>>,
+    // Desired scene stays separate until its resources are GPU resident.
+    pending_streaming_upload: Option<PendingStreamingUpload>,
+    last_streaming_upload_ms: f64,
+    last_streaming_upload_items: usize,
+    last_streaming_commit_ms: f64,
     draws: Vec<DrawInstance>,
     lod_hierarchy: LodHierarchy,
     lod_debug_mode: LodDebugMode,
@@ -2211,6 +2284,10 @@ impl SurfaceRenderer {
             gizmo_pipeline,
             options,
             packages: Vec::new(),
+            pending_streaming_upload: None,
+            last_streaming_upload_ms: 0.0,
+            last_streaming_upload_items: 0,
+            last_streaming_commit_ms: 0.0,
             draws: Vec::new(),
             lod_hierarchy: LodHierarchy::default(),
             lod_debug_mode: LodDebugMode::default(),
@@ -2230,6 +2307,142 @@ impl SurfaceRenderer {
             last_frame_ms: 0.0,
             last_visible_instances: 0,
         })
+    }
+
+    /// Enqueue a desired streaming scene without blocking navigation for the
+    /// full GPU upload. Superseded requests are dropped: already uploaded
+    /// objects remain in the cache for reuse/normal eviction.
+    pub fn queue_streaming_packages(
+        &mut self,
+        packages: Vec<Arc<RenderPackage>>,
+    ) -> RenderResult<()> {
+        if packages.is_empty() {
+            return self.replace_packages(packages, true);
+        }
+        let mut work = VecDeque::new();
+        let prepared_draws = std::iter::repeat_with(|| None)
+            .take(packages.len())
+            .collect();
+        for (package_index, package) in packages.iter().enumerate() {
+            if self.packages.iter().any(|old| Arc::ptr_eq(package, old)) {
+                continue;
+            }
+            package
+                .validate()
+                .map_err(|error| RenderError::InvalidInput(error.to_string()))?;
+            let used_textures = referenced_texture_indices(package);
+            for (index, texture) in package.descriptor.textures.iter().enumerate() {
+                if used_textures.contains(&index)
+                    && !self.gpu.texture_cache.contains_key(&texture_key(texture))
+                {
+                    work.push_back(StreamingUploadWork::Texture {
+                        package: package_index,
+                        index,
+                    });
+                }
+            }
+            for (index, asset) in package.descriptor.assets.iter().enumerate() {
+                if asset.state == RenderAssetState::Ready
+                    && !self.gpu.asset_cache.contains_key(&asset_key(asset))
+                {
+                    work.push_back(StreamingUploadWork::Asset {
+                        package: package_index,
+                        index,
+                    });
+                }
+            }
+            work.push_back(StreamingUploadWork::BuildDraws {
+                package: package_index,
+            });
+        }
+        self.pending_streaming_upload = Some(PendingStreamingUpload {
+            packages,
+            work,
+            prepared_draws,
+        });
+        // Pure reuse/rebase updates need no GPU queue work.
+        if self
+            .pending_streaming_upload
+            .as_ref()
+            .is_some_and(|q| q.work.is_empty())
+        {
+            self.advance_streaming_uploads()?;
+        }
+        Ok(())
+    }
+
+    pub fn pending_streaming_uploads(&self) -> usize {
+        self.pending_streaming_upload
+            .as_ref()
+            .map_or(0, |queue| queue.work.len())
+    }
+
+    pub fn has_pending_streaming_update(&self) -> bool {
+        self.pending_streaming_upload.is_some()
+    }
+
+    pub fn last_streaming_upload_batch(&self) -> (usize, f64) {
+        (
+            self.last_streaming_upload_items,
+            self.last_streaming_upload_ms,
+        )
+    }
+
+    pub fn last_streaming_commit_ms(&self) -> f64 {
+        self.last_streaming_commit_ms
+    }
+
+    /// Processes a bounded number of GPU objects before drawing the previous
+    /// complete scene. A single exceptionally large asset remains atomic, so
+    /// the time budget is advisory and measured rather than a hard deadline.
+    fn advance_streaming_uploads(&mut self) -> RenderResult<()> {
+        let Some(mut pending) = self.pending_streaming_upload.take() else {
+            self.last_streaming_upload_items = 0;
+            self.last_streaming_upload_ms = 0.0;
+            self.last_streaming_commit_ms = 0.0;
+            return Ok(());
+        };
+        let started = Instant::now();
+        // On failure the pending request is intentionally discarded, while
+        // the previous complete scene and its GPU resources remain intact.
+        let uploaded = process_streaming_upload_batch(
+            &mut pending.work,
+            STREAMING_UPLOAD_MAX_ITEMS_PER_FRAME,
+            STREAMING_UPLOAD_TIME_BUDGET,
+            |work| match *work {
+                StreamingUploadWork::Texture { package, index } => {
+                    let source = &pending.packages[package];
+                    self.gpu
+                        .ensure_texture(source, &source.descriptor.textures[index])
+                }
+                StreamingUploadWork::Asset { package, index } => {
+                    let source = &pending.packages[package];
+                    self.gpu
+                        .ensure_asset(source, &source.descriptor.assets[index])
+                }
+                StreamingUploadWork::BuildDraws { package } => {
+                    let base = package_node_bases(&pending.packages)[package];
+                    let draws =
+                        self.gpu
+                            .build_draw_instances(&pending.packages[package], true, base)?;
+                    pending.prepared_draws[package] = Some(draws);
+                    Ok(())
+                }
+            },
+        )?;
+        self.last_streaming_upload_items = uploaded;
+        self.last_streaming_upload_ms = started.elapsed().as_secs_f64() * 1000.0;
+        self.last_streaming_commit_ms = 0.0;
+        if pending.work.is_empty() {
+            // Existing update logic reuses old per-instance model bindings and
+            // atomically publishes one consistent LOD hierarchy.
+            let commit_started = Instant::now();
+            self.replace_packages_prepared(pending.packages, true, pending.prepared_draws)?;
+            self.last_streaming_commit_ms = commit_started.elapsed().as_secs_f64() * 1000.0;
+        } else {
+            self.pending_streaming_upload = Some(pending);
+        }
+        Ok(())
     }
 
     pub fn set_package(&mut self, package: RenderPackage) -> RenderResult<()> {
@@ -2263,7 +2476,21 @@ impl SurfaceRenderer {
         packages: Vec<Arc<RenderPackage>>,
         preserve_camera: bool,
     ) -> RenderResult<()> {
+        let prepared = std::iter::repeat_with(|| None)
+            .take(packages.len())
+            .collect();
+        self.replace_packages_prepared(packages, preserve_camera, prepared)
+    }
+
+    fn replace_packages_prepared(
+        &mut self,
+        packages: Vec<Arc<RenderPackage>>,
+        preserve_camera: bool,
+        mut prepared_draws: Vec<Option<Vec<DrawInstance>>>,
+    ) -> RenderResult<()> {
         let started = Instant::now();
+        // An explicit synchronous load takes precedence over deferred updates.
+        self.pending_streaming_upload = None;
 
         if packages.is_empty() {
             self.packages.clear();
@@ -2309,10 +2536,15 @@ impl SurfaceRenderer {
         let mut new_draws = Vec::with_capacity(packages.len());
         for (index, package) in packages.iter().enumerate() {
             if previous_matches[index].is_some() {
-                // This exact package remained resident across updates. GPU
-                // eviction protects active packages, so its assets, textures
-                // and model bindings do not need to be rebuilt or revalidated.
+                // The exact package remained resident across updates.
                 new_draws.push(None);
+                continue;
+            }
+
+            if let Some(draws) = prepared_draws[index].take() {
+                // Model bindings were created during scheduled GPU work;
+                // publishing a complete scene must not rebuild them.
+                new_draws.push(Some(draws));
                 continue;
             }
 
@@ -2729,6 +2961,7 @@ impl SurfaceRenderer {
 
     pub fn render_frame(&mut self) -> RenderResult<()> {
         let started = Instant::now();
+        self.advance_streaming_uploads()?;
         if self.packages.is_empty() {
             return Err(RenderError::InvalidInput(
                 "native viewport has no loaded render packages".into(),
@@ -3726,6 +3959,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn streaming_upload_batch_limits_items_and_preserves_remaining_order() {
+        let mut work = VecDeque::from([1, 2, 3, 4, 5]);
+        let mut completed = Vec::new();
+        let count = process_streaming_upload_batch(&mut work, 2, Duration::from_secs(1), |item| {
+            completed.push(*item);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(completed, vec![1, 2]);
+        assert_eq!(work, VecDeque::from([3, 4, 5]));
+        assert_eq!(
+            process_streaming_upload_batch(&mut work, 2, Duration::ZERO, |_| Ok(())).unwrap(),
+            1,
+            "even a depleted time budget must allow one unit of progress"
+        );
+        assert_eq!(work, VecDeque::from([4, 5]));
+    }
+
+    #[test]
+    fn streaming_upload_failure_keeps_unprocessed_resource_in_queue() {
+        let mut work = VecDeque::from([1, 2, 3]);
+        let error = process_streaming_upload_batch(&mut work, 3, Duration::from_secs(1), |item| {
+            if *item == 2 {
+                return Err(RenderError::InvalidInput("bad resource".into()));
+            }
+            Ok(())
+        });
+        assert!(error.is_err());
+        assert_eq!(work, VecDeque::from([2, 3]));
+    }
+
+    #[test]
     fn gpu_only_uploads_textures_used_by_ready_assets() {
         use ragelab_engine::{RenderMaterialDescriptor, RenderSourceDescriptor};
         let asset = |state, texture_ref| RenderAssetDescriptor {
@@ -4149,6 +4415,12 @@ mod tests {
                 texture_keys: vec![new_texture.clone()],
             },
         );
+
+        let referenced = textures_referenced_by_assets(assets.values());
+        assert!(referenced.contains(&active_texture));
+        assert!(referenced.contains(&old_texture));
+        assert!(referenced.contains(&new_texture));
+        assert_eq!(referenced.len(), 3);
 
         let protected_assets = HashSet::from([active_asset]);
         let active_textures = HashSet::from([active_texture]);
