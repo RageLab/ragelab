@@ -415,12 +415,24 @@ pub fn ymap_entity_spatial_context(
         archetype_hash: entity.archetype_name.0,
     };
     let translation = [entity.position.x, entity.position.y, entity.position.z];
-    let rotation = [
-        entity.rotation.x,
-        entity.rotation.y,
-        entity.rotation.z,
-        entity.rotation.w,
-    ];
+    // GTA CEntityDef stores the inverse of the render orientation.
+    // CMloInstanceDef, unlike regular CEntityDef, stores it directly.
+    // CodeWalker YmapEntityDef constructors use the same distinction.
+    let rotation = if entity.is_mlo {
+        [
+            entity.rotation.x,
+            entity.rotation.y,
+            entity.rotation.z,
+            entity.rotation.w,
+        ]
+    } else {
+        [
+            -entity.rotation.x,
+            -entity.rotation.y,
+            -entity.rotation.z,
+            entity.rotation.w,
+        ]
+    };
     let scale = match (entity.scale_xy, entity.scale_z) {
         (Some(scale_xy), Some(scale_z)) => Some([scale_xy, scale_xy, scale_z]),
         (None, None) => None,
@@ -591,6 +603,45 @@ mod tests {
                 archetype_hash: 0xEF3D_BDA5,
             }
         );
+    }
+
+    #[test]
+    fn gta_regular_entity_quaternion_is_inverse_but_mlo_instance_is_not() {
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        let mut regular = entity([100.0, 200.0, 30.0]);
+        regular.is_mlo = false;
+        regular.rotation = ragelab_ymap::Quat {
+            x: 0.0,
+            y: 0.0,
+            z: half,
+            w: half,
+        };
+        let regular_transform =
+            ymap_entity_spatial_context(PathBuf::from("stream/map.ymap"), 7, &regular)
+                .world_transform
+                .unwrap();
+        assert_eq!(regular_transform.translation, [100.0, 200.0, 30.0]);
+        assert_eq!(regular_transform.rotation, [0.0, 0.0, -half, half]);
+
+        // GTA CMloInstanceDef stores the orientation without CEntityDef's
+        // inversion, even though its common placement fields are identical.
+        let mut mlo = regular;
+        mlo.is_mlo = true;
+        let mlo_transform = ymap_entity_spatial_context(PathBuf::from("stream/map.ymap"), 7, &mlo)
+            .world_transform
+            .unwrap();
+        assert_eq!(mlo_transform.rotation, [0.0, 0.0, half, half]);
+
+        let normal_position = rotate_vec3(
+            normalize_quat(regular_transform.rotation).unwrap(),
+            [2.0, 0.0, 0.0],
+        );
+        let mlo_position = rotate_vec3(
+            normalize_quat(mlo_transform.rotation).unwrap(),
+            [2.0, 0.0, 0.0],
+        );
+        assert!(normal_position[1] < -1.99);
+        assert!(mlo_position[1] > 1.99);
     }
 
     #[test]

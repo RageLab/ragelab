@@ -946,9 +946,9 @@ fn mlo_entity_transform(entity: &ragelab_ytyp::MloEntity) -> Option<SpatialTrans
     SpatialTransform::new(
         [entity.position.x, entity.position.y, entity.position.z],
         [
-            entity.rotation.x,
-            entity.rotation.y,
-            entity.rotation.z,
+            -entity.rotation.x,
+            -entity.rotation.y,
+            -entity.rotation.z,
             entity.rotation.w,
         ],
         scale,

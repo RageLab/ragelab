@@ -32,6 +32,9 @@ pub struct YmapEntity {
     pub archetype_name: MetaHash,
     pub position: Vec3,
     pub rotation: Quat,
+    /// CMloInstanceDef rotation is already a world orientation; CEntityDef
+    /// stores its inverse. Retain the structure kind to decode placement.
+    pub is_mlo: bool,
     pub scale_xy: Option<f32>,
     pub scale_z: Option<f32>,
     pub flags: u32,
@@ -975,6 +978,7 @@ fn parse_entity(structure: &MetaStructureInfo, bytes: &[u8]) -> Result<YmapEntit
 
     Ok(YmapEntity {
         archetype_name: MetaHash(archetype_name),
+        is_mlo: structure.name == MetaHash(jenkins("CMloInstanceDef")),
         flags,
         parent_index: if parent_index < 0 {
             None
