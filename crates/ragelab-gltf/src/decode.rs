@@ -13,7 +13,7 @@ const MAX_INDICES_PER_PRIMITIVE: usize = 6_000_000;
 const GEOMETRY_SCHEMA: &str = "ragelab.glb.geometry";
 const GLTF_TO_GTA_Z_UP: bool = true;
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DecodedGeometryReport {
     pub schema: &'static str,
@@ -26,7 +26,7 @@ pub struct DecodedGeometryReport {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DecodedPrimitive {
     pub node_index: usize,

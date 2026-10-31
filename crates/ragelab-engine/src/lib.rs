@@ -22,6 +22,7 @@ mod asset;
 mod catalog;
 mod discovery;
 mod game_index;
+mod glb;
 mod operations;
 mod preview;
 mod render;
@@ -35,6 +36,7 @@ pub use asset::*;
 pub use catalog::*;
 pub use discovery::*;
 pub use game_index::*;
+pub use glb::*;
 pub use operations::*;
 pub use preview::*;
 pub use render::*;
@@ -44,6 +46,13 @@ pub use spatial::*;
 pub use texture_authoring::*;
 pub use world_authoring::*;
 pub use world_stream::*;
+
+/// Git revision of the Core source used for this build ("unknown" outside a Git checkout).
+pub const CORE_REVISION: &str = env!("RAGELAB_CORE_REVISION");
+/// Whether the Core checkout contained tracked or untracked changes at build time.
+pub const CORE_DIRTY: bool = cfg!(ragelab_core_dirty);
+/// Compatibility generation for the public application-layer API consumed by adapters.
+pub const CORE_API_COMPATIBILITY_VERSION: u32 = 1;
 
 pub const DURTYFREE_OBJECT_LIST_URL: &str =
     "https://raw.githubusercontent.com/DurtyFree/gta-v-data-dumps/master/ObjectList.ini";

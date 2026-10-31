@@ -11,6 +11,9 @@ bincode = "1.3"
 ragelab-assets = { path = "../ragelab-assets" }
 ragelab-authoring = { path = "../ragelab-authoring" }
 ragelab-hash = { path = "../ragelab-hash" }
+ragelab-gltf = { path = "../ragelab-gltf" }
+sha2 = "0.10"
+ts-rs = "12.0.1"
 ragelab-meta = { path = "../ragelab-meta" }
 ragelab-resource = { path = "../ragelab-resource" }
 ragelab-rpf = { path = "../ragelab-rpf" }

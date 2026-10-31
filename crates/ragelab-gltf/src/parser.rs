@@ -53,7 +53,7 @@ impl From<serde_json::Error> for GlbError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct GlbInspectionReport {
     pub schema: &'static str,
@@ -75,14 +75,14 @@ pub struct GlbInspectionReport {
     pub unsupported_required_extensions: Vec<String>,
     pub warnings: Vec<String>,
 }
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceInfo {
     pub file_name: String,
     pub byte_length: usize,
     pub sha256: String,
 }
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ContainerInfo {
     pub version: u32,
@@ -91,13 +91,13 @@ pub struct ContainerInfo {
     pub binary_chunk_bytes: usize,
     pub unknown_chunks: Vec<UnknownChunkInfo>,
 }
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct UnknownChunkInfo {
     pub chunk_type: String,
     pub byte_length: usize,
 }
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetInfo {
     pub version: String,
@@ -105,14 +105,14 @@ pub struct AssetInfo {
     pub generator: Option<String>,
     pub copyright: Option<String>,
 }
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SceneInfo {
     pub index: usize,
     pub name: Option<String>,
     pub nodes: Vec<usize>,
 }
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeInfo {
     pub index: usize,
@@ -126,14 +126,14 @@ pub struct NodeInfo {
     pub scale: Option<Vec<f64>>,
     pub matrix: Option<Vec<f64>>,
 }
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshInfo {
     pub index: usize,
     pub name: Option<String>,
     pub primitives: Vec<PrimitiveInfo>,
 }
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PrimitiveInfo {
     pub index: usize,
@@ -145,7 +145,7 @@ pub struct PrimitiveInfo {
     pub morph_target_count: usize,
     pub extensions: Value,
 }
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AccessorInfo {
     pub index: usize,
@@ -158,7 +158,7 @@ pub struct AccessorInfo {
     pub sparse: bool,
     pub buffer_view_index: Option<usize>,
 }
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct MaterialInfo {
     pub index: usize,
@@ -183,17 +183,19 @@ pub struct MaterialInfo {
     pub unlit: bool,
     pub extensions: Value,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TextureBindingInfo {
     pub texture_index: usize,
     pub tex_coord: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
     pub scale: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
     pub strength: Option<f64>,
 }
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TextureInfo {
     pub index: usize,
@@ -202,7 +204,7 @@ pub struct TextureInfo {
     pub sampler_index: Option<usize>,
     pub extensions: Value,
 }
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageInfo {
     pub index: usize,
@@ -215,13 +217,13 @@ pub struct ImageInfo {
     pub dimensions: Option<ImageDimensions>,
     pub embedded: bool,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageDimensions {
     pub width: u32,
     pub height: u32,
 }
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SamplerInfo {
     pub index: usize,
@@ -231,7 +233,7 @@ pub struct SamplerInfo {
     pub wrap_s: u32,
     pub wrap_t: u32,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct GlbCounts {
     pub scenes: usize,
@@ -245,7 +247,7 @@ pub struct GlbCounts {
     pub accessors: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GtaAuthoringProfile {
     pub schema: String,
@@ -254,7 +256,7 @@ pub struct GtaAuthoringProfile {
     pub settings: ExportSettings,
     pub materials: Vec<MaterialAuthoringSettings>,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProfileSource {
     pub file_name: String,
@@ -263,7 +265,7 @@ pub struct ProfileSource {
     pub material_count: usize,
     pub texture_count: usize,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExportSettings {
     pub target: String,
@@ -272,7 +274,7 @@ pub struct ExportSettings {
     pub texture_encoding: TextureEncoding,
     pub normal_map_convention: NormalMapConvention,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum TextureEncoding {
     Auto,
@@ -280,13 +282,13 @@ pub enum TextureEncoding {
     Bc3,
     Rgba8,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum NormalMapConvention {
     OpenGl,
     DirectX,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MaterialAuthoringSettings {
     pub source_material_index: usize,
@@ -296,14 +298,14 @@ pub struct MaterialAuthoringSettings {
     pub texture_roles: TextureRoleMap,
     pub parameters: MaterialParameters,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ShaderIntent {
     Lit,
     Unlit,
     Emissive,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum SurfaceMode {
     Opaque,
@@ -311,7 +313,7 @@ pub enum SurfaceMode {
     Blended,
     Glass,
 }
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TextureRoleMap {
     pub albedo: Option<TextureBindingInfo>,
@@ -323,7 +325,7 @@ pub struct TextureRoleMap {
     pub occlusion: Option<TextureBindingInfo>,
     pub emissive: Option<TextureBindingInfo>,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MaterialParameters {
     pub base_color_factor: [f64; 4],
@@ -336,7 +338,7 @@ pub struct MaterialParameters {
     pub transmission_factor: Option<f64>,
     pub ior: Option<f64>,
 }
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileValidationReport {
     pub schema: &'static str,

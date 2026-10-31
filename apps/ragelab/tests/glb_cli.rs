@@ -1278,7 +1278,8 @@ fn glb_profile_cli_creates_and_validates_versioned_sidecar() {
 
     assert!(
         validated.status.success(),
-        "{}",
+        "stdout: {}\\nstderr: {}",
+        String::from_utf8_lossy(&validated.stdout),
         String::from_utf8_lossy(&validated.stderr)
     );
     let validation_body = stdout_json(&validated);
