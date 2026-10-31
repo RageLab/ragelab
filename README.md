@@ -26,6 +26,7 @@ RageLab currently contains Rust support for:
 - YBN
 - YDR
 - YDD
+- GLB 2.0 input (inspection, static geometry decoding, embedded PNG extraction and YDR v165 export with optional exact Legacy `normal.sps`, `spec.sps`, `normal_spec_tnt.sps`, `emissivenight.sps` or `emissive.sps` cloning from an external YFT/YDR; narrow sampler/material bindings including optional `tintPalette` and emissiveFactor/Strength, full PBR and GTA runtime renderability not established)
 
 Current writer coverage is intentionally narrower than reader coverage. Each writer operation is gated by format-specific validation and provenance requirements.
 
@@ -41,6 +42,12 @@ The primary automation flow is:
 
 ```bash
 ragelab inspect asset.ydr --json
+ragelab glb inspect model.glb --json
+ragelab glb geometry model.glb --json
+ragelab glb profile init model.glb --output model.gta-materials.json
+ragelab glb profile validate model.glb model.gta-materials.json --json
+ragelab glb export model.glb --profile model.gta-materials.json --output model.ydr --json
+ragelab glb export model.glb --profile model.gta-materials.json --shader-template template.yft --shader-index 0 --output model.ydr --json
 ragelab capabilities asset.ydr --json
 ragelab spatial asset.ydr --json
 ragelab preview asset.ydr --json
@@ -76,7 +83,7 @@ ragelab capabilities --json
 
 Legacy flat command names remain available as compatibility aliases during the 0.x series. New integrations should use the canonical namespace form.
 
-Structured commands return versioned JSON and deterministic process exit codes. The contract is documented in [docs/CLI_CONTRACT.md](docs/CLI_CONTRACT.md), native game discovery in [docs/DISCOVERY.md](docs/DISCOVERY.md), GTA catalog coverage in [docs/CATALOG.md](docs/CATALOG.md), headless preview behavior in [docs/PREVIEW.md](docs/PREVIEW.md), workspace export behavior in [docs/EXPORT.md](docs/EXPORT.md), and current format/adapter coverage in [docs/CAPABILITIES.md](docs/CAPABILITIES.md).
+Structured commands return versioned JSON and deterministic process exit codes. The contract is documented in [docs/CLI_CONTRACT.md](docs/CLI_CONTRACT.md), native game discovery in [docs/DISCOVERY.md](docs/DISCOVERY.md), GTA catalog coverage in [docs/CATALOG.md](docs/CATALOG.md), headless preview behavior in [docs/PREVIEW.md](docs/PREVIEW.md), workspace export behavior in [docs/EXPORT.md](docs/EXPORT.md), current format/adapter coverage in [docs/CAPABILITIES.md](docs/CAPABILITIES.md), and the initial GLB import/material-authoring workflow in [docs/GLB_IMPORT.md](docs/GLB_IMPORT.md).
 
 ## Repository layout
 
@@ -86,6 +93,7 @@ apps/
 
 crates/
   ragelab-engine/    transport-neutral application policy
+  ragelab-gltf/      GLB 2.0 inspection, geometry decoding, PNG extraction and material profiles
   ragelab-assets/    workspace indexing, dependency resolution, export
   ragelab-resource/  RSC7 container support
   ragelab-meta/      META primitives

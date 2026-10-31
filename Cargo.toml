@@ -17,6 +17,7 @@ members = [
     "crates/ragelab-ymf",
     "crates/ragelab-ydr",
     "crates/ragelab-yft",
+    "crates/ragelab-gltf",
     "crates/ragelab-ydd",
     "crates/ragelab-ybn",
     "crates/ragelab-wasm",

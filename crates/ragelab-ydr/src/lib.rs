@@ -1,13 +1,19 @@
-//! Geometry-focused GTA V PC YDR reader.
+//! GTA V PC YDR v165 reader and structural writer.
 //!
-//! This crate intentionally exposes a renderer-neutral model rather than the
-//! raw RAGE drawable object graph. The current scope is static mesh preview:
-//! Drawable -> selected LOD -> models -> geometries -> vertex/index buffers.
+//! The writer builds static Drawables, embeds Legacy TextureDictionary payloads
+//! and can clone typed ShaderFX/TextureBase records supplied by a parsed Legacy
+//! resource. Structural round-trip validation is not a claim of game renderability.
 
 use std::{error::Error, fmt, sync::Arc};
 
 use ragelab_resource::{ResourceError, Rsc7Resource, SYSTEM_BASE};
 use ragelab_ytd::{YtdDictionary, YtdError};
+
+mod writer;
+pub use writer::{
+    build_geometry_only_ydr, build_ydr_with_embedded_textures,
+    build_ydr_with_embedded_textures_and_shaders, YdrGeometryInput, YdrTextureInput,
+};
 
 const SUPPORTED_VERSION: u32 = 165;
 const YDR_ROOT_SIZE: usize = 0xD0;
@@ -122,9 +128,60 @@ pub struct ShaderTextureReference {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextureBaseInfo {
+    pub vft: u32,
+    pub unknown_4: u32,
+    pub unknown_8: u32,
+    pub unknown_c: u32,
+    pub unknown_10: u32,
+    pub unknown_14: u32,
+    pub unknown_18: u32,
+    pub unknown_1c: u32,
+    pub unknown_20: u32,
+    pub unknown_24: u32,
+    pub unknown_30: u16,
+    pub unknown_32: u16,
+    pub unknown_34: u32,
+    pub unknown_38: u32,
+    pub unknown_3c: u32,
+    pub usage_data: u32,
+    pub unknown_44: u32,
+    pub extra_flags: u32,
+    pub unknown_4c: u32,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShaderParameterInfo {
+    pub parameter_hash: u32,
+    /// Legacy ShaderFX parameter type: 0 = Texture, 1 = Vector4, N = N Vector4 values.
+    pub data_type: u8,
+    pub unknown_1: u8,
+    pub unknown_2: u16,
+    pub unknown_4: u32,
+    /// TextureBase name when data_type is zero.
+    pub texture_name: Option<String>,
+    pub texture_base: Option<TextureBaseInfo>,
+    /// Exact IEEE-754 bit patterns, grouped in Vector4 values. Empty for textures.
+    pub vector_data: Vec<[u32; 4]>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ShaderInfo {
     pub name_hash: u32,
+    pub unknown_0c: u32,
     pub file_hash: u32,
+    pub unknown_12: u16,
+    pub unknown_1c: u32,
+    pub unknown_24: u16,
+    pub unknown_26: u8,
+    pub unknown_28: u64,
+    pub render_bucket: u8,
+    pub parameter_size: u16,
+    pub parameter_data_size: u16,
+    pub render_bucket_mask: u32,
+    pub texture_parameters_count: u8,
+    pub parameters: Vec<ShaderParameterInfo>,
     pub texture_references: Vec<ShaderTextureReference>,
 }
 
@@ -152,7 +209,10 @@ pub struct MeshPrimitive {
     pub topology: PrimitiveTopology,
     pub positions: Vec<[f32; 3]>,
     pub normals: Option<Vec<[f32; 3]>>,
+    pub tangents: Option<Vec<[f32; 4]>>,
+    pub colors0: Option<Vec<[f32; 4]>>,
     pub uv0: Option<Vec<[f32; 2]>>,
+    pub uv1: Option<Vec<[f32; 2]>>,
     pub indices: Vec<u32>,
     pub declaration: VertexDeclarationSummary,
 }
@@ -931,6 +991,38 @@ fn parse_shader_group(resource: &Rsc7Resource, pointer: u64) -> Result<Vec<Shade
     Ok(shaders)
 }
 
+fn parse_texture_base(resource: &Rsc7Resource, pointer: u64) -> Result<TextureBaseInfo, YdrError> {
+    resource.bytes_at(pointer, 0x50)?;
+    let name_pointer = resource.read_u64(pointer + 0x28)?;
+    let name = if name_pointer == 0 {
+        None
+    } else {
+        Some(resource.read_c_string(name_pointer, MAX_NAME_LENGTH)?)
+    };
+    Ok(TextureBaseInfo {
+        vft: resource.read_u32(pointer)?,
+        unknown_4: resource.read_u32(pointer + 0x04)?,
+        unknown_8: resource.read_u32(pointer + 0x08)?,
+        unknown_c: resource.read_u32(pointer + 0x0c)?,
+        unknown_10: resource.read_u32(pointer + 0x10)?,
+        unknown_14: resource.read_u32(pointer + 0x14)?,
+        unknown_18: resource.read_u32(pointer + 0x18)?,
+        unknown_1c: resource.read_u32(pointer + 0x1c)?,
+        unknown_20: resource.read_u32(pointer + 0x20)?,
+        unknown_24: resource.read_u32(pointer + 0x24)?,
+        unknown_30: resource.read_u16(pointer + 0x30)?,
+        unknown_32: resource.read_u16(pointer + 0x32)?,
+        unknown_34: resource.read_u32(pointer + 0x34)?,
+        unknown_38: resource.read_u32(pointer + 0x38)?,
+        unknown_3c: resource.read_u32(pointer + 0x3c)?,
+        usage_data: resource.read_u32(pointer + 0x40)?,
+        unknown_44: resource.read_u32(pointer + 0x44)?,
+        extra_flags: resource.read_u32(pointer + 0x48)?,
+        unknown_4c: resource.read_u32(pointer + 0x4c)?,
+        name,
+    })
+}
+
 fn parse_shader(
     resource: &Rsc7Resource,
     pointer: u64,
@@ -945,14 +1037,37 @@ fn parse_shader(
 
     let parameters_pointer = resource.read_u64(pointer)?;
     let name_hash = resource.read_u32(pointer + 0x08)?;
+    let unknown_0c = resource.read_u32(pointer + 0x0c)?;
+    let unknown_12 = resource.read_u16(pointer + 0x12)?;
+    let unknown_1c = resource.read_u32(pointer + 0x1c)?;
+    let unknown_24 = resource.read_u16(pointer + 0x24)?;
+    let unknown_26 = resource.read_u8(pointer + 0x26)?;
+    let unknown_28 = resource.read_u64(pointer + 0x28)?;
     let parameter_count = usize::from(resource.read_u8(pointer + 0x10)?);
+    let render_bucket = resource.read_u8(pointer + 0x11)?;
+    let parameter_size = resource.read_u16(pointer + 0x14)?;
+    let parameter_data_size = resource.read_u16(pointer + 0x16)?;
     let file_hash = resource.read_u32(pointer + 0x18)?;
+    let render_bucket_mask = resource.read_u32(pointer + 0x20)?;
+    let texture_parameters_count = resource.read_u8(pointer + 0x27)?;
     validate_count("shader parameter", parameter_count, MAX_SHADER_PARAMETERS)?;
 
     if parameter_count == 0 {
         return Ok(ShaderInfo {
             name_hash,
+            unknown_0c,
             file_hash,
+            unknown_12,
+            unknown_1c,
+            unknown_24,
+            unknown_26,
+            unknown_28,
+            render_bucket,
+            parameter_size,
+            parameter_data_size,
+            render_bucket_mask,
+            texture_parameters_count,
+            parameters: Vec::new(),
             texture_references: Vec::new(),
         });
     }
@@ -964,13 +1079,16 @@ fn parse_shader(
 
     let descriptor_bytes = checked_mul(parameter_count, 16, "shader parameter descriptors")?;
     resource.bytes_at(parameters_pointer, descriptor_bytes)?;
-    let mut parameters = Vec::with_capacity(parameter_count);
+    let mut descriptors = Vec::with_capacity(parameter_count);
     let mut embedded_vector_bytes = 0_usize;
     for parameter_index in 0..parameter_count {
         let descriptor = parameters_pointer
             .checked_add(checked_mul(parameter_index, 16, "shader parameter index")? as u64)
             .ok_or_else(|| YdrError::Malformed("shader parameter address overflow".into()))?;
         let data_type = resource.read_u8(descriptor)?;
+        let unknown_1 = resource.read_u8(descriptor + 0x01)?;
+        let unknown_2 = resource.read_u16(descriptor + 0x02)?;
+        let unknown_4 = resource.read_u32(descriptor + 0x04)?;
         let data_pointer = resource.read_u64(descriptor + 0x08)?;
         embedded_vector_bytes = embedded_vector_bytes
             .checked_add(checked_mul(
@@ -979,7 +1097,7 @@ fn parse_shader(
                 "shader embedded parameter data",
             )?)
             .ok_or_else(|| YdrError::Malformed("shader parameter data size overflow".into()))?;
-        parameters.push((data_type, data_pointer));
+        descriptors.push((data_type, unknown_1, unknown_2, unknown_4, data_pointer));
     }
 
     let hash_pointer = parameters_pointer
@@ -988,36 +1106,90 @@ fn parse_shader(
         .ok_or_else(|| YdrError::Malformed("shader parameter hash address overflow".into()))?;
     let hash_bytes = checked_mul(parameter_count, 4, "shader parameter hashes")?;
     resource.bytes_at(hash_pointer, hash_bytes)?;
+    let required_block_bytes = descriptor_bytes
+        .checked_add(embedded_vector_bytes)
+        .and_then(|value| value.checked_add(hash_bytes))
+        .ok_or_else(|| YdrError::Malformed("shader parameter block size overflow".into()))?;
+    if parameter_data_size != 0 && usize::from(parameter_data_size) < required_block_bytes {
+        return Err(YdrError::Malformed(format!(
+            "shader {shader_index} parameter data size {} is smaller than the decoded minimum {required_block_bytes}",
+            parameter_data_size
+        )));
+    }
 
+    let mut parameters = Vec::with_capacity(parameter_count);
     let mut texture_references = Vec::new();
-    for (parameter_index, (data_type, data_pointer)) in parameters.into_iter().enumerate() {
-        if data_type != 0 {
-            continue;
-        }
+    for (parameter_index, (data_type, unknown_1, unknown_2, unknown_4, data_pointer)) in
+        descriptors.into_iter().enumerate()
+    {
         let parameter_hash_address = hash_pointer
             .checked_add(checked_mul(parameter_index, 4, "shader parameter hash index")? as u64)
             .ok_or_else(|| YdrError::Malformed("shader parameter hash overflow".into()))?;
         let parameter_hash = resource.read_u32(parameter_hash_address)?;
-        let texture_name = if data_pointer == 0 {
-            None
-        } else {
-            resource.bytes_at(data_pointer, 0x50)?;
-            let name_pointer = resource.read_u64(data_pointer + 0x28)?;
-            if name_pointer == 0 {
+
+        let (texture_name, texture_base, vector_data) = if data_type == 0 {
+            let texture_base = if data_pointer == 0 {
                 None
             } else {
-                Some(resource.read_c_string(name_pointer, MAX_NAME_LENGTH)?)
+                Some(parse_texture_base(resource, data_pointer)?)
+            };
+            let texture_name = texture_base.as_ref().and_then(|base| base.name.clone());
+            texture_references.push(ShaderTextureReference {
+                parameter_hash,
+                texture_name: texture_name.clone(),
+            });
+            (texture_name, texture_base, Vec::new())
+        } else {
+            if data_pointer == 0 {
+                return Err(YdrError::Malformed(format!(
+                    "shader {shader_index} vector parameter {parameter_index} has a null data pointer"
+                )));
             }
+            let vector_count = usize::from(data_type);
+            let vector_bytes = checked_mul(vector_count, 16, "shader parameter vector payload")?;
+            resource.bytes_at(data_pointer, vector_bytes)?;
+            let mut vectors = Vec::with_capacity(vector_count);
+            for vector_index in 0..vector_count {
+                let vector_pointer = data_pointer
+                    .checked_add(checked_mul(vector_index, 16, "shader vector index")? as u64)
+                    .ok_or_else(|| YdrError::Malformed("shader vector address overflow".into()))?;
+                vectors.push([
+                    resource.read_u32(vector_pointer)?,
+                    resource.read_u32(vector_pointer + 4)?,
+                    resource.read_u32(vector_pointer + 8)?,
+                    resource.read_u32(vector_pointer + 12)?,
+                ]);
+            }
+            (None, None, vectors)
         };
-        texture_references.push(ShaderTextureReference {
+
+        parameters.push(ShaderParameterInfo {
             parameter_hash,
+            data_type,
+            unknown_1,
+            unknown_2,
+            unknown_4,
             texture_name,
+            texture_base,
+            vector_data,
         });
     }
 
     Ok(ShaderInfo {
         name_hash,
+        unknown_0c,
         file_hash,
+        unknown_12,
+        unknown_1c,
+        unknown_24,
+        unknown_26,
+        unknown_28,
+        render_bucket,
+        parameter_size,
+        parameter_data_size,
+        render_bucket_mask,
+        texture_parameters_count,
+        parameters,
         texture_references,
     })
 }
@@ -1580,6 +1752,34 @@ fn parse_geometry(
         _ => None,
     };
 
+    let colors0 = match declaration.attributes[4] {
+        Some(attribute) if attribute.component_type == 7 => {
+            let mut values = Vec::with_capacity(vertex_count);
+            for vertex_index in 0..vertex_count {
+                values.push(read_vertex_vec4(
+                    vertex_bytes,
+                    vertex_index,
+                    usize::from(stride),
+                    attribute.offset,
+                )?);
+            }
+            Some(values)
+        }
+        Some(attribute) if attribute.component_type == 9 => {
+            let mut values = Vec::with_capacity(vertex_count);
+            for vertex_index in 0..vertex_count {
+                values.push(read_vertex_color_rgba8(
+                    vertex_bytes,
+                    vertex_index,
+                    usize::from(stride),
+                    attribute.offset,
+                )?);
+            }
+            Some(values)
+        }
+        _ => None,
+    };
+
     let uv0 = match declaration.attributes[6] {
         Some(attribute) if attribute.component_type == 5 => {
             let mut values = Vec::with_capacity(vertex_count);
@@ -1597,6 +1797,56 @@ fn parse_geometry(
             let mut values = Vec::with_capacity(vertex_count);
             for vertex_index in 0..vertex_count {
                 values.push(read_vertex_half2(
+                    vertex_bytes,
+                    vertex_index,
+                    usize::from(stride),
+                    attribute.offset,
+                )?);
+            }
+            Some(values)
+        }
+        _ => None,
+    };
+
+    let uv1 = match declaration.attributes[7] {
+        Some(attribute) if attribute.component_type == 5 => {
+            let mut values = Vec::with_capacity(vertex_count);
+            for vertex_index in 0..vertex_count {
+                values.push(read_vertex_vec2(
+                    vertex_bytes,
+                    vertex_index,
+                    usize::from(stride),
+                    attribute.offset,
+                )?);
+            }
+            Some(values)
+        }
+        Some(attribute) if attribute.component_type == 1 => {
+            let mut values = Vec::with_capacity(vertex_count);
+            for vertex_index in 0..vertex_count {
+                values.push(read_vertex_half2(
+                    vertex_bytes,
+                    vertex_index,
+                    usize::from(stride),
+                    attribute.offset,
+                )?);
+            }
+            Some(values)
+        }
+        Some(attribute) => {
+            return Err(YdrError::Unsupported(format!(
+                "TEXCOORD_1 component type {} is unsupported",
+                attribute.component_type
+            )))
+        }
+        None => None,
+    };
+
+    let tangents = match declaration.attributes[14] {
+        Some(attribute) if attribute.component_type == 7 => {
+            let mut values = Vec::with_capacity(vertex_count);
+            for vertex_index in 0..vertex_count {
+                values.push(read_vertex_vec4(
                     vertex_bytes,
                     vertex_index,
                     usize::from(stride),
@@ -1628,7 +1878,10 @@ fn parse_geometry(
         topology: PrimitiveTopology::TriangleList,
         positions,
         normals,
+        tangents,
+        colors0,
         uv0,
+        uv1,
         indices,
         declaration: declaration.summary,
     })
@@ -1988,6 +2241,36 @@ fn read_vertex_vec2(
     Ok([
         f32::from_le_bytes(slice[0..4].try_into().expect("four bytes")),
         f32::from_le_bytes(slice[4..8].try_into().expect("four bytes")),
+    ])
+}
+
+fn read_vertex_color_rgba8(
+    bytes: &[u8],
+    vertex_index: usize,
+    stride: usize,
+    attribute_offset: usize,
+) -> Result<[f32; 4], YdrError> {
+    let slice = vertex_attribute(bytes, vertex_index, stride, attribute_offset, 4)?;
+    Ok([
+        f32::from(slice[0]) / 255.0,
+        f32::from(slice[1]) / 255.0,
+        f32::from(slice[2]) / 255.0,
+        f32::from(slice[3]) / 255.0,
+    ])
+}
+
+fn read_vertex_vec4(
+    bytes: &[u8],
+    vertex_index: usize,
+    stride: usize,
+    attribute_offset: usize,
+) -> Result<[f32; 4], YdrError> {
+    let slice = vertex_attribute(bytes, vertex_index, stride, attribute_offset, 16)?;
+    Ok([
+        f32::from_le_bytes(slice[0..4].try_into().expect("four bytes")),
+        f32::from_le_bytes(slice[4..8].try_into().expect("four bytes")),
+        f32::from_le_bytes(slice[8..12].try_into().expect("four bytes")),
+        f32::from_le_bytes(slice[12..16].try_into().expect("four bytes")),
     ])
 }
 
@@ -2494,6 +2777,7 @@ mod tests {
                     texture_name: Some("primary_albedo".into()),
                 },
             ],
+            ..ShaderInfo::default()
         };
         assert_eq!(shader.diffuse_texture_name(), Some("primary_albedo"));
 
@@ -2504,6 +2788,7 @@ mod tests {
                 parameter_hash: TEXTURE_SAMPLER_PARAMETER_HASH,
                 texture_name: Some("legacy_albedo".into()),
             }],
+            ..ShaderInfo::default()
         };
         assert_eq!(fallback.diffuse_texture_name(), Some("legacy_albedo"));
     }
@@ -2518,31 +2803,123 @@ mod tests {
             write_u16(system, 0x380 + 0x1a, 1);
             write_u64(system, 0x3c0, ptr(0x3d0));
 
-            // One ShaderFX with one texture parameter.
+            // ShaderFX with one Texture parameter, one Vector4 and an array of two Vector4 values.
             write_u64(system, 0x3d0, ptr(0x400));
             write_u32(system, 0x3d0 + 0x08, 0x1111_2222);
-            system[0x3d0 + 0x10] = 1;
+            system[0x3d0 + 0x10] = 3;
+            system[0x3d0 + 0x11] = 2;
+            write_u16(system, 0x3d0 + 0x14, 96);
+            write_u16(system, 0x3d0 + 0x16, 144);
             write_u32(system, 0x3d0 + 0x18, 0x3333_4444);
+            write_u32(system, 0x3d0 + 0x20, 0x0000_ff04);
             system[0x3d0 + 0x27] = 1;
 
-            // ShaderParameter descriptor + parameter-name hash.
-            system[0x400] = 0; // texture parameter
-            write_u64(system, 0x408, ptr(0x440));
-            write_u32(system, 0x410, 0x5555_6666);
+            // Texture descriptor at 0x400.
+            system[0x400] = 0;
+            system[0x401] = 2;
+            write_u16(system, 0x402, 0x0203);
+            write_u32(system, 0x404, 0x0405_0607);
+            write_u64(system, 0x408, ptr(0x480));
+
+            // Vector4 descriptor at 0x410; its payload follows all descriptors.
+            system[0x410] = 1;
+            system[0x411] = 7;
+            write_u16(system, 0x412, 0x0809);
+            write_u32(system, 0x414, 0x0a0b_0c0d);
+            write_u64(system, 0x418, ptr(0x430));
+
+            // Vector4 array descriptor at 0x420.
+            system[0x420] = 2;
+            system[0x421] = 9;
+            write_u16(system, 0x422, 0x0a0b);
+            write_u32(system, 0x424, 0x0c0d_0e0f);
+            write_u64(system, 0x428, ptr(0x440));
+
+            // Embedded Vector4 data blocks and their trailing hash table.
+            write_u32(system, 0x430, 0.25f32.to_bits());
+            write_u32(system, 0x434, 0.5f32.to_bits());
+            write_u32(system, 0x438, 2.0f32.to_bits());
+            write_u32(system, 0x43c, 1.0f32.to_bits());
+            write_u32(system, 0x440, (-1.0f32).to_bits());
+            write_u32(system, 0x444, 2.5f32.to_bits());
+            write_u32(system, 0x448, 0.0f32.to_bits());
+            write_u32(system, 0x44c, 0.0f32.to_bits());
+            write_u32(system, 0x450, 0.25f32.to_bits());
+            write_u32(system, 0x454, 0.5f32.to_bits());
+            write_u32(system, 0x458, 0.75f32.to_bits());
+            write_u32(system, 0x45c, 1.0f32.to_bits());
+            write_u32(system, 0x460, 0x5555_6666);
+            write_u32(system, 0x464, 0x7777_8888);
+            write_u32(system, 0x468, 0x9999_aaaa);
 
             // External TextureBase reference.
-            write_u64(system, 0x440 + 0x28, ptr(0x490));
-            system[0x490..0x49d].copy_from_slice(b"test_diffuse\0");
+            write_u64(system, 0x480 + 0x28, ptr(0x4b0));
+            system[0x4b0..0x4bd].copy_from_slice(b"test_diffuse\0");
 
             // Geometry 0 -> shader 0.
-            write_u64(system, 0x0f0 + 0x20, ptr(0x4b0));
-            write_u16(system, 0x4b0, 0);
+            write_u64(system, 0x0f0 + 0x20, ptr(0x520));
+            write_u16(system, 0x520, 0);
         });
 
         let model = YdrModel::from_bytes(&bytes).expect("valid shader-linked YDR");
         assert_eq!(model.shaders.len(), 1);
         assert_eq!(model.shaders[0].name_hash, 0x1111_2222);
         assert_eq!(model.shaders[0].file_hash, 0x3333_4444);
+        assert_eq!(model.shaders[0].render_bucket, 2);
+        assert_eq!(model.shaders[0].parameter_size, 96);
+        assert_eq!(model.shaders[0].parameter_data_size, 144);
+        assert_eq!(model.shaders[0].render_bucket_mask, 0x0000_ff04);
+        assert_eq!(model.shaders[0].texture_parameters_count, 1);
+        assert_eq!(model.shaders[0].parameters.len(), 3);
+        assert_eq!(model.shaders[0].parameters[0].data_type, 0);
+        assert_eq!(model.shaders[0].parameters[0].unknown_1, 2);
+        assert_eq!(model.shaders[0].parameters[0].unknown_2, 0x0203);
+        assert_eq!(model.shaders[0].parameters[0].unknown_4, 0x0405_0607);
+        assert_eq!(model.shaders[0].parameters[0].parameter_hash, 0x5555_6666);
+        assert_eq!(
+            model.shaders[0].parameters[0].texture_name.as_deref(),
+            Some("test_diffuse")
+        );
+        assert_eq!(
+            model.shaders[0].parameters[0].vector_data,
+            Vec::<[u32; 4]>::new()
+        );
+        assert_eq!(model.shaders[0].parameters[1].data_type, 1);
+        assert_eq!(model.shaders[0].parameters[1].unknown_1, 7);
+        assert_eq!(model.shaders[0].parameters[1].unknown_2, 0x0809);
+        assert_eq!(model.shaders[0].parameters[1].unknown_4, 0x0a0b_0c0d);
+        assert_eq!(model.shaders[0].parameters[1].parameter_hash, 0x7777_8888);
+        assert_eq!(
+            model.shaders[0].parameters[1].vector_data,
+            vec![[
+                0.25f32.to_bits(),
+                0.5f32.to_bits(),
+                2.0f32.to_bits(),
+                1.0f32.to_bits()
+            ]]
+        );
+        assert_eq!(model.shaders[0].parameters[2].data_type, 2);
+        assert_eq!(model.shaders[0].parameters[2].unknown_1, 9);
+        assert_eq!(model.shaders[0].parameters[2].unknown_2, 0x0a0b);
+        assert_eq!(model.shaders[0].parameters[2].unknown_4, 0x0c0d_0e0f);
+        assert_eq!(model.shaders[0].parameters[2].parameter_hash, 0x9999_aaaa);
+        assert_eq!(
+            model.shaders[0].parameters[2].vector_data,
+            vec![
+                [
+                    (-1.0f32).to_bits(),
+                    2.5f32.to_bits(),
+                    0.0f32.to_bits(),
+                    0.0f32.to_bits()
+                ],
+                [
+                    0.25f32.to_bits(),
+                    0.5f32.to_bits(),
+                    0.75f32.to_bits(),
+                    1.0f32.to_bits()
+                ]
+            ]
+        );
         assert_eq!(model.shaders[0].texture_references.len(), 1);
         assert_eq!(
             model.shaders[0].texture_references[0].parameter_hash,

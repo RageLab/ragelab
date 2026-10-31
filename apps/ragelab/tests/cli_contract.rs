@@ -199,6 +199,18 @@ fn global_capabilities_preserve_legacy_ids_and_advertise_canonical_ids() {
     assert!(commands.iter().any(|value| value == "ydr-info"));
     assert!(commands.iter().any(|value| value == "ydr.info"));
     assert!(canonical.iter().any(|value| value == "ydr.info"));
+    assert!(canonical.iter().any(|value| value == "glb.inspect"));
+    assert!(canonical.iter().any(|value| value == "glb.profile.init"));
+    assert!(canonical
+        .iter()
+        .any(|value| value == "glb.profile.validate"));
+    for command in ["glb.inspect", "glb.profile.init", "glb.profile.validate"] {
+        assert!(body["structuredOutput"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == command));
+    }
     assert!(canonical.iter().any(|value| value == "spatial"));
     assert!(canonical.iter().any(|value| value == "preview"));
     assert!(canonical.iter().any(|value| value == "workspace.preflight"));
@@ -1164,7 +1176,7 @@ fn ydr_preview_is_structured_renderer_neutral_and_bounded() {
     let output = binary()
         .args([
             "preview",
-            fixture("ydr/editable.ydr").to_str().unwrap(),
+            fixture("ydr/embedded.ydr").to_str().unwrap(),
             "--json",
         ])
         .output()
@@ -1190,7 +1202,36 @@ fn ydr_preview_is_structured_renderer_neutral_and_bounded() {
     );
     assert_eq!(
         body["data"]["preview"]["shaders"][0]["textureReferences"][0]["textureName"],
-        "test_diffuse"
+        "embedded_diff"
+    );
+    assert_eq!(body["data"]["preview"]["shaders"][0]["parameterCount"], 2);
+    assert_eq!(
+        body["data"]["preview"]["shaders"][0]["parameterDataSize"],
+        96
+    );
+    assert_eq!(
+        body["data"]["preview"]["shaders"][0]["parameters"][0]["textureBase"]["name"],
+        "embedded_diff"
+    );
+    assert_eq!(
+        body["data"]["preview"]["shaders"][0]["textureParametersCount"],
+        1
+    );
+    assert_eq!(
+        body["data"]["preview"]["shaders"][0]["parameters"][1]["parameterHash"],
+        "0xA11CE001"
+    );
+    assert_eq!(
+        body["data"]["preview"]["shaders"][0]["parameters"][1]["dataType"],
+        1
+    );
+    assert_eq!(
+        body["data"]["preview"]["shaders"][0]["parameters"][1]["vectors"][0]["values"],
+        json!([1.0, 0.5, 0.25, 1.0])
+    );
+    assert_eq!(
+        body["data"]["preview"]["shaders"][0]["parameters"][1]["vectors"][0]["bits"][0],
+        "0x3F800000"
     );
 
     let bounded = binary()

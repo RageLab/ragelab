@@ -161,15 +161,28 @@ def add_embedded_diffuse_layout(system: bytearray) -> None:
     write_u16(system, 0x380 + 0x1A, 1)
     write_u64(system, 0x3C0, pointer(0x3D0))
 
-    # One ShaderFX with one texture parameter using the proven DiffuseSampler hash.
+    # One ShaderFX with a diffuse texture parameter and one Vector4 parameter.
     write_u64(system, 0x3D0, pointer(0x400))
     write_u32(system, 0x3D0 + 0x08, 0x1111_2222)
-    system[0x3D0 + 0x10] = 1
+    system[0x3D0 + 0x10] = 2
+    system[0x3D0 + 0x11] = 2
+    write_u16(system, 0x3D0 + 0x14, 48)
+    write_u16(system, 0x3D0 + 0x16, 96)
     write_u32(system, 0x3D0 + 0x18, 0x3333_4444)
+    write_u32(system, 0x3D0 + 0x20, 0x0000_FF04)
     system[0x3D0 + 0x27] = 1
-    system[0x400] = 0
+
+    # Two 16-byte ShaderParameter descriptors precede the Vector4 payload.
+    system[0x400] = 0  # Texture
     write_u64(system, 0x408, pointer(0x440))
-    write_u32(system, 0x410, 0xF1FE_2B71)
+    system[0x410] = 1  # Vector4
+    write_u64(system, 0x418, pointer(0x420))
+    write_f32(system, 0x420, 1.0)
+    write_f32(system, 0x424, 0.5)
+    write_f32(system, 0x428, 0.25)
+    write_f32(system, 0x42C, 1.0)
+    write_u32(system, 0x430, 0xF1FE_2B71)  # DiffuseSampler
+    write_u32(system, 0x434, 0xA11C_E001)  # synthetic vector parameter
     write_u64(system, 0x440 + 0x28, pointer(0x620))
 
     # Geometry 0 uses shader 0.

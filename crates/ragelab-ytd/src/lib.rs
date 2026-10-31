@@ -158,6 +158,10 @@ impl fmt::Display for TextureFormat {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextureInfo {
     pub dictionary_hash: u32,
+    pub vft: u32,
+    pub unknown_4: u32,
+    pub unknown_30: u16,
+    pub unknown_32: u16,
     pub name: String,
     pub name_hash: u32,
     pub width: u16,
@@ -190,6 +194,10 @@ pub struct DecodedTexture {
 pub struct DictionaryTextureInfo {
     pub index: usize,
     pub name_hash: u32,
+    pub vft: u32,
+    pub unknown_4: u32,
+    pub unknown_30: u16,
+    pub unknown_32: u16,
     pub name: Option<String>,
     pub width: u16,
     pub height: u16,
@@ -282,6 +290,10 @@ impl YtdDictionary {
             textures.push(DictionaryTextureInfo {
                 index,
                 name_hash: dictionary_hash,
+                vft: texture.vft,
+                unknown_4: texture.unknown_4,
+                unknown_30: texture.unknown_30,
+                unknown_32: texture.unknown_32,
                 name: if texture.name.is_empty() {
                     None
                 } else {
@@ -392,6 +404,7 @@ impl YtdDictionary {
 pub struct EncodedTexture {
     pub width: u16,
     pub height: u16,
+    pub stride: u16,
     pub format: TextureFormat,
     pub levels: u8,
     pub data: Vec<u8>,
@@ -465,8 +478,37 @@ impl Ytd {
         Ok(EncodedTexture {
             width: texture.width,
             height: texture.height,
+            stride: texture.stride,
             format: texture.format,
             levels: texture.levels,
+            data,
+        })
+    }
+
+    /// Encodes an RGBA8 image into a legacy-compatible format and generates
+    /// a complete mip chain down to 1x1.
+    ///
+    /// Only formats with a deterministic in-crate encoder are accepted. The
+    /// returned payload is the raw texture image data (not a DDS file).
+    pub fn encode_rgba8_with_mips(
+        width: u16,
+        height: u16,
+        rgba: &[u8],
+        format: TextureFormat,
+    ) -> Result<EncodedTexture, YtdError> {
+        let (levels, data) = match format {
+            TextureFormat::Rgba8 => generate_rgba8_mip_payload(width, height, rgba)?,
+            TextureFormat::Bc1 => generate_bc1_mip_payload(width, height, rgba)?,
+            TextureFormat::Bc3 => generate_bc3_mip_payload(width, height, rgba)?,
+            other => return Err(YtdError::UnsupportedTextureFormat(other)),
+        };
+        let stride = legacy_stride(format, width)?;
+        Ok(EncodedTexture {
+            width,
+            height,
+            stride,
+            format,
+            levels,
             data,
         })
     }
@@ -497,6 +539,10 @@ impl Ytd {
         let (levels, payload) = generate_rgba8_mip_payload(width, height, rgba)?;
         let texture = TextureInfo {
             dictionary_hash: 0,
+            vft: 0,
+            unknown_4: 1,
+            unknown_30: 1,
+            unknown_32: 0,
             name: String::new(),
             name_hash: 0,
             width,
@@ -528,6 +574,10 @@ impl Ytd {
         let (levels, payload) = generate_bc1_mip_payload(width, height, rgba)?;
         let texture = TextureInfo {
             dictionary_hash: 0,
+            vft: 0,
+            unknown_4: 1,
+            unknown_30: 1,
+            unknown_32: 0,
             name: String::new(),
             name_hash: 0,
             width,
@@ -558,6 +608,10 @@ impl Ytd {
         let (levels, payload) = generate_bc3_mip_payload(width, height, rgba)?;
         let texture = TextureInfo {
             dictionary_hash: 0,
+            vft: 0,
+            unknown_4: 1,
+            unknown_30: 1,
+            unknown_32: 0,
             name: String::new(),
             name_hash: 0,
             width,
@@ -1528,6 +1582,10 @@ fn read_texture(
     };
     let name_hash = joaat(&name);
 
+    let vft = resource.read_u32(pointer)?;
+    let unknown_4 = resource.read_u32(at(pointer, 0x04)?)?;
+    let unknown_30 = resource.read_u16(at(pointer, 0x30)?)?;
+    let unknown_32 = resource.read_u16(at(pointer, 0x32)?)?;
     let usage_data = resource.read_u32(at(pointer, 0x40)?)?;
     let extra_flags = resource.read_u32(at(pointer, 0x48)?)?;
     let width = resource.read_u16(at(pointer, 0x50)?)?;
@@ -1556,6 +1614,10 @@ fn read_texture(
 
     Ok(TextureInfo {
         dictionary_hash,
+        vft,
+        unknown_4,
+        unknown_30,
+        unknown_32,
         name,
         name_hash,
         width,
@@ -3029,6 +3091,35 @@ mod tests {
     };
 
     #[test]
+    fn encodes_rgba8_bc1_and_bc3_with_complete_mips_and_legacy_stride() {
+        let rgba = vec![255_u8; 4 * 4 * 4];
+        let rgba8 = Ytd::encode_rgba8_with_mips(4, 4, &rgba, TextureFormat::Rgba8).unwrap();
+        assert_eq!(rgba8.format, TextureFormat::Rgba8);
+        assert_eq!(rgba8.stride, 16);
+        assert_eq!(rgba8.levels, 3);
+        assert_eq!(rgba8.data.len(), 84);
+
+        let bc1 = Ytd::encode_rgba8_with_mips(4, 4, &rgba, TextureFormat::Bc1).unwrap();
+        assert_eq!(bc1.format, TextureFormat::Bc1);
+        assert_eq!(bc1.stride, 2);
+        assert_eq!(bc1.levels, 3);
+        assert_eq!(bc1.data.len(), 24);
+
+        let bc3 = Ytd::encode_rgba8_with_mips(4, 4, &rgba, TextureFormat::Bc3).unwrap();
+        assert_eq!(bc3.format, TextureFormat::Bc3);
+        assert_eq!(bc3.stride, 4);
+        assert_eq!(bc3.levels, 3);
+        assert_eq!(bc3.data.len(), 48);
+    }
+
+    #[test]
+    fn texture_encoder_rejects_unsupported_formats_and_invalid_rgba_shape() {
+        let rgba = vec![0_u8; 4 * 4 * 4];
+        assert!(Ytd::encode_rgba8_with_mips(4, 4, &rgba, TextureFormat::Bc5).is_err());
+        assert!(Ytd::encode_rgba8_with_mips(4, 4, &rgba[..8], TextureFormat::Rgba8).is_err());
+    }
+
+    #[test]
     fn recognizes_known_legacy_formats() {
         assert_eq!(TextureFormat::from_raw(32), TextureFormat::Rgba8);
         assert_eq!(TextureFormat::from_raw(0x3154_5844), TextureFormat::Bc1);
@@ -3060,6 +3151,10 @@ mod tests {
     fn writes_classic_bc1_dds_with_full_mip_payload() {
         let texture = TextureInfo {
             dictionary_hash: 0,
+            vft: 0,
+            unknown_4: 1,
+            unknown_30: 1,
+            unknown_32: 0,
             name: "test".into(),
             name_hash: 0,
             width: 4,

@@ -1541,6 +1541,17 @@ impl OffscreenRenderer {
         (asset_bytes, texture_bytes)
     }
 
+    fn exceeds_budget(&self, budget: GpuCacheBudget) -> bool {
+        let (asset_bytes, texture_bytes) = self.cache_bytes();
+        gpu_cache_exceeds_budget(
+            self.asset_cache.len(),
+            self.texture_cache.len(),
+            asset_bytes,
+            texture_bytes,
+            budget,
+        )
+    }
+
     // Eviction is on the render thread. Rebuilding and sorting candidate sets
     // inside every eviction previously made scene commit O(N^2), producing
     // multi-second stalls when large GTA YMAP sets were replaced.
@@ -1654,10 +1665,7 @@ impl OffscreenRenderer {
             }
         }
 
-        self.asset_cache.len() > budget.max_assets as usize
-            || self.texture_cache.len() > budget.max_textures as usize
-            || asset_bytes > budget.max_asset_bytes
-            || texture_bytes > budget.max_texture_bytes
+        self.exceeds_budget(budget)
     }
 
     fn create_material(&self, view: &wgpu::TextureView, alpha_cutoff: f32) -> GpuMaterial {
@@ -2194,6 +2202,19 @@ fn process_streaming_upload_batch<T>(
     Ok(completed)
 }
 
+fn gpu_cache_exceeds_budget(
+    asset_count: usize,
+    texture_count: usize,
+    asset_bytes: u64,
+    texture_bytes: u64,
+    budget: GpuCacheBudget,
+) -> bool {
+    asset_count > budget.max_assets as usize
+        || texture_count > budget.max_textures as usize
+        || asset_bytes > budget.max_asset_bytes
+        || texture_bytes > budget.max_texture_bytes
+}
+
 pub struct SurfaceRenderer {
     gpu: OffscreenRenderer,
     surface: wgpu::Surface<'static>,
@@ -2357,6 +2378,7 @@ impl SurfaceRenderer {
         &mut self,
         packages: Vec<Arc<RenderPackage>>,
     ) -> RenderResult<()> {
+        self.last_streaming_commit_ms = 0.0;
         if packages.is_empty() {
             return self.replace_packages(packages, true);
         }
@@ -2405,6 +2427,17 @@ impl SurfaceRenderer {
             work,
             prepared_draws,
         });
+        // Keep resources for both the currently published scene and the
+        // newest requested scene. This also evicts assets left behind by
+        // superseded requests instead of letting their uploads accumulate
+        // until a future atomic scene commit.
+        let mut protected_packages = self.packages.clone();
+        if let Some(pending) = self.pending_streaming_upload.as_ref() {
+            protected_packages.extend(pending.packages.iter().cloned());
+        }
+        self.gpu_budget_overflow = self
+            .gpu
+            .evict_to_budget(&protected_packages, self.gpu_cache_budget);
         // Pure reuse/rebase updates need no GPU queue work.
         if self
             .pending_streaming_upload
@@ -2444,7 +2477,6 @@ impl SurfaceRenderer {
         let Some(mut pending) = self.pending_streaming_upload.take() else {
             self.last_streaming_upload_items = 0;
             self.last_streaming_upload_ms = 0.0;
-            self.last_streaming_commit_ms = 0.0;
             return Ok(());
         };
         let started = Instant::now();
@@ -2487,6 +2519,7 @@ impl SurfaceRenderer {
         self.last_streaming_upload_items = uploaded;
         self.last_streaming_upload_ms = started.elapsed().as_secs_f64() * 1000.0;
         self.last_streaming_commit_ms = 0.0;
+        self.gpu_budget_overflow = self.gpu.exceeds_budget(self.gpu_cache_budget);
         if pending.work.is_empty() {
             // Existing update logic reuses old per-instance model bindings and
             // atomically publishes one consistent LOD hierarchy.
@@ -4056,6 +4089,21 @@ mod tests {
         });
         assert!(error.is_err());
         assert_eq!(work, VecDeque::from([2, 3]));
+    }
+
+    #[test]
+    fn gpu_cache_budget_overflow_tracks_staged_upload_bytes_and_counts() {
+        let budget = GpuCacheBudget {
+            max_assets: 2,
+            max_textures: 3,
+            max_asset_bytes: 64,
+            max_texture_bytes: 128,
+        };
+        assert!(!gpu_cache_exceeds_budget(2, 3, 64, 128, budget));
+        assert!(gpu_cache_exceeds_budget(3, 3, 64, 128, budget));
+        assert!(gpu_cache_exceeds_budget(2, 4, 64, 128, budget));
+        assert!(gpu_cache_exceeds_budget(2, 3, 65, 128, budget));
+        assert!(gpu_cache_exceeds_budget(2, 3, 64, 129, budget));
     }
 
     #[test]

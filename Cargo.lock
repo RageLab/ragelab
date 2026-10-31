@@ -829,8 +829,10 @@ name = "ragelab"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "png",
  "ragelab-assets",
  "ragelab-engine",
+ "ragelab-gltf",
  "ragelab-hash",
  "ragelab-meta",
  "ragelab-render",
@@ -839,6 +841,7 @@ dependencies = [
  "ragelab-ybn",
  "ragelab-ydd",
  "ragelab-ydr",
+ "ragelab-yft",
  "ragelab-ymap",
  "ragelab-ymf",
  "ragelab-ytd",
@@ -895,6 +898,17 @@ dependencies = [
  "serde",
  "serde_json",
  "winreg",
+]
+
+[[package]]
+name = "ragelab-gltf"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "png",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -991,6 +1005,7 @@ name = "ragelab-ydr"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "ragelab-hash",
  "ragelab-resource",
  "ragelab-ytd",
 ]

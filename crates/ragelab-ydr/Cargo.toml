@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+ragelab-hash = { path = "../ragelab-hash" }
 ragelab-resource = { path = "../ragelab-resource" }
 ragelab-ytd = { path = "../ragelab-ytd" }
 

@@ -75,12 +75,67 @@ export interface ModelShaderTextureReference {
   textureName: string | null;
 }
 
+export interface ModelShaderParameterVector {
+  values: [number | null, number | null, number | null, number | null];
+  bits: [string, string, string, string];
+}
+
+export interface ModelShaderTextureBase {
+  vft: string;
+  unknown4: string;
+  unknown8: string;
+  unknown0C: string;
+  unknown10: string;
+  unknown14: string;
+  unknown18: string;
+  unknown1C: string;
+  unknown20: string;
+  unknown24: string;
+  unknown30: string;
+  unknown32: string;
+  unknown34: string;
+  unknown38: string;
+  unknown3C: string;
+  usageData: string;
+  unknown44: string;
+  extraFlags: string;
+  unknown4C: string;
+  name: string | null;
+}
+
+export interface ModelShaderParameter {
+  index: number;
+  parameterHash: string;
+  dataType: number;
+  unknown1: number;
+  unknown2: string;
+  unknown4: string;
+  textureName: string | null;
+  textureBase: ModelShaderTextureBase | null;
+  vectorCount: number;
+  vectors: ModelShaderParameterVector[];
+}
+
 export interface ModelShaderMetadata {
   index: number;
   nameHash: string;
   fileHash: string;
+  unknown0C?: string;
+  unknown12?: string;
+  unknown1C?: string;
+  unknown24?: string;
+  unknown26?: number;
+  unknown28?: string;
   diffuseTextureName: string | null;
   textureReferences: ModelShaderTextureReference[];
+  renderBucket?: number;
+  parameterSize?: number;
+  parameterDataSize?: number;
+  renderBucketMask?: string;
+  textureParametersCount?: number;
+  parameterCount?: number;
+  parameters?: ModelShaderParameter[];
+  parametersTruncated?: boolean;
 }
 
 export interface ModelPrimitiveMetadata {

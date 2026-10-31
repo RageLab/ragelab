@@ -30,6 +30,7 @@ pub const HARD_PREVIEW_MAX_MATERIALS: usize = 8_192;
 
 pub(crate) const MODEL_DIFFUSE_TEXTURE_LIMIT: usize = 32;
 pub(crate) const MODEL_DIFFUSE_TEXTURE_MAX_DIMENSION: u16 = 256;
+const MAX_PREVIEW_SHADER_PARAMETERS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -797,11 +798,80 @@ fn model_preview_json(model: &YdrModel, options: PreviewOptions, selector: Value
                     })
                 })
                 .collect::<Vec<_>>();
+            let parameters = shader
+                .parameters
+                .iter()
+                .take(MAX_PREVIEW_SHADER_PARAMETERS)
+                .enumerate()
+                .map(|(parameter_index, parameter)| {
+                    let vectors = parameter
+                        .vector_data
+                        .iter()
+                        .map(|bits| {
+                            let values = bits.map(f32::from_bits);
+                            json!({
+                                "values": values.map(|value| value.is_finite().then_some(value)),
+                                "bits": bits.map(|value| format!("0x{value:08X}")),
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let texture_base = parameter.texture_base.as_ref().map(|base| {
+                        json!({
+                            "vft": format!("0x{:08X}", base.vft),
+                            "unknown4": format!("0x{:08X}", base.unknown_4),
+                            "unknown8": format!("0x{:08X}", base.unknown_8),
+                            "unknown0C": format!("0x{:08X}", base.unknown_c),
+                            "unknown10": format!("0x{:08X}", base.unknown_10),
+                            "unknown14": format!("0x{:08X}", base.unknown_14),
+                            "unknown18": format!("0x{:08X}", base.unknown_18),
+                            "unknown1C": format!("0x{:08X}", base.unknown_1c),
+                            "unknown20": format!("0x{:08X}", base.unknown_20),
+                            "unknown24": format!("0x{:08X}", base.unknown_24),
+                            "unknown30": format!("0x{:04X}", base.unknown_30),
+                            "unknown32": format!("0x{:04X}", base.unknown_32),
+                            "unknown34": format!("0x{:08X}", base.unknown_34),
+                            "unknown38": format!("0x{:08X}", base.unknown_38),
+                            "unknown3C": format!("0x{:08X}", base.unknown_3c),
+                            "usageData": format!("0x{:08X}", base.usage_data),
+                            "unknown44": format!("0x{:08X}", base.unknown_44),
+                            "extraFlags": format!("0x{:08X}", base.extra_flags),
+                            "unknown4C": format!("0x{:08X}", base.unknown_4c),
+                            "name": base.name,
+                        })
+                    });
+                    json!({
+                        "index": parameter_index,
+                        "parameterHash": format!("0x{:08X}", parameter.parameter_hash),
+                        "dataType": parameter.data_type,
+                        "unknown1": parameter.unknown_1,
+                        "unknown2": format!("0x{:04X}", parameter.unknown_2),
+                        "unknown4": format!("0x{:08X}", parameter.unknown_4),
+                        "textureName": parameter.texture_name,
+                        "textureBase": texture_base,
+                        "vectorCount": parameter.vector_data.len(),
+                        "vectors": vectors,
+                    })
+                })
+                .collect::<Vec<_>>();
 
             json!({
                 "index": index,
                 "nameHash": format!("0x{:08X}", shader.name_hash),
+                "unknown0C": format!("0x{:08X}", shader.unknown_0c),
                 "fileHash": format!("0x{:08X}", shader.file_hash),
+                "unknown12": format!("0x{:04X}", shader.unknown_12),
+                "unknown1C": format!("0x{:08X}", shader.unknown_1c),
+                "renderBucket": shader.render_bucket,
+                "parameterSize": shader.parameter_size,
+                "parameterDataSize": shader.parameter_data_size,
+                "renderBucketMask": format!("0x{:08X}", shader.render_bucket_mask),
+                "unknown24": format!("0x{:04X}", shader.unknown_24),
+                "unknown26": shader.unknown_26,
+                "unknown28": format!("0x{:016X}", shader.unknown_28),
+                "textureParametersCount": shader.texture_parameters_count,
+                "parameterCount": shader.parameters.len(),
+                "parameters": parameters,
+                "parametersTruncated": shader.parameters.len() > MAX_PREVIEW_SHADER_PARAMETERS,
                 "textureReferenceCount": shader.texture_references.len(),
                 "diffuseTextureName": shader.diffuse_texture_name(),
                 "textureReferences": texture_references,
