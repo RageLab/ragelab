@@ -131,11 +131,39 @@ fn validate_json_reports_checks() {
     let body = stdout_json(&output);
     assert_eq!(body["command"], "validate");
     assert_eq!(body["data"]["valid"], true);
+    assert_eq!(body["data"]["containerValid"], true);
+    assert_eq!(body["data"]["formatValidated"], true);
     assert!(body["data"]["checks"]
         .as_array()
         .unwrap()
         .iter()
         .any(|check| check == "ytd.parse"));
+}
+
+#[test]
+fn container_only_asset_validation_uses_unsupported_exit_code() {
+    let root = temp_root("container-only-validate");
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("clip.ycd");
+    fs::copy(fixture("yft/no-main-drawable.yft"), &path).unwrap();
+
+    let output = binary()
+        .args(["validate", path.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab should run");
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stderr.is_empty());
+    let body = stdout_json(&output);
+    assert_eq!(body["command"], "validate");
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error"]["code"], "unsupported");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("RSC7 container is valid"));
+
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -632,6 +660,35 @@ fn ymap_capabilities_mark_workspace_scene_as_context_required() {
         .unwrap();
     assert_eq!(scene["availability"], "contextRequired");
     assert_eq!(scene["requiresWorkspace"], true);
+
+    let find = |id: &str| {
+        operations
+            .iter()
+            .find(|operation| operation["id"] == id)
+            .unwrap()
+    };
+    assert_eq!(find("plan")["availability"], "available");
+    assert_eq!(find("plan")["writesAsset"], false);
+    assert_eq!(find("apply")["availability"], "available");
+    assert_eq!(find("apply")["writesAsset"], true);
+    for id in [
+        "ymap.set-transform",
+        "ymap.set-property",
+        "ymap.delete",
+        "ymap.duplicate",
+        "ymap.create",
+    ] {
+        assert_eq!(find(id)["availability"], "parameterized", "{id}");
+        assert_eq!(find(id)["writesAsset"], true, "{id}");
+    }
+    assert_eq!(
+        find("ymap.set-transform")["requiresParameters"],
+        json!(["index", "position", "rotation"])
+    );
+    assert_eq!(
+        find("ymap.delete")["requiresParameters"],
+        json!(["indices"])
+    );
 }
 
 #[test]

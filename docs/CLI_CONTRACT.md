@@ -31,7 +31,7 @@ Errors use the same schema:
 }
 ```
 
-Consumers must key compatibility decisions on `schema` and `schemaVersion`, not on human-readable output.
+Consumers must key compatibility decisions on `schema` and `schemaVersion`, not on human-readable output. The exact common-envelope v1 shape is published as [JSON Schema](schemas/ragelab.cli.response.v1.schema.json). Domain payloads retain their own `schema`/`schemaVersion` where defined.
 
 The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `spatial <file> --json`, `preview <file> --json`, `plan <operation.json> --json`, `apply <operation.json> --json`, `workspace preflight ... --json`, `workspace export ... --json`, `workspace scene ... --json`, `workspace render-package ... --json`, `render asset ... --json`, `render scene ... --json`, `render compare ... --json`, `gta discover --json`, `gta catalog ... --json`, `gta rpf-index ... --json`, `gta world-query ... --json`, and `fivem discover --json` use the common response envelope.
 
@@ -142,6 +142,12 @@ Each operation reports:
 - `requiresParameters`.
 
 `availability` is one of `available`, `parameterized`, `contextRequired`, or `unavailable`. The value is derived from the current asset when RageLab has enough evidence to decide. Parameterized and workspace operations defer final eligibility until the required selection or context is supplied.
+
+For YMAP, per-file capabilities includes `plan`/`apply` and the parameterized operations `ymap.set-transform`, `ymap.set-property`, `ymap.delete`, `ymap.duplicate`, and `ymap.create`. Their required parameters are listed by the report; workspace scene/dependency/preflight/extract operations remain `contextRequired`.
+
+YFT support is limited to the Legacy v162 FragType and optional mainDrawable parser. It is read-only; physics children, damaged variants and articulation are not claimed as parsed or validated. YCD/YMT/YLD/YNV do not have semantic parsers: a valid RSC7 container may enable explicitly labeled container-only inspection, but `validate` is unavailable and the command returns `unsupported` (exit code 3), never `valid: true`.
+
+A successful per-file validation payload retains `valid` and `checks` and adds `containerValid` (`true` when RSC7 decompression passed, otherwise `null`) and `formatValidated` (`true` only after its format-specific parser succeeds). Exit code 4 remains reserved for malformed data rejected by a known parser; exit code 3 means no semantic validator is supported for that format.
 
 Capability discovery never overrides format-specific write eligibility. Write operations still fail closed when the selected layout, binding, polygon, replacement, or provenance is unsupported.
 
@@ -279,6 +285,10 @@ The common envelope currently emits:
 - `validation_failed`
 
 Error codes are stable identifiers. Error messages are diagnostic text and may become more specific without a schema version change.
+
+## Studio integration
+
+RageLab Studio is a Rust/Tauri adapter over the same `ragelab-engine` services. It calls Core Rust APIs directly and does not spawn the CLI or parse its stdout. The GLB use case is byte-first in `ragelab-engine`; CLI and Studio call the same inspect, geometry, profile-init, profile-validation and GLB→YDR export functions. Tauri command DTOs and TypeScript wrappers are typed independently from the CLI v1 envelope. File paths, input reads, output creation and explicit overwrite policy remain adapter responsibilities. The generated YDR is semantically reopened by the engine, but `runtimeRenderable=false` remains until external runtime acceptance is proven. See [CLI/Core/Studio architecture](CLI_CORE_STUDIO_ARCHITECTURE.md).
 
 ## Stability rules
 

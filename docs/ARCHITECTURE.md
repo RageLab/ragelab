@@ -61,6 +61,8 @@ Format crates remain authoritative for binary-layout safety and writer capabilit
 
 If a rule must behave identically in the CLI, an MCP server, and RageLab Studio, it belongs at or below this layer.
 
+The GLB-to-YDR use case is byte-first in `ragelab-engine`: it owns profile validation, geometry/image decoding orchestration, exact ShaderFX template selection, material/geometry binding, selection provenance, export reporting and mandatory semantic reopen. The CLI is a thin filesystem/argument/presentation adapter, while Studio calls the same Engine use cases directly through Tauri. The specialized GLB/YDR/YFT crates remain authoritative for parsing and format invariants; no new generic facade crate is needed. See [CLI/Core/Studio architecture](CLI_CORE_STUDIO_ARCHITECTURE.md).
+
 The application layer also owns the persistent GTA V Legacy RPF/world index. The index reuses the engine-owned ordered archive scan and installation fingerprint, persists YMAP/YTYP spatial/dependency metadata, and exposes bounded box/radius/frustum queries without global scene assembly. Missing spatial evidence degrades selectivity but never silently promotes inferred world bounds. See [WORLD_INDEX.md](WORLD_INDEX.md).
 
 ### Native renderer
@@ -73,7 +75,7 @@ The application layer also owns the persistent GTA V Legacy RPF/world index. The
 
 The same adapter can host the optional, disabled-by-default loopback Web bridge. The bridge is transport only: search/provider resolution stays in the engine index, RPF access stays in `ragelab-rpf`, browser responses use opaque grants, and there is no bridge write route. See [WEB_BRIDGE_SECURITY.md](WEB_BRIDGE_SECURITY.md).
 
-The CLI must not contain an independent implementation of format parsing, renderer semantics, or writer safety.
+The CLI must not contain an independent implementation of format parsing, renderer semantics, or writer safety. It is an adapter for arguments, filesystem input/output, human/JSON presentation and process exit semantics. New cross-format authoring decisions belong in `ragelab-engine`; new Studio surfaces call the same Rust use cases directly through Tauri, never by spawning the CLI. See [CLI/Core/Studio architecture](CLI_CORE_STUDIO_ARCHITECTURE.md).
 
 ### RageLab Studio
 

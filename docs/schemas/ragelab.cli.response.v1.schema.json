@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ragelab.dev/schemas/ragelab.cli.response.v1.schema.json",
+  "title": "RageLab CLI response envelope v1",
+  "description": "Stable common envelope used by structured CLI commands. Version-specific domain payloads are validated by their own schemas.",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["schema", "schemaVersion", "ok", "command", "data"],
+      "properties": {
+        "schema": { "const": "ragelab.cli.response" },
+        "schemaVersion": { "const": 1 },
+        "ok": { "const": true },
+        "command": { "type": "string", "minLength": 1 },
+        "data": {}
+      },
+      "not": { "required": ["error"] },
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "required": ["schema", "schemaVersion", "ok", "command", "error"],
+      "properties": {
+        "schema": { "const": "ragelab.cli.response" },
+        "schemaVersion": { "const": 1 },
+        "ok": { "const": false },
+        "command": { "type": "string", "minLength": 1 },
+        "error": {
+          "type": "object",
+          "required": ["code", "message"],
+          "properties": {
+            "code": {
+              "type": "string",
+              "enum": [
+                "operation_failed",
+                "invalid_input",
+                "unsupported",
+                "validation_failed"
+              ]
+            },
+            "message": { "type": "string" }
+          },
+          "additionalProperties": true
+        }
+      },
+      "not": { "required": ["data"] },
+      "additionalProperties": true
+    }
+  ]
+}
