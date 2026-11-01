@@ -3,9 +3,9 @@
 - Última atualização: 2026-11-01 (America/Sao_Paulo).
 - Workspace: `D:\DEV\_RageLab\ragelab`.
 - Board: `board_015c3e1a-c568-4d7d-a214-f0a247f758d6` — RageLab Core — CLI, Asset Pipeline & Studio Foundation.
-- Card atual: `task_00711e72-aeba-4c1c-ae19-623663d54297` — Batch — Pipeline por manifest versionado.
-- Branch: main; último checkpoint funcional: 4d2d526 (feat(asset-pipeline): add GLB batch and validation reports); origin/main continua na base inicial 366ba6925e8a402e08759c268bc09a47099418ed. Há 3 commits locais à frente; não foi feito push.
-- Preservação: seis exemplos locais de profiling permanecem untracked e intocados. Alterações locais GLB da etapa anterior permanecem na working tree. Não modificar arquivos de instalação GTA/FiveM nem assets externos.
+- Último card concluído: task_b7672e16-46ab-4c6d-8bc5-5bbc52a37d39 — Diagnostics — ragelab doctor e capabilities (7/7).
+- Branch: main; commits locais finais: d8fcff8 (Engine build diagnostics) e e6a2b42 (CLI doctor/capabilities), além de b8d4954, 4d2d526 e 86b8440. origin/main continua em 366ba6925e8a402e08759c268bc09a47099418ed; main está 6 commits à frente; nenhum push foi feito.
+- Preservação: seis exemplos locais de profiling continuam untracked, intocados e fora dos commits. Working tree tracked limpa. Não modificar instalações GTA/FiveM nem assets externos.
 - Nenhuma sessão/terminal do RageLab foi iniciada ou deixada em execução.
 
 ## Estado do roadmap
@@ -13,8 +13,9 @@
 - GLB Validate: implementação concluída e card fechado anteriormente.
 - YDR Inspect / Validate: implementação, schemas, CLI, documentação e gates concluídos; card fechado.
 - Export — relatório versionado GLB v1: implementação, schema, CLI sidecar, golden fixture, documentação e gates concluídos; card fechado.
-- Quality — Harness de fixtures, fuzzing, round-trip e gates independentes: concluído e card fechado.
-- Batch — Pipeline por manifest versionado: implementação e testes focados em andamento; commits locais serão feitos por checkpoints validados, sem push.
+- Quality — harness, mutation smoke tests, round-trip e gates independentes: concluído, checklist 7/7, card fechado.
+- Batch — manifest v1, preflight, concorrência, políticas de falha e reports: concluído, checklist 8/8, card fechado.
+- Diagnostics — doctor/capabilities, build metadata, registries, schemas e testes: concluído, checklist 7/7, card fechado.
 
 ## Entrega YDR
 
@@ -156,7 +157,7 @@ Uma execução de `clippy --all-targets` no Engine incluiu os seis exemplos de p
 - Seis exemplos de profiling untracked preservados e não editados.
 - Nenhum asset proprietário ou arquivo da instalação GTA/FiveM foi modificado.
 
-## Entrega Batch — progresso da implementação
+## Entrega Batch — concluída
 
 ### Implementação atual
 
@@ -169,10 +170,39 @@ Uma execução de `clippy --all-targets` no Engine incluiu os seis exemplos de p
 - Dispatch/normalização/capabilities/structured output/help CLI conectados para ragelab glb batch <manifest.json> [--json]; erro batch_failed mantém agregado no envelope JSON.
 - Schemas Draft 2020-12: docs/schemas/ragelab.glb.batch-manifest.v1.schema.json e docs/schemas/ragelab.glb.batch-report.v1.schema.json. Documentação em docs/GLB_BATCH.md, README e CLI contract.
 - Testes: 7 unit tests cobrindo strict schema, required nullable template, path escape, preflight global sem writes, colisão de destinos, continue isolamento, fail-fast cancellation, ordenação e determinismo byte a byte; 1 end-to-end CLI com export real + sidecar + aggregate.
-- Commits locais desta etapa: b8d49546d4e41440bf16845609e1feb3dffd6551 (test(quality): add fixture and hardening gates) e 4d2d526 (feat(asset-pipeline): add GLB batch and validation reports). Branch main está 3 commits à frente de origin/main; push não executado.
-- Gates completos executados: cargo check --locked --workspace PASS; cargo test --locked --workspace PASS (um teste YFT externo ignored por exigir RAGELAB_TEST_YFT); cargo clippy --locked --workspace --lib --tests -- -D warnings PASS; cargo fmt --all -- --check PASS; git diff --check PASS; python scripts/validate_synthetic.py, validate_synthetic_ymf.py e check_hardening.py PASS; schemas Draft 2020-12 + exemplos válidos/inválidos PASS. Batch unit 7/7; GLB CLI 35/35; CLI contract 33/33; Clippy app --all-targets --no-deps PASS. O comando CI exato cargo clippy --locked --workspace --all-targets -- -D warnings falha somente nos três exemplos locais world_lod_profile.rs, world_prefetch_profile.rs e world_asset_overlap.rs por field_reassign_with_default; seis exemplos de profiling foram preservados sem edição. Pendentes: revisão do staging, commit do grupo asset pipeline e fechamento do checklist/auditoria.
+- Commits locais anteriores: b8d4954 (Quality), 4d2d526 (asset pipeline/Batch) e 86b8440 (contexto).
+- Gates completos executados: cargo check --locked --workspace PASS; cargo test --locked --workspace PASS (um teste YFT externo ignored por exigir RAGELAB_TEST_YFT); cargo clippy --locked --workspace --lib --tests -- -D warnings PASS; cargo fmt --all -- --check PASS; git diff --check PASS; python scripts/validate_synthetic.py, validate_synthetic_ymf.py e check_hardening.py PASS; schemas Draft 2020-12 + exemplos válidos/inválidos PASS. Batch unit 7/7; GLB CLI 35/35; CLI contract 33/33; Clippy app --all-targets --no-deps PASS. O comando CI exato cargo clippy --locked --workspace --all-targets -- -D warnings falha somente nos três exemplos locais world_lod_profile.rs, world_prefetch_profile.rs e world_asset_overlap.rs por field_reassign_with_default; seis exemplos de profiling foram preservados sem edição. Card encerrado com checklist 8/8.
 
-## Próxima ação
+## Entrega Diagnostics — doctor e capabilities concluída
 
-- Próximo card após Batch: Diagnostics — ragelab doctor e capabilities (task_b7672e16-46ab-4c6d-8bc5-5bbc52a37d39).
-- Não reabrir as etapas GLB/YDR sem regressão ou pedido explícito; não reabrir o gate standalone GTA V Legacy previamente waived sem autorização.
+### Implementação
+- Engine: crates/ragelab-engine/build.rs injeta version/revision/dirty/API compatibility, Cargo target triple/OS/architecture/environment/family, build profile e Engine Cargo features.
+- A declaração macro em crates/ragelab-engine/src/lib.rs compila/reexporta os módulos e gera CORE_COMPILED_MODULES, evitando um catálogo paralelo de módulos inexistentes.
+- crates/ragelab-engine/src/asset.rs deriva o registry de formatos do enum AssetFormat e do parser dispatch real. Inclui YMAP/YTYP/YMF/YDR/YDD/YTD/YBN/YFT e GLB 2.0 quando o módulo glb está compilado; YCD/YMT/YLD/YNV ficam explicitamente containerOnly. YFT permanece limitado a Legacy v162/mainDrawable.
+- CLI: ragelab doctor [--json] fornece relatório read-only com status healthy/warning/blocked, checks estáveis, severidade info/warning/blocker, detalhes, recomendações e comandos afetados.
+- Probes limitados ao que os comandos usam: wgpu transitório para render.asset/render.scene; discovery GTA V Legacy e FiveM pelos APIs bounded/read-only existentes; metadados do current working directory. GTA/FiveM/GPU não são blockers globais.
+- Doctor não cria arquivos/diretórios, não testa write permission, não altera PATH/environment/Registry/instalações, não expõe valores de variáveis secretas. Reporta readOnly=true, actionsTaken=[], writeProbePerformed=false e implicitOutputDirectoryRequired=false.
+- capabilities --json preserva ragelab.cli.capabilities v1 e acrescenta build, compiledModules, assetFormats e externalDependencies. Per-file capabilities e o envelope de commands existente permanecem compatíveis.
+- Schemas Draft 2020-12: docs/schemas/ragelab.cli.doctor.v1.schema.json e docs/schemas/ragelab.cli.capabilities.v1.schema.json. Documentação em docs/DOCTOR.md, CAPABILITIES.md, CLI_CONTRACT.md e README.
+- Testes: Engine registry/build metadata 3/3; Doctor 6/6 (presença/ausência/incompleto, GPU indisponível, FiveM sem vínculo Legacy, blocker para registry incompleto, read-only); CLI contract 35/35 incluindo modos humano/JSON.
+- Comandos reais doctor, doctor --json e capabilities --json executados com sucesso. No host atual: 11 checks, 10 info, 1 warning (build dirty), 0 blockers; renderer wgpu pronto; GTA Legacy e FiveM detectados; 16 módulos; 13 asset/input formats; 67 canonical commands; 3 dependências opcionais.
+- Schemas Draft 2020-12 validados contra os JSON reais da CLI; fmt/diff-check e Clippy CLI --all-targets --no-deps passaram.
+
+### Gates finais do workspace
+- cargo check --locked --workspace: PASS.
+- cargo test --locked --workspace: PASS; um teste YFT externo permanece ignored porque requer RAGELAB_TEST_YFT apontando para um asset GTA V Legacy autorizado.
+- cargo clippy --locked --workspace --lib --tests -- -D warnings: PASS.
+- cargo clippy --locked -p ragelab --all-targets --no-deps -- -D warnings: PASS.
+- cargo fmt --all -- --check e git diff --check: PASS.
+- python scripts/validate_synthetic.py, validate_synthetic_ymf.py e check_hardening.py: PASS.
+- Exceção conhecida do checkout local: cargo clippy --locked --workspace --all-targets -- -D warnings falha somente em world_prefetch_profile.rs, world_asset_overlap.rs e world_lod_profile.rs por field_reassign_with_default. São três de seis profiling examples locais preexistentes; todos os seis foram preservados, não modificados e excluídos do Git. O Clippy do workspace libs/tests e o Clippy --all-targets da CLI passaram.
+
+### Git / preservação final
+- Commits Diagnostics: d8fcff8 (feat(engine): expose compiled build and format diagnostics) e e6a2b42 (feat(cli): add read-only doctor and build capabilities).
+- Histórico local desta conclusão: b8d4954, 4d2d526, 86b8440, d8fcff8 e e6a2b42; será acrescentado commit pequeno deste handoff.
+- Não houve push. As seis profiling examples continuam untracked, intactas e fora de qualquer commit. Nenhum asset proprietário nem instalação GTA/FiveM foi alterado.
+
+## Estado final do board
+- GLB Validate, YDR Inspect/Validate, Export report, Quality, Batch e Diagnostics: concluídos.
+- Todos os 24 cards do RageLab Core estão com checklist completo; board encerrado após confirmação do card Diagnostics 7/7.
+- Não fazer push sem autorização explícita.
