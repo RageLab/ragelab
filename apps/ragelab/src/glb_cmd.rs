@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     error::Error,
     fs::{self, OpenOptions},
     io::{self, Write},
@@ -6,9 +7,9 @@ use std::{
 };
 
 use ragelab_engine::{
-    decode_glb_geometry_bytes, default_glb_authoring_profile, export_glb_to_ydr, inspect_glb_bytes,
-    validate_glb_authoring_profile_bytes, GlbShaderTemplateFormat, GlbShaderTemplateInput,
-    GlbYdrExportRequest,
+    decode_glb_geometry_bytes, default_glb_authoring_profile, export_glb_to_ydr,
+    export_glb_to_ydr_with_nodes, inspect_glb_bytes, validate_glb_authoring_profile_bytes,
+    GlbShaderTemplateFormat, GlbShaderTemplateInput, GlbYdrExportRequest,
 };
 use ragelab_gltf::{
     DecodedGeometryReport, GlbInspectionReport, ProfileValidationReport, TextureBindingInfo,
@@ -48,13 +49,183 @@ pub fn geometry(args: Vec<String>) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+pub fn tree(args: Vec<String>) -> Result<(), Box<dyn Error>> {
+    let (source, json_output) = parse_inspect_args(args)?;
+    let bytes = fs::read(&source)?;
+    let file_name = source
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("model.glb");
+    let inspection = inspect_glb_bytes(&bytes, file_name)?;
+    let scene_index = inspection
+        .default_scene
+        .or_else(|| (!inspection.scenes.is_empty()).then_some(0));
+    let roots = if let Some(index) = scene_index {
+        inspection
+            .scenes
+            .get(index)
+            .ok_or_else(|| invalid_data(format!("active scene index {index} is out of range")))?
+            .nodes
+            .clone()
+    } else {
+        let child_nodes = inspection
+            .nodes
+            .iter()
+            .flat_map(|node| node.children.iter().copied())
+            .collect::<HashSet<_>>();
+        inspection
+            .nodes
+            .iter()
+            .filter(|node| !child_nodes.contains(&node.index))
+            .map(|node| node.index)
+            .collect()
+    };
+
+    let mut visited = HashSet::new();
+    let mut tree_roots = Vec::with_capacity(roots.len());
+    let mut mesh_node_count = 0usize;
+    let mut primitive_count = 0usize;
+    for root in roots {
+        let (entry, meshes, primitives) =
+            build_node_tree(root, None, 0, &inspection, &mut visited)?;
+        tree_roots.push(entry);
+        mesh_node_count += meshes;
+        primitive_count += primitives;
+    }
+
+    let data = json!({
+        "schema": "ragelab.glb.node-tree",
+        "schemaVersion": 1,
+        "source": {
+            "fileName": inspection.source.file_name,
+            "sha256": inspection.source.sha256,
+            "byteLength": inspection.source.byte_length,
+        },
+        "sceneIndex": scene_index,
+        "nodeCount": inspection.nodes.len(),
+        "meshNodeCount": mesh_node_count,
+        "primitiveCount": primitive_count,
+        "roots": tree_roots,
+    });
+
+    if json_output {
+        super::agent::print_success("glb.tree", data)?;
+    } else {
+        println!("file: {}", source.display());
+        println!(
+            "scene: {}",
+            scene_index.map_or_else(|| "none".into(), |v| v.to_string())
+        );
+        println!(
+            "hierarchy: {} nodes, {} mesh nodes, {} primitives",
+            inspection.nodes.len(),
+            mesh_node_count,
+            primitive_count
+        );
+        for root in &tree_roots {
+            print_node_tree(root);
+        }
+        println!("select a group by its node index with --node <index> on glb export");
+    }
+    Ok(())
+}
+
+fn build_node_tree(
+    node_index: usize,
+    parent_index: Option<usize>,
+    depth: usize,
+    inspection: &GlbInspectionReport,
+    visited: &mut HashSet<usize>,
+) -> Result<(serde_json::Value, usize, usize), io::Error> {
+    if !visited.insert(node_index) {
+        return Err(invalid_data(format!(
+            "active scene contains a cycle or repeated node reference at {node_index}"
+        )));
+    }
+    let node = inspection
+        .nodes
+        .get(node_index)
+        .filter(|node| node.index == node_index)
+        .ok_or_else(|| invalid_data(format!("scene references missing node {node_index}")))?;
+    let own_primitive_count = if let Some(mesh_index) = node.mesh_index {
+        inspection
+            .meshes
+            .get(mesh_index)
+            .ok_or_else(|| {
+                invalid_data(format!(
+                    "node {node_index} references missing mesh {mesh_index}"
+                ))
+            })?
+            .primitives
+            .len()
+    } else {
+        0
+    };
+    let mut subtree_mesh_count = usize::from(node.mesh_index.is_some());
+    let mut subtree_primitive_count = own_primitive_count;
+    let mut children = Vec::with_capacity(node.children.len());
+    for child_index in &node.children {
+        let (child, child_meshes, child_primitives) = build_node_tree(
+            *child_index,
+            Some(node_index),
+            depth + 1,
+            inspection,
+            visited,
+        )?;
+        children.push(child);
+        subtree_mesh_count += child_meshes;
+        subtree_primitive_count += child_primitives;
+    }
+    let value = json!({
+        "nodeIndex": node.index,
+        "parentNodeIndex": parent_index,
+        "depth": depth,
+        "name": node.name,
+        "meshIndex": node.mesh_index,
+        "primitiveCount": own_primitive_count,
+        "subtreeMeshCount": subtree_mesh_count,
+        "subtreePrimitiveCount": subtree_primitive_count,
+        "children": children,
+    });
+    Ok((value, subtree_mesh_count, subtree_primitive_count))
+}
+
+fn print_node_tree(node: &serde_json::Value) {
+    let depth = node["depth"].as_u64().unwrap_or(0) as usize;
+    let node_index = node["nodeIndex"].as_u64().unwrap_or(0);
+    let name = node["name"].as_str().unwrap_or("<unnamed>");
+    let mesh_index = node["meshIndex"].as_u64();
+    let own_primitives = node["primitiveCount"].as_u64().unwrap_or(0);
+    let subtree_meshes = node["subtreeMeshCount"].as_u64().unwrap_or(0);
+    let subtree_primitives = node["subtreePrimitiveCount"].as_u64().unwrap_or(0);
+    let kind = mesh_index.map_or_else(
+        || "group".to_owned(),
+        |index| format!("mesh {index}, {own_primitives} primitives"),
+    );
+    println!(
+        "{}[{}] {} — {}; subtree: {} meshes / {} primitives",
+        "  ".repeat(depth),
+        node_index,
+        name,
+        kind,
+        subtree_meshes,
+        subtree_primitives
+    );
+    if let Some(children) = node["children"].as_array() {
+        for child in children {
+            print_node_tree(child);
+        }
+    }
+}
+
 pub fn export(args: Vec<String>) -> Result<(), Box<dyn Error>> {
-    const USAGE: &str = "usage: ragelab glb export <source.glb> --output <output.ydr> [--profile <profile.json>] [--shader-template <source.yft|source.ydr>] [--shader-index <n>] [--overwrite] [--json]";
+    const USAGE: &str = "usage: ragelab glb export <source.glb> --output <output.ydr> [--node <index> ...] [--profile <profile.json>] [--shader-template <source.yft|source.ydr>] [--shader-index <n>] [--overwrite] [--json]";
     let mut source = None;
     let mut output = None;
     let mut profile_path = None;
     let mut shader_template_path = None;
     let mut shader_index = 0usize;
+    let mut selected_node_indices = Vec::new();
     let mut overwrite = false;
     let mut json_output = false;
     let mut args = args.into_iter();
@@ -81,6 +252,14 @@ pub fn export(args: Vec<String>) -> Result<(), Box<dyn Error>> {
                     .ok_or_else(|| invalid_input(USAGE))?
                     .parse::<usize>()
                     .map_err(|_| invalid_input("--shader-index must be a non-negative integer"))?;
+            }
+            "--node" => {
+                let index = args
+                    .next()
+                    .ok_or_else(|| invalid_input(USAGE))?
+                    .parse::<usize>()
+                    .map_err(|_| invalid_input("--node must be a non-negative integer"))?;
+                selected_node_indices.push(index);
             }
             "--overwrite" => overwrite = true,
             "--json" => json_output = true,
@@ -136,13 +315,18 @@ pub fn export(args: Vec<String>) -> Result<(), Box<dyn Error>> {
         None
     };
 
-    let result = export_glb_to_ydr(GlbYdrExportRequest {
+    let request = GlbYdrExportRequest {
         source_name,
         source_bytes,
         profile_bytes,
         shader_template,
         shader_index,
-    })?;
+    };
+    let result = if selected_node_indices.is_empty() {
+        export_glb_to_ydr(request)?
+    } else {
+        export_glb_to_ydr_with_nodes(request, &selected_node_indices)?
+    };
 
     write_output(&output, &result.output_bytes, overwrite)?;
     if json_output {
@@ -333,12 +517,37 @@ fn print_export(source: &Path, output: &Path, report: &ragelab_engine::GlbYdrExp
     println!("output: {}", output.display());
     println!("YDR version: {}", report.ydr_version);
     println!("geometries: {}", report.geometry_count);
+    if let Some(selection) = &report.selection {
+        println!(
+            "selection schema: {} v{}",
+            selection.schema, selection.schema_version
+        );
+        println!("selected roots:");
+        for selected in &selection.selected_nodes {
+            println!(
+                "  [{}] {} — {} meshes / {} primitives",
+                selected.node_index,
+                selected.node_name.as_deref().unwrap_or("<unnamed>"),
+                selected.mesh_indices.len(),
+                selected.primitive_count
+            );
+        }
+        println!(
+            "included nodes: {}; meshes: {}; primitives: {}",
+            selection.included_node_indices.len(),
+            selection.included_mesh_indices.len(),
+            selection.primitive_count
+        );
+    }
     println!("vertices: {}", report.vertex_count);
     println!("triangles: {}", report.triangle_count);
     println!("embedded textures: {}", report.embedded_texture_count);
     println!("texture formats: {:?}", report.texture_formats);
     println!("material profile: validated");
     println!("ShaderFX templates: {}", report.shader_count);
+    if report.shader_count == 0 {
+        eprintln!("WARNING: this structural YDR has no ShaderFX. Do not open it in CodeWalker Model Viewer; its BasicShader path expects a resolved DrawableGeometry.Shader. Re-export with --shader-template and --shader-index using a verified Legacy template.");
+    }
     println!(
         "material shader bindings: {}",
         report.material_shader_bindings

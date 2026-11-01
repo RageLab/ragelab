@@ -40,6 +40,7 @@ pub fn is_structured_command(command: &str) -> bool {
             | "inspect"
             | "glb.inspect"
             | "glb.geometry"
+            | "glb.tree"
             | "glb.export"
             | "glb.profile"
             | "validate"
@@ -1976,6 +1977,7 @@ pub fn normalize_command_args(args: Vec<String>) -> Vec<String> {
     let mapped = match (args[0].as_str(), args[1].as_str()) {
         ("glb", "inspect") => Some("glb.inspect"),
         ("glb", "geometry") => Some("glb.geometry"),
+        ("glb", "tree") => Some("glb.tree"),
         ("glb", "export") => Some("glb.export"),
         ("glb", "profile") => Some("glb.profile"),
         ("ydr", "info") => Some("ydr-info"),

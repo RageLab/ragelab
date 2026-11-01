@@ -213,6 +213,7 @@ pub struct MeshPrimitive {
     pub colors0: Option<Vec<[f32; 4]>>,
     pub uv0: Option<Vec<[f32; 2]>>,
     pub uv1: Option<Vec<[f32; 2]>>,
+    pub uv2: Option<Vec<[f32; 2]>>,
     pub indices: Vec<u32>,
     pub declaration: VertexDeclarationSummary,
 }
@@ -1842,6 +1843,40 @@ fn parse_geometry(
         None => None,
     };
 
+    let uv2 = match declaration.attributes[8] {
+        Some(attribute) if attribute.component_type == 5 => {
+            let mut values = Vec::with_capacity(vertex_count);
+            for vertex_index in 0..vertex_count {
+                values.push(read_vertex_vec2(
+                    vertex_bytes,
+                    vertex_index,
+                    usize::from(stride),
+                    attribute.offset,
+                )?);
+            }
+            Some(values)
+        }
+        Some(attribute) if attribute.component_type == 1 => {
+            let mut values = Vec::with_capacity(vertex_count);
+            for vertex_index in 0..vertex_count {
+                values.push(read_vertex_half2(
+                    vertex_bytes,
+                    vertex_index,
+                    usize::from(stride),
+                    attribute.offset,
+                )?);
+            }
+            Some(values)
+        }
+        Some(attribute) => {
+            return Err(YdrError::Unsupported(format!(
+                "TEXCOORD_2 component type {} is unsupported",
+                attribute.component_type
+            )))
+        }
+        None => None,
+    };
+
     let tangents = match declaration.attributes[14] {
         Some(attribute) if attribute.component_type == 7 => {
             let mut values = Vec::with_capacity(vertex_count);
@@ -1882,6 +1917,7 @@ fn parse_geometry(
         colors0,
         uv0,
         uv1,
+        uv2,
         indices,
         declaration: declaration.summary,
     })

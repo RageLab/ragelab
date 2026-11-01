@@ -1,0 +1,307 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ragelab.dev/schemas/ragelab.glb.ydr-export.v2.schema.json",
+  "title": "RageLab GLB to YDR Export Report v2",
+  "description": "Engine-owned report returned only after the generated YDR has been semantically reopened. Version 2 adds explicit node-subtree selection provenance. Runtime acceptance is not implied.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schemaVersion",
+    "sourceName",
+    "sourceSha256",
+    "sourceByteLength",
+    "profileSha256",
+    "outputSha256",
+    "outputByteLength",
+    "ydrVersion",
+    "geometryCount",
+    "vertexCount",
+    "triangleCount",
+    "embeddedTextureCount",
+    "textureFormats",
+    "profileValidated",
+    "materialCount",
+    "shaderGroup",
+    "shaderCount",
+    "shaderTemplate",
+    "materialShaderBindings",
+    "geometryShaderMappings",
+    "shaderTextureBindings",
+    "semanticReopen",
+    "runtimeRenderable",
+    "limitations",
+    "selection"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ragelab.glb.ydr-export"
+    },
+    "schemaVersion": {
+      "const": 2
+    },
+    "sourceName": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sourceSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "sourceByteLength": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "profileSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "outputSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "outputByteLength": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "ydrVersion": {
+      "const": 165
+    },
+    "geometryCount": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "vertexCount": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "triangleCount": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "embeddedTextureCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "textureFormats": {
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "rgba8",
+          "bc1",
+          "bc3",
+          "other"
+        ]
+      },
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "profileValidated": {
+      "const": true
+    },
+    "materialCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "shaderGroup": {
+      "enum": [
+        "not_emitted",
+        "empty",
+        "populated"
+      ]
+    },
+    "shaderCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "shaderTemplate": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source",
+            "index",
+            "preset",
+            "nameHash",
+            "fileHash",
+            "format",
+            "sha256"
+          ],
+          "properties": {
+            "source": {
+              "type": "string",
+              "minLength": 1
+            },
+            "index": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "preset": {
+              "enum": [
+                "normal.sps",
+                "spec.sps",
+                "normal_spec_tnt.sps",
+                "emissivenight.sps",
+                "emissive.sps"
+              ]
+            },
+            "nameHash": {
+              "type": "string",
+              "pattern": "^0x[0-9A-Fa-f]{8}$"
+            },
+            "fileHash": {
+              "type": "string",
+              "pattern": "^0x[0-9A-Fa-f]{8}$"
+            },
+            "format": {
+              "enum": [
+                "yft",
+                "ydr"
+              ]
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        }
+      ]
+    },
+    "materialShaderBindings": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "geometryShaderMappings": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "shaderTextureBindings": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "semanticReopen": {
+      "const": true
+    },
+    "runtimeRenderable": {
+      "const": false
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "source": {
+      "type": "string"
+    },
+    "output": {
+      "type": "string"
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schemaVersion",
+        "sceneIndex",
+        "selectedNodes",
+        "includedNodeIndices",
+        "includedMeshIndices",
+        "primitiveCount"
+      ],
+      "properties": {
+        "schema": {
+          "const": "ragelab.glb.node-selection"
+        },
+        "schemaVersion": {
+          "const": 1
+        },
+        "sceneIndex": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "selectedNodes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "nodeIndex",
+              "nodeName",
+              "includedNodeIndices",
+              "meshIndices",
+              "primitiveCount"
+            ],
+            "properties": {
+              "nodeIndex": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "nodeName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "includedNodeIndices": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "meshIndices": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "primitiveCount": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "includedNodeIndices": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "includedMeshIndices": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "primitiveCount": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

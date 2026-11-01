@@ -45,6 +45,7 @@ pub struct DecodedPrimitive {
     pub tangents: Option<Vec<[f32; 4]>>,
     pub texcoord_0: Option<Vec<[f32; 2]>>,
     pub texcoord_1: Option<Vec<[f32; 2]>>,
+    pub texcoord_2: Option<Vec<[f32; 2]>>,
     pub colors_0: Option<Vec<[f32; 4]>>,
     pub indices: Vec<u32>,
     pub unsupported_attributes: Vec<String>,
@@ -589,6 +590,27 @@ fn visit_node(
                     .collect::<Result<Vec<_>, GlbError>>()
             })
             .transpose()?;
+            let texcoord_2 = decode_optional_vec(
+                "TEXCOORD_2",
+                2,
+                attributes,
+                accessors,
+                buffer_views,
+                buffers,
+                bin,
+            )?
+            .map(|values| {
+                values
+                    .into_iter()
+                    .map(|value| {
+                        Ok([
+                            to_f32(value[0], "TEXCOORD_2")?,
+                            to_f32(value[1], "TEXCOORD_2")?,
+                        ])
+                    })
+                    .collect::<Result<Vec<_>, GlbError>>()
+            })
+            .transpose()?;
             let colors_0 =
                 decode_color_accessor(attributes, accessors, buffer_views, buffers, bin)?;
 
@@ -597,6 +619,7 @@ fn visit_node(
                 ("TANGENT", tangents.as_ref().map(Vec::len)),
                 ("TEXCOORD_0", texcoord_0.as_ref().map(Vec::len)),
                 ("TEXCOORD_1", texcoord_1.as_ref().map(Vec::len)),
+                ("TEXCOORD_2", texcoord_2.as_ref().map(Vec::len)),
                 ("COLOR_0", colors_0.as_ref().map(Vec::len)),
             ] {
                 if let Some(count) = count {
@@ -613,7 +636,13 @@ fn visit_node(
                 let semantic = semantic.as_str();
                 if !matches!(
                     semantic,
-                    "POSITION" | "NORMAL" | "TANGENT" | "TEXCOORD_0" | "TEXCOORD_1" | "COLOR_0"
+                    "POSITION"
+                        | "NORMAL"
+                        | "TANGENT"
+                        | "TEXCOORD_0"
+                        | "TEXCOORD_1"
+                        | "TEXCOORD_2"
+                        | "COLOR_0"
                 ) {
                     report.warnings.push(format!(
                         "node {node_index} mesh {mesh_index} primitive {primitive_index} attribute {semantic} was not imported"
@@ -648,6 +677,7 @@ fn visit_node(
                 tangents,
                 texcoord_0,
                 texcoord_1,
+                texcoord_2,
                 colors_0,
                 indices,
                 unsupported_attributes: attributes
@@ -660,6 +690,7 @@ fn visit_node(
                                 | "TANGENT"
                                 | "TEXCOORD_0"
                                 | "TEXCOORD_1"
+                                | "TEXCOORD_2"
                                 | "COLOR_0"
                         )
                     })
@@ -839,7 +870,7 @@ fn decode_vec_accessor(
         "NORMAL" | "TANGENT" => {
             component == 5126 || (normalized && matches!(component, 5120 | 5122))
         }
-        "TEXCOORD_0" | "TEXCOORD_1" | "COLOR_0" => {
+        "TEXCOORD_0" | "TEXCOORD_1" | "TEXCOORD_2" | "COLOR_0" => {
             component == 5126 || (normalized && matches!(component, 5121 | 5123))
         }
         _ => true,

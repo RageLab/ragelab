@@ -56,6 +56,7 @@ pub struct YdrGeometryInput {
     pub colors0: Option<Vec<[f32; 4]>>,
     pub uv0: Option<Vec<[f32; 2]>>,
     pub uv1: Option<Vec<[f32; 2]>>,
+    pub uv2: Option<Vec<[f32; 2]>>,
     pub tangents: Option<Vec<[f32; 4]>>,
     pub indices: Vec<u32>,
     /// Index into the Drawable ShaderGroup, when a verified shader template is supplied.
@@ -1010,6 +1011,14 @@ fn prepare_geometry(index: usize, input: &YdrGeometryInput) -> Result<PreparedGe
             )));
         }
     }
+    if let Some(uv2) = &input.uv2 {
+        if uv2.len() != vertex_count {
+            return Err(YdrError::Malformed(format!(
+                "geometry {index} has {} UV2 values for {vertex_count} vertices",
+                uv2.len()
+            )));
+        }
+    }
 
     let mut bounds_min = input.positions[0];
     let mut bounds_max = input.positions[0];
@@ -1046,6 +1055,11 @@ fn prepare_geometry(index: usize, input: &YdrGeometryInput) -> Result<PreparedGe
             validate_vec2(*uv, "TEXCOORD_1", index, vertex_index)?;
         }
     }
+    if let Some(uv2) = &input.uv2 {
+        for (vertex_index, uv) in uv2.iter().enumerate() {
+            validate_vec2(*uv, "TEXCOORD_2", index, vertex_index)?;
+        }
+    }
 
     let mut declaration_flags = 1u32;
     let mut declaration_types = 6u64;
@@ -1072,6 +1086,12 @@ fn prepare_geometry(index: usize, input: &YdrGeometryInput) -> Result<PreparedGe
     if input.uv1.is_some() {
         declaration_flags |= 1 << 7;
         declaration_types |= 5u64 << 28;
+        declaration_components += 1;
+        stride += 8;
+    }
+    if input.uv2.is_some() {
+        declaration_flags |= 1 << 8;
+        declaration_types |= 5u64 << 32;
         declaration_components += 1;
         stride += 8;
     }
@@ -1105,6 +1125,9 @@ fn prepare_geometry(index: usize, input: &YdrGeometryInput) -> Result<PreparedGe
         }
         if let Some(uv1) = &input.uv1 {
             append_vec2(&mut vertex_data, uv1[vertex_index]);
+        }
+        if let Some(uv2) = &input.uv2 {
+            append_vec2(&mut vertex_data, uv2[vertex_index]);
         }
         if let Some(tangents) = &input.tangents {
             append_vec4(&mut vertex_data, tangents[vertex_index]);
@@ -1186,6 +1209,7 @@ fn validate_geometry_only_output(
             || actual.colors0.is_some() != (source.declaration_flags & (1 << 4) != 0)
             || actual.uv0.is_some() != (source.declaration_flags & (1 << 6) != 0)
             || actual.uv1.is_some() != (source.declaration_flags & (1 << 7) != 0)
+            || actual.uv2.is_some() != (source.declaration_flags & (1 << 8) != 0)
             || actual.tangents.is_some() != (source.declaration_flags & (1 << 14) != 0)
             || actual.shader_index != source.shader_index
         {
@@ -1231,6 +1255,14 @@ fn validate_geometry_only_output(
                 if uv1[vertex] != expected_uv1 {
                     return Err(YdrError::Malformed(format!(
                         "geometry-only YDR primitive {index} UV1 vertex {vertex} changed during semantic reopen"
+                    )));
+                }
+            }
+            if let Some(uv2) = &actual.uv2 {
+                let expected_uv2 = read_vec2_from_bytes(&source.vertex_data, &mut cursor)?;
+                if uv2[vertex] != expected_uv2 {
+                    return Err(YdrError::Malformed(format!(
+                        "geometry-only YDR primitive {index} UV2 vertex {vertex} changed during semantic reopen"
                     )));
                 }
             }
@@ -1585,6 +1617,7 @@ mod tests {
             colors0: Some(vec![[1.0, 0.5, 0.25, 1.0]; 3]),
             uv0: Some(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]),
             uv1: Some(vec![[0.25, 0.25], [0.75, 0.25], [0.25, 0.75]]),
+            uv2: None,
             tangents: Some(vec![[1.0, 0.0, 0.0, 1.0]; 3]),
             indices: vec![0, 1, 2],
             shader_index: None,
@@ -2139,6 +2172,21 @@ mod tests {
         assert_eq!(document.model.bounds.min, [0.0, 0.0, 0.0]);
         assert_eq!(document.model.bounds.max, [1.0, 0.0, 1.0]);
         assert!(document.embedded_textures.is_none());
+    }
+
+    #[test]
+    fn writes_and_semantically_reopens_texcoord_2() {
+        let mut geometry = triangle();
+        let expected_uv2 = vec![[0.125, 0.25], [0.5, 0.75], [0.875, 1.0]];
+        geometry.uv2 = Some(expected_uv2.clone());
+
+        let bytes = build_geometry_only_ydr("writer_uv2", &[geometry]).unwrap();
+        let document = YdrDocument::from_bytes(&bytes).unwrap();
+        let primitive = &document.model.primitives[0];
+
+        assert_eq!(primitive.uv2, Some(expected_uv2));
+        assert_eq!(primitive.declaration.flags & (1 << 8), 1 << 8);
+        assert_eq!(primitive.declaration.stride, 68);
     }
 
     #[test]

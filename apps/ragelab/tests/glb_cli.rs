@@ -218,6 +218,142 @@ fn stdout_json(output: &std::process::Output) -> Value {
 }
 
 #[test]
+fn glb_tree_lists_the_selectable_node_hierarchy_in_json() {
+    let root = temp_root();
+    let source = root.join("group.glb");
+    fs::write(&source, triangle_glb_with_png()).unwrap();
+
+    let output = binary()
+        .args(["glb", "tree", source.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab should run");
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let body = stdout_json(&output);
+    assert_eq!(body["command"], "glb.tree");
+    assert_eq!(body["data"]["schema"], "ragelab.glb.node-tree");
+    assert_eq!(body["data"]["schemaVersion"], 1);
+    assert_eq!(body["data"]["nodeCount"], 1);
+    assert_eq!(body["data"]["meshNodeCount"], 1);
+    assert_eq!(body["data"]["primitiveCount"], 1);
+    assert_eq!(body["data"]["roots"][0]["nodeIndex"], 0);
+    assert_eq!(body["data"]["roots"][0]["name"], "Pumpkin");
+    assert_eq!(body["data"]["roots"][0]["meshIndex"], 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn glb_export_accepts_node_selection_and_reports_included_nodes() {
+    let root = temp_root();
+    let source = root.join("group.glb");
+    let output_path = root.join("selected.ydr");
+    fs::write(&source, triangle_glb_with_png()).unwrap();
+
+    let output = binary()
+        .args([
+            "glb",
+            "export",
+            source.to_str().unwrap(),
+            "--node",
+            "0",
+            "--output",
+            output_path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("ragelab should run");
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let body = stdout_json(&output);
+    assert_eq!(body["command"], "glb.export");
+    assert_eq!(body["data"]["schemaVersion"], 2);
+    assert_eq!(body["data"]["geometryCount"], 1);
+    assert_eq!(body["data"]["semanticReopen"], true);
+    assert_eq!(body["data"]["runtimeRenderable"], false);
+    assert_eq!(
+        body["data"]["selection"]["schema"],
+        "ragelab.glb.node-selection"
+    );
+    assert_eq!(
+        body["data"]["selection"]["selectedNodes"][0]["nodeIndex"],
+        0
+    );
+    assert_eq!(body["data"]["selection"]["includedNodeIndices"], json!([0]));
+    assert_eq!(body["data"]["selection"]["includedMeshIndices"], json!([0]));
+    assert_eq!(body["data"]["selection"]["primitiveCount"], 1);
+    assert!(output_path.is_file());
+    YdrDocument::from_bytes(&fs::read(&output_path).unwrap()).unwrap();
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn glb_export_rejects_invalid_and_duplicate_node_selection_without_output() {
+    let root = temp_root();
+    let source = root.join("group.glb");
+    let invalid_output = root.join("invalid-node.ydr");
+    let duplicate_output = root.join("duplicate-node.ydr");
+    fs::write(&source, triangle_glb_with_png()).unwrap();
+
+    let invalid = binary()
+        .args([
+            "glb",
+            "export",
+            source.to_str().unwrap(),
+            "--node",
+            "999",
+            "--output",
+            invalid_output.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("ragelab should run");
+    assert!(!invalid.status.success());
+    assert!(!invalid_output.exists());
+    let invalid_body = stdout_json(&invalid);
+    assert_eq!(invalid_body["error"]["code"], "invalid_input");
+    assert!(invalid_body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("selected node index 999 is out of range"));
+
+    let duplicate = binary()
+        .args([
+            "glb",
+            "export",
+            source.to_str().unwrap(),
+            "--node",
+            "0",
+            "--node",
+            "0",
+            "--output",
+            duplicate_output.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("ragelab should run");
+    assert!(!duplicate.status.success());
+    assert!(!duplicate_output.exists());
+    let duplicate_body = stdout_json(&duplicate);
+    assert_eq!(duplicate_body["error"]["code"], "invalid_input");
+    assert!(duplicate_body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("duplicate node indices"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn namespaced_glb_inspect_returns_structured_inventory() {
     let root = temp_root();
     let source = root.join("empty-model.glb");
@@ -354,6 +490,14 @@ fn glb_export_writes_structural_ydr_with_embedded_png_and_no_shader_claim() {
     assert_eq!(body["data"]["profileValidated"], true);
     assert_eq!(body["data"]["runtimeRenderable"], false);
     assert_eq!(body["data"]["materialShaderBindings"], 0);
+    assert!(body["data"]["limitations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item
+            .as_str()
+            .unwrap()
+            .contains("CodeWalker Model Viewer is not safe for shaderless drawables")));
     assert!(output_path.is_file());
 
     let bytes = fs::read(&output_path).unwrap();

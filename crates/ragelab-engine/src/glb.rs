@@ -4,7 +4,11 @@
 //! ragelab-gltf, YFT template parsing in ragelab-yft, and YDR serialization and
 //! semantic reopen in ragelab-ydr. No filesystem or process discovery occurs here.
 
-use std::{collections::BTreeMap, io, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io,
+    path::Path,
+};
 
 use ragelab_gltf::{
     decode_glb_geometry as decode_geometry, decode_glb_images, default_authoring_profile,
@@ -110,6 +114,31 @@ pub struct GlbYdrExportReport {
     #[ts(type = "false")]
     pub runtime_renderable: bool,
     pub limitations: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub selection: Option<GlbNodeSelectionReport>,
+}
+
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub struct GlbNodeSelectionReport {
+    pub schema: &'static str,
+    pub schema_version: u32,
+    pub scene_index: Option<usize>,
+    pub selected_nodes: Vec<GlbNodeSelectionEntry>,
+    pub included_node_indices: Vec<usize>,
+    pub included_mesh_indices: Vec<usize>,
+    pub primitive_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub struct GlbNodeSelectionEntry {
+    pub node_index: usize,
+    pub node_name: Option<String>,
+    pub included_node_indices: Vec<usize>,
+    pub mesh_indices: Vec<usize>,
+    pub primitive_count: usize,
 }
 
 #[derive(Debug)]
@@ -164,6 +193,21 @@ pub fn validate_glb_authoring_profile_bytes(
 }
 
 pub fn export_glb_to_ydr(request: GlbYdrExportRequest) -> Result<GlbYdrExportResult, io::Error> {
+    export_glb_to_ydr_internal(request, None)
+}
+
+/// Exports only the selected node subtrees; each selected node includes its descendants.
+pub fn export_glb_to_ydr_with_nodes(
+    request: GlbYdrExportRequest,
+    selected_node_indices: &[usize],
+) -> Result<GlbYdrExportResult, io::Error> {
+    export_glb_to_ydr_internal(request, Some(selected_node_indices))
+}
+
+fn export_glb_to_ydr_internal(
+    request: GlbYdrExportRequest,
+    selected_node_indices: Option<&[usize]>,
+) -> Result<GlbYdrExportResult, io::Error> {
     let source_name = request.source_name.as_str();
     let source_bytes = request.source_bytes.as_slice();
     let inspection = inspect_document(source_bytes, source_name).map_err(glb_validation_error)?;
@@ -251,9 +295,9 @@ pub fn export_glb_to_ydr(request: GlbYdrExportRequest) -> Result<GlbYdrExportRes
         .into_iter()
         .flatten()
         {
-            if binding.tex_coord > 1 {
+            if binding.tex_coord > 2 {
                 return Err(invalid_input(format!(
-                    "material {} texture {} uses TEXCOORD_{}, but the structural YDR writer supports UV sets 0 and 1 only",
+                    "material {} texture {} uses TEXCOORD_{}, but the structural YDR writer supports UV sets 0, 1 and 2 only",
                     material.source_material_index,
                     binding.texture_index,
                     binding.tex_coord
@@ -277,8 +321,28 @@ pub fn export_glb_to_ydr(request: GlbYdrExportRequest) -> Result<GlbYdrExportRes
         }
     }
 
-    let decoded_geometry =
+    let mut decoded_geometry =
         decode_geometry(source_bytes, source_name).map_err(glb_validation_error)?;
+    let selection_report = if let Some(selected_indices) = selected_node_indices {
+        let selection =
+            build_node_selection_report(&inspection, &decoded_geometry, selected_indices)?;
+        let included_nodes = selection
+            .included_node_indices
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        decoded_geometry
+            .primitives
+            .retain(|primitive| included_nodes.contains(&primitive.node_index));
+        if decoded_geometry.primitives.is_empty() {
+            return Err(invalid_input(
+                "selected node subtrees contain no exportable geometry in the active scene",
+            ));
+        }
+        Some(selection)
+    } else {
+        None
+    };
     if decoded_geometry.primitives.is_empty() {
         return Err(invalid_input(
             "selected GLB scene contains no exportable geometry",
@@ -302,6 +366,7 @@ pub fn export_glb_to_ydr(request: GlbYdrExportRequest) -> Result<GlbYdrExportRes
                 let available = match binding.tex_coord {
                     0 => primitive.texcoord_0.is_some(),
                     1 => primitive.texcoord_1.is_some(),
+                    2 => primitive.texcoord_2.is_some(),
                     _ => false,
                 };
                 if !available {
@@ -336,6 +401,7 @@ pub fn export_glb_to_ydr(request: GlbYdrExportRequest) -> Result<GlbYdrExportRes
             colors0: primitive.colors_0,
             uv0: primitive.texcoord_0,
             uv1: primitive.texcoord_1,
+            uv2: primitive.texcoord_2,
             tangents: primitive.tangents,
             indices: primitive.indices,
             shader_index: None,
@@ -546,6 +612,7 @@ pub fn export_glb_to_ydr(request: GlbYdrExportRequest) -> Result<GlbYdrExportRes
         vec![
             "YDR contains structural geometry and embedded textures only".to_owned(),
             "no ShaderFX templates or material bindings were emitted".to_owned(),
+            "CodeWalker Model Viewer is not safe for shaderless drawables: its BasicShader path dereferences DrawableGeometry.Shader; supply a verified --shader-template for interactive viewing".to_owned(),
             "output has not been accepted by GTA V runtime or CodeWalker".to_owned(),
         ]
     } else {
@@ -581,7 +648,7 @@ pub fn export_glb_to_ydr(request: GlbYdrExportRequest) -> Result<GlbYdrExportRes
 
     let report = GlbYdrExportReport {
         schema: "ragelab.glb.ydr-export",
-        schema_version: 1,
+        schema_version: if selection_report.is_some() { 2 } else { 1 },
         source_name: source_name.to_owned(),
         source_sha256: inspection.source.sha256.clone(),
         source_byte_length: source_bytes.len(),
@@ -613,6 +680,7 @@ pub fn export_glb_to_ydr(request: GlbYdrExportRequest) -> Result<GlbYdrExportRes
         semantic_reopen: true,
         runtime_renderable: false,
         limitations,
+        selection: selection_report,
     };
 
     Ok(GlbYdrExportResult {
@@ -661,6 +729,169 @@ fn drawable_name_from_source_name(source_name: &str) -> String {
     } else {
         normalized
     }
+}
+
+fn build_node_selection_report(
+    inspection: &GlbInspectionReport,
+    geometry: &DecodedGeometryReport,
+    selected_node_indices: &[usize],
+) -> Result<GlbNodeSelectionReport, io::Error> {
+    if selected_node_indices.is_empty() {
+        return Err(invalid_input(
+            "node selection must contain at least one node index",
+        ));
+    }
+
+    let nodes_by_index = inspection
+        .nodes
+        .iter()
+        .map(|node| (node.index, node))
+        .collect::<BTreeMap<_, _>>();
+    let requested = selected_node_indices
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if requested.len() != selected_node_indices.len() {
+        return Err(invalid_input(
+            "node selection contains duplicate node indices",
+        ));
+    }
+    for index in &requested {
+        if !nodes_by_index.contains_key(index) {
+            return Err(invalid_input(format!(
+                "selected node index {index} is out of range ({} nodes)",
+                inspection.nodes.len()
+            )));
+        }
+    }
+
+    let mut parents = BTreeMap::new();
+    for node in &inspection.nodes {
+        for child_index in &node.children {
+            if parents.insert(*child_index, node.index).is_some() {
+                return Err(invalid_data(format!(
+                    "GLB node {child_index} is referenced by more than one parent"
+                )));
+            }
+        }
+    }
+
+    let scene_index = inspection
+        .default_scene
+        .or_else(|| (!inspection.scenes.is_empty()).then_some(0));
+    let roots = if let Some(index) = scene_index {
+        inspection
+            .scenes
+            .get(index)
+            .ok_or_else(|| invalid_data(format!("active scene index {index} is out of range")))?
+            .nodes
+            .clone()
+    } else {
+        inspection
+            .nodes
+            .iter()
+            .filter(|node| !parents.contains_key(&node.index))
+            .map(|node| node.index)
+            .collect()
+    };
+
+    let mut scene_nodes = BTreeSet::new();
+    let mut pending = roots;
+    while let Some(index) = pending.pop() {
+        if !scene_nodes.insert(index) {
+            return Err(invalid_data(format!(
+                "active scene contains a cycle or repeated node reference at {index}"
+            )));
+        }
+        let node = nodes_by_index
+            .get(&index)
+            .ok_or_else(|| invalid_data(format!("active scene references missing node {index}")))?;
+        pending.extend(node.children.iter().copied());
+    }
+
+    for index in &requested {
+        if !scene_nodes.contains(index) {
+            return Err(invalid_input(format!(
+                "selected node {index} is not reachable from the active scene"
+            )));
+        }
+        let mut ancestor = parents.get(index).copied();
+        while let Some(parent_index) = ancestor {
+            if requested.contains(&parent_index) {
+                return Err(invalid_input(format!(
+                    "selected node {index} is already included by selected ancestor {parent_index}; select only the highest group"
+                )));
+            }
+            ancestor = parents.get(&parent_index).copied();
+        }
+    }
+
+    let mut selected_entries = Vec::with_capacity(requested.len());
+    let mut included_node_indices = BTreeSet::new();
+    let mut included_mesh_indices = BTreeSet::new();
+    for root_index in requested {
+        let mut subtree_nodes = BTreeSet::new();
+        let mut pending = vec![root_index];
+        while let Some(index) = pending.pop() {
+            if !subtree_nodes.insert(index) {
+                return Err(invalid_data(format!(
+                    "selected subtree rooted at node {root_index} repeats node {index}"
+                )));
+            }
+            let node = nodes_by_index.get(&index).ok_or_else(|| {
+                invalid_data(format!("selected subtree references missing node {index}"))
+            })?;
+            pending.extend(node.children.iter().copied());
+        }
+        for index in &subtree_nodes {
+            if !included_node_indices.insert(*index) {
+                return Err(invalid_input(format!(
+                    "selected node subtrees overlap at node {index}"
+                )));
+            }
+            if let Some(mesh_index) = nodes_by_index[index].mesh_index {
+                included_mesh_indices.insert(mesh_index);
+            }
+        }
+        let node = nodes_by_index[&root_index];
+        let mesh_indices = subtree_nodes
+            .iter()
+            .filter_map(|index| nodes_by_index[index].mesh_index)
+            .collect::<BTreeSet<_>>();
+        let primitive_count = geometry
+            .primitives
+            .iter()
+            .filter(|primitive| subtree_nodes.contains(&primitive.node_index))
+            .count();
+        selected_entries.push(GlbNodeSelectionEntry {
+            node_index: root_index,
+            node_name: node.name.clone(),
+            included_node_indices: subtree_nodes.into_iter().collect(),
+            mesh_indices: mesh_indices.into_iter().collect(),
+            primitive_count,
+        });
+    }
+
+    let primitive_count = geometry
+        .primitives
+        .iter()
+        .filter(|primitive| included_node_indices.contains(&primitive.node_index))
+        .count();
+    if primitive_count == 0 {
+        return Err(invalid_input(
+            "selected nodes contain no mesh primitives in the active scene",
+        ));
+    }
+
+    Ok(GlbNodeSelectionReport {
+        schema: "ragelab.glb.node-selection",
+        schema_version: 1,
+        scene_index,
+        selected_nodes: selected_entries,
+        included_node_indices: included_node_indices.into_iter().collect(),
+        included_mesh_indices: included_mesh_indices.into_iter().collect(),
+        primitive_count,
+    })
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1707,6 +1938,12 @@ mod tests {
         .unwrap();
         assert!(result.report.semantic_reopen);
         assert!(!result.report.runtime_renderable);
+        assert!(result
+            .report
+            .limitations
+            .iter()
+            .any(|item| item
+                .contains("CodeWalker Model Viewer is not safe for shaderless drawables")));
         assert!(!result.output_bytes.is_empty());
         assert_eq!(result.report.output_byte_length, result.output_bytes.len());
         assert_eq!(
@@ -1718,6 +1955,116 @@ mod tests {
         assert_eq!(result.report.vertex_count, 3);
         assert_eq!(result.report.triangle_count, 1);
         YdrDocument::from_bytes(&result.output_bytes).unwrap();
+    }
+
+    #[test]
+    fn node_selection_includes_descendants_preserves_world_transforms_and_rejects_overlap() {
+        let bytes = triangle_glb();
+        let geometry = decode_glb_geometry_bytes(&bytes, "group.glb").unwrap();
+        assert_eq!(geometry.primitives.len(), 1);
+        assert_eq!(geometry.primitives[0].node_index, 1);
+        assert_eq!(geometry.primitives[0].positions[0], [5.0, 0.0, 3.0]);
+
+        let selected_group = export_glb_to_ydr_with_nodes(
+            GlbYdrExportRequest {
+                source_name: "group.glb".into(),
+                source_bytes: bytes.clone(),
+                profile_bytes: None,
+                shader_template: None,
+                shader_index: 0,
+            },
+            &[0],
+        )
+        .unwrap();
+        assert!(selected_group.report.semantic_reopen);
+        assert_eq!(selected_group.report.schema_version, 2);
+        assert_eq!(selected_group.report.geometry_count, 1);
+        let selection = selected_group.report.selection.unwrap();
+        assert_eq!(selection.schema, "ragelab.glb.node-selection");
+        assert_eq!(selection.selected_nodes.len(), 1);
+        assert_eq!(selection.selected_nodes[0].node_index, 0);
+        assert_eq!(
+            selection.selected_nodes[0].included_node_indices,
+            vec![0, 1]
+        );
+        assert_eq!(selection.included_mesh_indices, vec![0]);
+        assert_eq!(selection.primitive_count, 1);
+
+        let selected_leaf = export_glb_to_ydr_with_nodes(
+            GlbYdrExportRequest {
+                source_name: "group.glb".into(),
+                source_bytes: bytes.clone(),
+                profile_bytes: None,
+                shader_template: None,
+                shader_index: 0,
+            },
+            &[1],
+        )
+        .unwrap();
+        assert_eq!(selected_leaf.report.geometry_count, 1);
+        assert_eq!(
+            selected_leaf
+                .report
+                .selection
+                .unwrap()
+                .included_node_indices,
+            vec![1]
+        );
+        YdrDocument::from_bytes(&selected_leaf.output_bytes).unwrap();
+
+        let overlap = export_glb_to_ydr_with_nodes(
+            GlbYdrExportRequest {
+                source_name: "group.glb".into(),
+                source_bytes: bytes.clone(),
+                profile_bytes: None,
+                shader_template: None,
+                shader_index: 0,
+            },
+            &[0, 1],
+        )
+        .unwrap_err();
+        assert!(overlap
+            .to_string()
+            .contains("already included by selected ancestor 0"));
+
+        let duplicate = export_glb_to_ydr_with_nodes(
+            GlbYdrExportRequest {
+                source_name: "group.glb".into(),
+                source_bytes: bytes.clone(),
+                profile_bytes: None,
+                shader_template: None,
+                shader_index: 0,
+            },
+            &[1, 1],
+        )
+        .unwrap_err();
+        assert!(duplicate.to_string().contains("duplicate node indices"));
+
+        let empty = export_glb_to_ydr_with_nodes(
+            GlbYdrExportRequest {
+                source_name: "group.glb".into(),
+                source_bytes: bytes.clone(),
+                profile_bytes: None,
+                shader_template: None,
+                shader_index: 0,
+            },
+            &[],
+        )
+        .unwrap_err();
+        assert!(empty.to_string().contains("at least one node index"));
+
+        let invalid = export_glb_to_ydr_with_nodes(
+            GlbYdrExportRequest {
+                source_name: "group.glb".into(),
+                source_bytes: bytes,
+                profile_bytes: None,
+                shader_template: None,
+                shader_index: 0,
+            },
+            &[99],
+        )
+        .unwrap_err();
+        assert!(invalid.to_string().contains("out of range"));
     }
 
     fn triangle_glb() -> Vec<u8> {
@@ -1739,7 +2086,10 @@ mod tests {
             "asset": {"version": "2.0", "generator": "RageLab engine unit fixture"},
             "scene": 0,
             "scenes": [{"nodes": [0]}],
-            "nodes": [{"name": "Triangle", "mesh": 0}],
+            "nodes": [
+                {"name": "RootGroup", "translation": [5.0, 0.0, 0.0], "children": [1]},
+                {"name": "Triangle", "mesh": 0, "translation": [0.0, 3.0, 0.0]}
+            ],
             "meshes": [{
                 "name": "TriangleMesh",
                 "primitives": [{

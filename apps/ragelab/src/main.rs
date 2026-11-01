@@ -85,6 +85,9 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn Error>> {
         "glb.geometry" => {
             glb_cmd::geometry(args.collect())?;
         }
+        "glb.tree" => {
+            glb_cmd::tree(args.collect())?;
+        }
         "glb.export" => {
             glb_cmd::export(args.collect())?;
         }
@@ -634,6 +637,8 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "inspect",
         "glb.inspect",
         "glb.geometry",
+        "glb.tree",
+        "glb.export",
         "glb.profile.init",
         "glb.profile.validate",
         "validate",
@@ -817,7 +822,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
                 "version": env!("CARGO_PKG_VERSION"),
                 "commands": DISCOVERY_COMMANDS,
                 "canonicalCommands": CANONICAL_COMMANDS,
-                "structuredOutput": ["version", "capabilities", "inspect", "glb.inspect", "glb.geometry", "glb.profile.init", "glb.profile.validate", "validate", "spatial", "preview", "plan", "apply", "workspace.preflight", "workspace.export", "workspace.scene", "workspace.render-package", "render.asset", "render.scene", "render.compare", "gta.discover", "gta.catalog", "gta.rpf-order", "gta.rpf-index", "gta.world-query", "gta.mlo-validate", "rpf.keys", "rpf.info", "rpf.list", "rpf.extract", "fivem.discover"],
+                "structuredOutput": ["version", "capabilities", "inspect", "glb.inspect", "glb.geometry", "glb.tree", "glb.export", "glb.profile.init", "glb.profile.validate", "validate", "spatial", "preview", "plan", "apply", "workspace.preflight", "workspace.export", "workspace.scene", "workspace.render-package", "render.asset", "render.scene", "render.compare", "gta.discover", "gta.catalog", "gta.rpf-order", "gta.rpf-index", "gta.world-query", "gta.mlo-validate", "rpf.keys", "rpf.info", "rpf.list", "rpf.extract", "fivem.discover"],
                 "legacyAliases": LEGACY_ALIASES,
                 "responseEnvelope": {
                     "schema": agent::RESPONSE_SCHEMA,
@@ -842,7 +847,8 @@ Agent-first commands:\n  \
 ragelab inspect <file> [--json]\n  \
 ragelab glb inspect <file.glb> [--json]\n  \
 ragelab glb geometry <file.glb> [--json]\n  \
-ragelab glb export <source.glb> --output <output.ydr> [--profile <profile.json>] [--shader-template <template.yft|template.ydr>] [--shader-index <n>] [--overwrite] [--json]\n  \
+ragelab glb tree <file.glb> [--json]\n  \
+ragelab glb export <source.glb> --output <output.ydr> [--node <index> ...] [--profile <profile.json>] [--shader-template <template.yft|template.ydr>] [--shader-index <n>] [--overwrite] [--json]\n  \
 ragelab glb profile init <source.glb> --output <profile.json> [--overwrite] [--json]\n  \
 ragelab glb profile validate <source.glb> <profile.json> [--json]\n  \
 ragelab capabilities [file] [--json]\n  \
