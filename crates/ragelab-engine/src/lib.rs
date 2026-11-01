@@ -18,36 +18,32 @@ use ragelab_hash::joaat;
 use ragelab_ymf::{ManifestFlags, Ymf};
 use serde::{Deserialize, Serialize};
 
-mod asset;
-mod catalog;
-mod discovery;
-mod game_index;
-mod glb;
-mod operations;
-mod preview;
-mod render;
-mod rpf;
-mod scene;
-mod spatial;
-mod texture_authoring;
-mod world_authoring;
-mod world_stream;
-mod ydr;
-pub use asset::*;
-pub use catalog::*;
-pub use discovery::*;
-pub use game_index::*;
-pub use glb::*;
-pub use operations::*;
-pub use preview::*;
-pub use render::*;
-pub use rpf::*;
-pub use scene::*;
-pub use spatial::*;
-pub use texture_authoring::*;
-pub use world_authoring::*;
-pub use world_stream::*;
-pub use ydr::*;
+macro_rules! declare_core_modules {
+    ($($module:ident),+ $(,)?) => {
+        $(mod $module;)+
+        $(pub use $module::*;)+
+        pub const CORE_COMPILED_MODULES: &[&str] = &[$(stringify!($module)),+];
+    };
+}
+
+declare_core_modules!(
+    asset,
+    catalog,
+    diagnostics,
+    discovery,
+    game_index,
+    glb,
+    operations,
+    preview,
+    render,
+    rpf,
+    scene,
+    spatial,
+    texture_authoring,
+    world_authoring,
+    world_stream,
+    ydr,
+);
 
 /// Git revision of the Core source used for this build ("unknown" outside a Git checkout).
 pub const CORE_REVISION: &str = env!("RAGELAB_CORE_REVISION");

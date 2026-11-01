@@ -68,6 +68,39 @@ enum AssetFormat {
 }
 
 impl AssetFormat {
+    const ALL: &'static [Self] = &[
+        Self::Ymap,
+        Self::Ytyp,
+        Self::Ymf,
+        Self::Ydr,
+        Self::Ydd,
+        Self::Ytd,
+        Self::Ybn,
+        Self::Yft,
+        Self::Ycd,
+        Self::Ymt,
+        Self::Yld,
+        Self::Ynv,
+    ];
+
+    const fn extension(self) -> &'static str {
+        match self {
+            Self::Ymap => "ymap",
+            Self::Ytyp => "ytyp",
+            Self::Ymf => "ymf",
+            Self::Ydr => "ydr",
+            Self::Ydd => "ydd",
+            Self::Ytd => "ytd",
+            Self::Ybn => "ybn",
+            Self::Yft => "yft",
+            Self::Ycd => "ycd",
+            Self::Ymt => "ymt",
+            Self::Yld => "yld",
+            Self::Ynv => "ynv",
+            Self::Unknown => "",
+        }
+    }
+
     fn from_path(path: &Path) -> Self {
         match path
             .extension()
@@ -168,6 +201,29 @@ pub struct AssetCapabilitiesReport {
 
 pub fn asset_type_name(path: &Path) -> &'static str {
     AssetFormat::from_path(path).name()
+}
+
+pub(crate) fn registered_asset_formats() -> Vec<crate::CompiledAssetFormat> {
+    AssetFormat::ALL
+        .iter()
+        .copied()
+        .map(|format| {
+            let semantic_parser = format.has_semantic_parser();
+            crate::CompiledAssetFormat {
+                id: format.name(),
+                extension: format.extension(),
+                semantic_parser,
+                support: if semantic_parser { "semantic" } else { "containerOnly" },
+                limitation: match format {
+                    AssetFormat::Yft => Some("Legacy v162 mainDrawable parser scope only"),
+                    AssetFormat::Ycd | AssetFormat::Ymt | AssetFormat::Yld | AssetFormat::Ynv => {
+                        Some("RSC7 container support only; no format-specific semantic parser is registered")
+                    }
+                    _ => None,
+                },
+            }
+        })
+        .collect()
 }
 
 pub fn inspect_asset(path: &Path) -> Result<AssetInspectionReport, io::Error> {

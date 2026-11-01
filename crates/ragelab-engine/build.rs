@@ -20,7 +20,40 @@ fn git_output(root: &Path, args: &[&str]) -> Option<String> {
 fn main() {
     println!("cargo:rerun-if-env-changed=RAGELAB_CORE_REVISION");
     println!("cargo:rerun-if-env-changed=RAGELAB_CORE_DIRTY");
+    for key in [
+        "TARGET",
+        "CARGO_CFG_TARGET_OS",
+        "CARGO_CFG_TARGET_ARCH",
+        "CARGO_CFG_TARGET_ENV",
+        "CARGO_CFG_TARGET_FAMILY",
+        "PROFILE",
+    ] {
+        println!("cargo:rerun-if-env-changed={key}");
+    }
     println!("cargo:rerun-if-changed=build.rs");
+
+    let target = env::var("TARGET").unwrap_or_else(|_| "unknown".to_owned());
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| "unknown".to_owned());
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "unknown".to_owned());
+    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_else(|_| "none".to_owned());
+    let target_family = env::var("CARGO_CFG_TARGET_FAMILY").unwrap_or_default();
+    let profile = env::var("PROFILE").unwrap_or_else(|_| "unknown".to_owned());
+    let mut features = env::vars()
+        .filter_map(|(key, value)| {
+            key.strip_prefix("CARGO_FEATURE_")
+                .filter(|_| value == "1")
+                .map(|feature| feature.to_ascii_lowercase().replace('_', "-"))
+        })
+        .collect::<Vec<_>>();
+    features.sort();
+    let features = features.join(",");
+    println!("cargo:rustc-env=RAGELAB_BUILD_TARGET={target}");
+    println!("cargo:rustc-env=RAGELAB_BUILD_TARGET_OS={target_os}");
+    println!("cargo:rustc-env=RAGELAB_BUILD_TARGET_ARCH={target_arch}");
+    println!("cargo:rustc-env=RAGELAB_BUILD_TARGET_ENV={target_env}");
+    println!("cargo:rustc-env=RAGELAB_BUILD_TARGET_FAMILY={target_family}");
+    println!("cargo:rustc-env=RAGELAB_BUILD_PROFILE={profile}");
+    println!("cargo:rustc-env=RAGELAB_BUILD_FEATURES={features}");
 
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest dir"));
     let workspace_root = manifest_dir
