@@ -4,7 +4,7 @@
 - Workspace: `D:\DEV\_RageLab\ragelab`.
 - Board: `board_015c3e1a-c568-4d7d-a214-f0a247f758d6` — RageLab Core — CLI, Asset Pipeline & Studio Foundation.
 - Card atual: `task_00711e72-aeba-4c1c-ae19-623663d54297` — Batch — Pipeline por manifest versionado.
-- Branch: `main`; último checkpoint local: `b8d49546d4e41440bf16845609e1feb3dffd6551` (`b8d4954`, Quality/hardening). `origin/main` continua na base inicial `366ba6925e8a402e08759c268bc09a47099418ed`; não foi feito push. Usuário autorizou commits locais incrementais por marco validado; não fazer push sem pedido explícito.
+- Branch: main; último checkpoint funcional: 4d2d526 (feat(asset-pipeline): add GLB batch and validation reports); origin/main continua na base inicial 366ba6925e8a402e08759c268bc09a47099418ed. Há 3 commits locais à frente; não foi feito push.
 - Preservação: seis exemplos locais de profiling permanecem untracked e intocados. Alterações locais GLB da etapa anterior permanecem na working tree. Não modificar arquivos de instalação GTA/FiveM nem assets externos.
 - Nenhuma sessão/terminal do RageLab foi iniciada ou deixada em execução.
 
@@ -152,7 +152,7 @@ Uma execução de `clippy --all-targets` no Engine incluiu os seis exemplos de p
 
 ### Git / preservação
 - Checkpoint local criado: b8d49546d4e41440bf16845609e1feb3dffd6551 — test(quality): add fixture and hardening gates (8 arquivos, 492 inserções/7 remoções).
-- main está um commit à frente de origin/main; nenhum push foi executado.
+- main está três commits à frente de origin/main; nenhum push foi executado.
 - Seis exemplos de profiling untracked preservados e não editados.
 - Nenhum asset proprietário ou arquivo da instalação GTA/FiveM foi modificado.
 
@@ -169,6 +169,7 @@ Uma execução de `clippy --all-targets` no Engine incluiu os seis exemplos de p
 - Dispatch/normalização/capabilities/structured output/help CLI conectados para ragelab glb batch <manifest.json> [--json]; erro batch_failed mantém agregado no envelope JSON.
 - Schemas Draft 2020-12: docs/schemas/ragelab.glb.batch-manifest.v1.schema.json e docs/schemas/ragelab.glb.batch-report.v1.schema.json. Documentação em docs/GLB_BATCH.md, README e CLI contract.
 - Testes: 7 unit tests cobrindo strict schema, required nullable template, path escape, preflight global sem writes, colisão de destinos, continue isolamento, fail-fast cancellation, ordenação e determinismo byte a byte; 1 end-to-end CLI com export real + sidecar + aggregate.
+- Commits locais desta etapa: b8d49546d4e41440bf16845609e1feb3dffd6551 (test(quality): add fixture and hardening gates) e 4d2d526 (feat(asset-pipeline): add GLB batch and validation reports). Branch main está 3 commits à frente de origin/main; push não executado.
 - Gates completos executados: cargo check --locked --workspace PASS; cargo test --locked --workspace PASS (um teste YFT externo ignored por exigir RAGELAB_TEST_YFT); cargo clippy --locked --workspace --lib --tests -- -D warnings PASS; cargo fmt --all -- --check PASS; git diff --check PASS; python scripts/validate_synthetic.py, validate_synthetic_ymf.py e check_hardening.py PASS; schemas Draft 2020-12 + exemplos válidos/inválidos PASS. Batch unit 7/7; GLB CLI 35/35; CLI contract 33/33; Clippy app --all-targets --no-deps PASS. O comando CI exato cargo clippy --locked --workspace --all-targets -- -D warnings falha somente nos três exemplos locais world_lod_profile.rs, world_prefetch_profile.rs e world_asset_overlap.rs por field_reassign_with_default; seis exemplos de profiling foram preservados sem edição. Pendentes: revisão do staging, commit do grupo asset pipeline e fechamento do checklist/auditoria.
 
 ## Próxima ação
