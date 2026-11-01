@@ -2167,7 +2167,7 @@ const STREAMING_UPLOAD_TIME_BUDGET: Duration = Duration::from_millis(4);
 
 fn streaming_draw_ranges(count: usize) -> Vec<std::ops::Range<usize>> {
     if count == 0 {
-        return vec![0..0]; // Standalone asset packages still require one build.
+        return std::iter::once(0..0).collect(); // Standalone asset packages still require one build.
     }
     (0..count)
         .step_by(STREAMING_DRAW_INSTANCES_PER_ITEM)
@@ -4047,7 +4047,10 @@ mod tests {
 
     #[test]
     fn streamed_instance_bindings_are_partitioned_without_loss_or_overlap() {
-        assert_eq!(streaming_draw_ranges(0), vec![0..0]);
+        // Empty standalone packages still schedule one zero-length build.
+        let empty_package_ranges = streaming_draw_ranges(0);
+        assert_eq!(empty_package_ranges.len(), 1);
+        assert_eq!(empty_package_ranges[0], 0..0);
         assert_eq!(streaming_draw_ranges(1), vec![0..1]);
         assert_eq!(streaming_draw_ranges(64), vec![0..32, 32..64]);
         assert_eq!(streaming_draw_ranges(65), vec![0..32, 32..64, 64..65]);
