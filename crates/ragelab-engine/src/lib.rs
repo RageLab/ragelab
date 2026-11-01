@@ -32,6 +32,7 @@ mod spatial;
 mod texture_authoring;
 mod world_authoring;
 mod world_stream;
+mod ydr;
 pub use asset::*;
 pub use catalog::*;
 pub use discovery::*;
@@ -46,6 +47,7 @@ pub use spatial::*;
 pub use texture_authoring::*;
 pub use world_authoring::*;
 pub use world_stream::*;
+pub use ydr::*;
 
 /// Git revision of the Core source used for this build ("unknown" outside a Git checkout).
 pub const CORE_REVISION: &str = env!("RAGELAB_CORE_REVISION");

@@ -1,7 +1,10 @@
 mod agent;
 mod bridge_cmd;
+mod glb_batch;
 mod glb_cmd;
+mod glb_export_report;
 mod rpf_cmd;
+mod ydr_cmd;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -42,9 +45,39 @@ fn main() {
         && agent::is_structured_command(&command);
 
     if let Err(error) = run(args) {
-        let (exit_code, _) = agent::classify_exit(error.as_ref());
+        let glb_validation_failure = error.downcast_ref::<glb_cmd::ValidationCommandError>();
+        let ydr_validation_failure = error.downcast_ref::<ydr_cmd::ValidationCommandError>();
+        let batch_failure = error.downcast_ref::<glb_batch::BatchCommandError>();
+        let exit_code = glb_validation_failure
+            .map(|failure| failure.exit_code)
+            .or_else(|| ydr_validation_failure.map(|failure| failure.exit_code))
+            .or_else(|| batch_failure.map(|failure| failure.exit_code))
+            .unwrap_or_else(|| agent::classify_exit(error.as_ref()).0);
         if structured_error {
-            agent::print_error(&command, error.as_ref());
+            if let Some(failure) = glb_validation_failure {
+                let _ = agent::print_failure_with_data(
+                    &command,
+                    failure.error_code,
+                    &failure.message,
+                    failure.report.clone(),
+                );
+            } else if let Some(failure) = ydr_validation_failure {
+                let _ = agent::print_failure_with_data(
+                    &command,
+                    failure.error_code,
+                    &failure.message,
+                    failure.report.clone(),
+                );
+            } else if let Some(failure) = batch_failure {
+                let _ = agent::print_failure_with_data(
+                    &command,
+                    failure.error_code,
+                    &failure.message,
+                    failure.report.clone(),
+                );
+            } else {
+                agent::print_error(&command, error.as_ref());
+            }
         } else {
             eprintln!("error: {error}");
         }
@@ -82,6 +115,9 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn Error>> {
         "glb.inspect" => {
             glb_cmd::inspect(args.collect())?;
         }
+        "glb.validate" => {
+            glb_cmd::validate(args.collect())?;
+        }
         "glb.geometry" => {
             glb_cmd::geometry(args.collect())?;
         }
@@ -91,8 +127,17 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn Error>> {
         "glb.export" => {
             glb_cmd::export(args.collect())?;
         }
+        "glb.batch" => {
+            glb_batch::run(args.collect())?;
+        }
         "glb.profile" => {
             glb_cmd::profile(args.collect())?;
+        }
+        "ydr.inspect" => {
+            ydr_cmd::inspect(args.collect())?;
+        }
+        "ydr.validate" => {
+            ydr_cmd::validate(args.collect())?;
         }
         "validate" => {
             let (path, json) =
@@ -636,9 +681,11 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "capabilities",
         "inspect",
         "glb.inspect",
+        "glb.validate",
         "glb.geometry",
         "glb.tree",
         "glb.export",
+        "glb.batch",
         "glb.profile.init",
         "glb.profile.validate",
         "validate",
@@ -650,6 +697,8 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "meta-hash",
         "probe",
         "ydr.info",
+        "ydr.inspect",
+        "ydr.validate",
         "ydr.translate",
         "ydr.rebind-texture",
         "ydr.rebind-shader",
@@ -729,6 +778,14 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "version",
         "capabilities",
         "inspect",
+        "glb.inspect",
+        "glb.validate",
+        "glb.geometry",
+        "glb.tree",
+        "glb.export",
+        "glb.batch",
+        "glb.profile.init",
+        "glb.profile.validate",
         "validate",
         "spatial",
         "preview",
@@ -766,6 +823,8 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
         "scan",
         "vanilla-index",
         "ydr.info",
+        "ydr.inspect",
+        "ydr.validate",
         "ydr.translate",
         "ydr.rebind-texture",
         "ydr.rebind-shader",
@@ -822,7 +881,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
                 "version": env!("CARGO_PKG_VERSION"),
                 "commands": DISCOVERY_COMMANDS,
                 "canonicalCommands": CANONICAL_COMMANDS,
-                "structuredOutput": ["version", "capabilities", "inspect", "glb.inspect", "glb.geometry", "glb.tree", "glb.export", "glb.profile.init", "glb.profile.validate", "validate", "spatial", "preview", "plan", "apply", "workspace.preflight", "workspace.export", "workspace.scene", "workspace.render-package", "render.asset", "render.scene", "render.compare", "gta.discover", "gta.catalog", "gta.rpf-order", "gta.rpf-index", "gta.world-query", "gta.mlo-validate", "rpf.keys", "rpf.info", "rpf.list", "rpf.extract", "fivem.discover"],
+                "structuredOutput": ["version", "capabilities", "inspect", "glb.inspect", "glb.validate", "ydr.inspect", "ydr.validate", "glb.geometry", "glb.tree", "glb.export", "glb.batch", "glb.profile.init", "glb.profile.validate", "validate", "spatial", "preview", "plan", "apply", "workspace.preflight", "workspace.export", "workspace.scene", "workspace.render-package", "render.asset", "render.scene", "render.compare", "gta.discover", "gta.catalog", "gta.rpf-order", "gta.rpf-index", "gta.world-query", "gta.mlo-validate", "rpf.keys", "rpf.info", "rpf.list", "rpf.extract", "fivem.discover"],
                 "legacyAliases": LEGACY_ALIASES,
                 "responseEnvelope": {
                     "schema": agent::RESPONSE_SCHEMA,
@@ -846,9 +905,10 @@ fn print_help() {
 Agent-first commands:\n  \
 ragelab inspect <file> [--json]\n  \
 ragelab glb inspect <file.glb> [--json]\n  \
+ragelab glb validate <source.glb> [--profile <profile.json>] [--shader-template <template.yft|template.ydr>] [--shader-index <n>] [--strict] [--json]\n  \
 ragelab glb geometry <file.glb> [--json]\n  \
 ragelab glb tree <file.glb> [--json]\n  \
-ragelab glb export <source.glb> --output <output.ydr> [--node <index> ...] [--profile <profile.json>] [--shader-template <template.yft|template.ydr>] [--shader-index <n>] [--overwrite] [--json]\n  \
+ragelab glb export <source.glb> --output <output.ydr> [--node <index> ...] [--profile <profile.json>] [--shader-template <template.yft|template.ydr>] [--shader-index <n>] [--overwrite] [--json]\n  ragelab glb batch <manifest.json> [--json]\n  \
 ragelab glb profile init <source.glb> --output <profile.json> [--overwrite] [--json]\n  \
 ragelab glb profile validate <source.glb> <profile.json> [--json]\n  \
 ragelab capabilities [file] [--json]\n  \
@@ -859,7 +919,9 @@ ragelab plan <operation.json> [--json]\n  \
 ragelab apply <operation.json> [--json]\n  \
 ragelab version [--json]\n\n\
 Format commands:\n  \
-ragelab ydr info <file.ydr>\n  \
+ragelab ydr info <file.ydr>\n  \\
+ragelab ydr inspect <file.ydr> [--json]\n  \\
+ragelab ydr validate <file.ydr> [--strict] [--json]\n  \\
 ragelab ydr translate <source.ydr> <dx> <dy> <dz> <output.ydr>\n  \
 ragelab ydr rebind-texture <source.ydr> <source-shader> <source-param> <target-shader> <target-param> <output.ydr>\n  \
 ragelab ydr rebind-shader <source.ydr> <model-index> <geometry-index> <target-shader-index> <output.ydr>\n  \

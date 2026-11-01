@@ -160,6 +160,47 @@ fn triangle_glb_with_png() -> Vec<u8> {
     bytes
 }
 
+fn rewrite_glb_document(bytes: &[u8], mutate: impl FnOnce(&mut Value)) -> Vec<u8> {
+    let json_length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let json_start = 20usize;
+    let json_end = json_start + json_length;
+    let mut document: Value = serde_json::from_slice(&bytes[json_start..json_end]).unwrap();
+    mutate(&mut document);
+
+    let mut json_chunk = serde_json::to_vec(&document).unwrap();
+    while json_chunk.len() % 4 != 0 {
+        json_chunk.push(b' ');
+    }
+
+    let mut result = Vec::new();
+    result.extend_from_slice(b"glTF");
+    result.extend_from_slice(&2u32.to_le_bytes());
+    if bytes.len() > json_end {
+        let bin_length =
+            u32::from_le_bytes(bytes[json_end..json_end + 4].try_into().unwrap()) as usize;
+        let bin_type = u32::from_le_bytes(bytes[json_end + 4..json_end + 8].try_into().unwrap());
+        assert_eq!(bin_type, 0x004E4942);
+        let bin_start = json_end + 8;
+        let bin_end = bin_start + bin_length;
+        let binary = &bytes[bin_start..bin_end];
+        let total_length = 12 + 8 + json_chunk.len() + 8 + binary.len();
+        result.extend_from_slice(&(total_length as u32).to_le_bytes());
+        result.extend_from_slice(&(json_chunk.len() as u32).to_le_bytes());
+        result.extend_from_slice(&0x4E4F534Au32.to_le_bytes());
+        result.extend_from_slice(&json_chunk);
+        result.extend_from_slice(&(binary.len() as u32).to_le_bytes());
+        result.extend_from_slice(&0x004E4942u32.to_le_bytes());
+        result.extend_from_slice(binary);
+    } else {
+        let total_length = 12 + 8 + json_chunk.len();
+        result.extend_from_slice(&(total_length as u32).to_le_bytes());
+        result.extend_from_slice(&(json_chunk.len() as u32).to_le_bytes());
+        result.extend_from_slice(&0x4E4F534Au32.to_le_bytes());
+        result.extend_from_slice(&json_chunk);
+    }
+    result
+}
+
 fn two_material_triangles_glb_with_png() -> Vec<u8> {
     let original = triangle_glb_with_png();
     let json_length = u32::from_le_bytes(original[12..16].try_into().unwrap()) as usize;
@@ -549,6 +590,7 @@ fn glb_export_rebinds_legacy_shader_template_when_environment_path_is_set() {
     let root = temp_root();
     let source = root.join("pumpkin.glb");
     let output_path = root.join("pumpkin-shader.ydr");
+    let report_path = root.join("pumpkin-shader.report.json");
     fs::write(&source, triangle_glb_with_png()).unwrap();
 
     let output = binary()
@@ -560,6 +602,8 @@ fn glb_export_rebinds_legacy_shader_template_when_environment_path_is_set() {
             output_path.to_str().unwrap(),
             "--shader-template",
             template_path.as_str(),
+            "--report",
+            report_path.to_str().unwrap(),
             "--json",
         ])
         .output()
@@ -576,6 +620,33 @@ fn glb_export_rebinds_legacy_shader_template_when_environment_path_is_set() {
     assert_eq!(body["data"]["materialShaderBindings"], 1);
     assert_eq!(body["data"]["shaderTextureBindings"], 1);
     assert_eq!(body["data"]["runtimeRenderable"], false);
+    assert_eq!(body["data"]["report"], report_path.to_str().unwrap());
+    let report: Value = serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    assert_eq!(report["schema"], "ragelab.glb.export-report");
+    assert_eq!(
+        report["provenance"]["shaderTemplate"]["sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert_eq!(
+        report["decisions"]["shaderParameters"]["outputShaderCount"],
+        1
+    );
+    assert!(
+        !report["decisions"]["shaderParameters"]["shaders"][0]["parameters"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        report["decisions"]["shaderParameters"]["shaders"][0]["textureReferences"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
 
     let bytes = fs::read(&output_path).unwrap();
     let document = YdrDocument::from_bytes(&bytes).unwrap();
@@ -675,6 +746,7 @@ fn glb_export_clones_one_normal_shader_per_material_and_maps_each_geometry() {
     let root = temp_root();
     let source = root.join("pumpkin-multi.glb");
     let output_path = root.join("pumpkin-multi.ydr");
+    let report_path = root.join("pumpkin-multi.report.json");
     fs::write(&source, two_material_triangles_glb_with_png()).unwrap();
 
     let output = binary()
@@ -686,6 +758,8 @@ fn glb_export_clones_one_normal_shader_per_material_and_maps_each_geometry() {
             output_path.to_str().unwrap(),
             "--shader-template",
             template_path.as_str(),
+            "--report",
+            report_path.to_str().unwrap(),
             "--json",
         ])
         .output()
@@ -701,6 +775,22 @@ fn glb_export_clones_one_normal_shader_per_material_and_maps_each_geometry() {
     assert_eq!(body["data"]["materialShaderBindings"], 2);
     assert_eq!(body["data"]["geometryShaderMappings"], 3);
     assert_eq!(body["data"]["shaderTextureBindings"], 2);
+    assert_eq!(body["data"]["report"], report_path.to_str().unwrap());
+    let report: Value = serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    assert_eq!(
+        report["decisions"]["shaderParameters"]["outputShaderCount"],
+        3
+    );
+    assert_eq!(report["fallbacks"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        report["fallbacks"][0]["kind"],
+        "neutral_shader_for_unmaterialed_geometry"
+    );
+    assert_eq!(report["fallbacks"][0]["authorizedBy"], "--shader-template");
+    assert!(!report["fallbacks"][0]["affectedGeometryIndices"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 
     let document = YdrDocument::from_bytes(&fs::read(&output_path).unwrap()).unwrap();
     assert_eq!(document.model.shaders.len(), 3);
@@ -1475,5 +1565,862 @@ fn glb_profile_init_does_not_overwrite_existing_profile_without_flag() {
 
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(fs::read(&profile).unwrap(), b"keep");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn glb_validate_runs_in_memory_semantic_preflight_and_reports_warnings() {
+    let root = temp_root();
+    let source = root.join("pumpkin.glb");
+    fs::write(&source, triangle_glb_with_png()).unwrap();
+
+    let output = binary()
+        .args(["glb", "validate", source.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab should run");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body = stdout_json(&output);
+    assert_eq!(body["command"], "glb.validate");
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["data"]["schema"], "ragelab.glb.validation");
+    assert_eq!(body["data"]["schemaVersion"], 1);
+    assert_eq!(body["data"]["valid"], true);
+    assert_eq!(body["data"]["structuralValid"], true);
+    assert_eq!(body["data"]["exportCompatible"], true);
+    assert_eq!(body["data"]["geometryDecoded"], true);
+    assert_eq!(body["data"]["imagesDecoded"], true);
+    assert_eq!(body["data"]["semanticPreflight"], true);
+    assert_eq!(body["data"]["semanticReopen"], true);
+    assert_eq!(body["data"]["runtimeRenderable"], false);
+    assert_eq!(body["data"]["counts"]["decodedPrimitives"], 1);
+    assert!(body["data"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["code"] == "ydr_semantic_preflight_passed"));
+    assert!(body["data"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["code"] == "missing_normals" && item["severity"] == "warning"));
+    assert_eq!(
+        fs::read_dir(&root).unwrap().count(),
+        1,
+        "validation must not write a YDR or any other output"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn glb_validate_strict_promotes_warnings_without_misreporting_structural_invalidity() {
+    let root = temp_root();
+    let source = root.join("pumpkin.glb");
+    fs::write(&source, triangle_glb_with_png()).unwrap();
+
+    let output = binary()
+        .args([
+            "glb",
+            "validate",
+            source.to_str().unwrap(),
+            "--strict",
+            "--json",
+        ])
+        .output()
+        .expect("ragelab should run");
+
+    assert_eq!(output.status.code(), Some(4));
+    let body = stdout_json(&output);
+    assert_eq!(body["command"], "glb.validate");
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error"]["code"], "validation_failed");
+    assert_eq!(body["data"]["valid"], false);
+    assert_eq!(body["data"]["structuralValid"], true);
+    assert_eq!(body["data"]["exportCompatible"], true);
+    assert_eq!(body["data"]["strict"], true);
+    assert!(body["data"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| {
+            item["code"] == "missing_normals"
+                && item["severity"] == "error"
+                && item["promotedFrom"] == "warning"
+        }));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn glb_validate_accounts_for_matrix_column_padding_in_unreferenced_accessors() {
+    let root = temp_root();
+    let source = root.join("short-mat3.glb");
+    let bytes = rewrite_glb_document(&triangle_glb_with_png(), |document| {
+        let view_index = document["bufferViews"].as_array().unwrap().len();
+        document["bufferViews"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"buffer": 0, "byteOffset": 0, "byteLength": 9}));
+        document["accessors"].as_array_mut().unwrap().push(json!({
+            "bufferView": view_index,
+            "componentType": 5121,
+            "count": 1,
+            "type": "MAT3"
+        }));
+    });
+    fs::write(&source, bytes).unwrap();
+
+    let output = binary()
+        .args(["glb", "validate", source.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab should run");
+
+    assert_eq!(output.status.code(), Some(4));
+    let body = stdout_json(&output);
+    assert_eq!(body["data"]["structuralValid"], false);
+    assert!(body["data"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| {
+            item["code"] == "glb_invalid"
+                && item["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("byte range exceeds")
+        }));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn glb_validate_checks_sparse_accessor_indices_and_values_ranges() {
+    let root = temp_root();
+    let source = root.join("short-sparse-indices.glb");
+    let bytes = rewrite_glb_document(&triangle_glb_with_png(), |document| {
+        let indices_view = document["bufferViews"].as_array().unwrap().len();
+        document["bufferViews"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"buffer": 0, "byteOffset": 0, "byteLength": 1}));
+        let values_view = document["bufferViews"].as_array().unwrap().len();
+        document["bufferViews"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"buffer": 0, "byteOffset": 4, "byteLength": 12}));
+        document["accessors"].as_array_mut().unwrap().push(json!({
+            "componentType": 5126,
+            "count": 3,
+            "type": "VEC3",
+            "sparse": {
+                "count": 1,
+                "indices": {
+                    "bufferView": indices_view,
+                    "componentType": 5121,
+                    "byteOffset": 2
+                },
+                "values": {"bufferView": values_view}
+            }
+        }));
+    });
+    fs::write(&source, bytes).unwrap();
+
+    let output = binary()
+        .args(["glb", "validate", source.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab should run");
+
+    assert_eq!(output.status.code(), Some(4));
+    let body = stdout_json(&output);
+    assert_eq!(body["data"]["structuralValid"], false);
+    assert!(body["data"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| {
+            item["code"] == "glb_invalid"
+                && item["message"].as_str().unwrap().contains("sparse.indices")
+                && item["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("byte range exceeds")
+        }));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn glb_validate_rejects_unreferenced_accessor_range_outside_buffer_view() {
+    let root = temp_root();
+    let source = root.join("invalid-unused-accessor.glb");
+    let bytes = rewrite_glb_document(&triangle_glb_with_png(), |document| {
+        let position_accessor = document["meshes"][0]["primitives"][0]["attributes"]["POSITION"]
+            .as_u64()
+            .expect("POSITION accessor index") as usize;
+        let mut unused = document["accessors"][position_accessor].clone();
+        unused["byteOffset"] = json!(1024);
+        document["accessors"]
+            .as_array_mut()
+            .expect("accessor array")
+            .push(unused);
+    });
+    fs::write(&source, bytes).unwrap();
+
+    let output = binary()
+        .args(["glb", "validate", source.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab should run");
+
+    assert_eq!(output.status.code(), Some(4));
+    let body = stdout_json(&output);
+    assert_eq!(body["data"]["structuralValid"], false);
+    assert_eq!(body["data"]["geometryDecoded"], false);
+    assert!(body["data"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| {
+            item["code"] == "glb_invalid"
+                && item["severity"] == "error"
+                && item["message"].as_str().unwrap().contains("accessors[")
+                && item["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("byte range exceeds")
+        }));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn glb_validate_rejects_referenced_accessor_range_outside_buffer_view() {
+    let root = temp_root();
+    let source = root.join("invalid-accessor-range.glb");
+    let bytes = rewrite_glb_document(&triangle_glb_with_png(), |document| {
+        let position_accessor = document["meshes"][0]["primitives"][0]["attributes"]["POSITION"]
+            .as_u64()
+            .expect("POSITION accessor index") as usize;
+        document["accessors"][position_accessor]["byteOffset"] = json!(1024);
+    });
+    fs::write(&source, bytes).unwrap();
+
+    let output = binary()
+        .args(["glb", "validate", source.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab should run");
+
+    assert_eq!(output.status.code(), Some(4));
+    let body = stdout_json(&output);
+    assert_eq!(body["command"], "glb.validate");
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error"]["code"], "validation_failed");
+    assert_eq!(body["data"]["structuralValid"], false);
+    assert_eq!(body["data"]["geometryDecoded"], false);
+    assert_eq!(body["data"]["semanticPreflight"], false);
+    assert!(body["data"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| {
+            item["code"] == "glb_invalid"
+                && item["severity"] == "error"
+                && item["message"].as_str().unwrap().contains("accessors[")
+                && item["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("byte range exceeds")
+        }));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn glb_validate_reports_export_profile_failure_without_falsifying_structure() {
+    let root = temp_root();
+    let source = root.join("valid-structure.glb");
+    let profile = root.join("invalid-profile.json");
+    fs::write(&source, triangle_glb_with_png()).unwrap();
+    fs::write(
+        &profile,
+        br#"{"schema":"unknown.profile","schemaVersion":99}"#,
+    )
+    .unwrap();
+
+    let output = binary()
+        .args([
+            "glb",
+            "validate",
+            source.to_str().unwrap(),
+            "--profile",
+            profile.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("ragelab should run");
+
+    assert_eq!(output.status.code(), Some(4));
+    let body = stdout_json(&output);
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error"]["code"], "validation_failed");
+    assert_eq!(body["data"]["structuralValid"], true);
+    assert_eq!(body["data"]["geometryDecoded"], true);
+    assert_eq!(body["data"]["imagesDecoded"], true);
+    assert_eq!(body["data"]["exportCompatible"], false);
+    assert_eq!(body["data"]["semanticPreflight"], false);
+    assert!(body["data"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| { item["code"] == "export_preflight_invalid" && item["severity"] == "error" }));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn glb_validate_rejects_invalid_sampler_enum() {
+    let root = temp_root();
+    let source = root.join("invalid-sampler.glb");
+    let bytes = rewrite_glb_document(&triangle_glb_with_png(), |document| {
+        document["samplers"] = json!([{"wrapS": 12345}]);
+        document["textures"][0]["sampler"] = json!(0);
+    });
+    fs::write(&source, bytes).unwrap();
+
+    let output = binary()
+        .args(["glb", "validate", source.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab should run");
+
+    assert_eq!(output.status.code(), Some(4));
+    let body = stdout_json(&output);
+    assert_eq!(body["data"]["structuralValid"], false);
+    assert_eq!(body["data"]["exportCompatible"], false);
+    assert!(body["data"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| {
+            item["code"] == "invalid_sampler"
+                && item["severity"] == "error"
+                && item["path"] == "samplers[0]"
+        }));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn glb_validate_returns_versioned_report_for_invalid_container() {
+    let root = temp_root();
+    let source = root.join("broken.glb");
+    fs::write(&source, b"not a GLB container").unwrap();
+
+    let output = binary()
+        .args(["glb", "validate", source.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab should run");
+
+    assert_eq!(output.status.code(), Some(4));
+    let body = stdout_json(&output);
+    assert_eq!(body["command"], "glb.validate");
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error"]["code"], "validation_failed");
+    assert_eq!(body["data"]["schema"], "ragelab.glb.validation");
+    assert_eq!(body["data"]["schemaVersion"], 1);
+    assert_eq!(body["data"]["valid"], false);
+    assert_eq!(body["data"]["structuralValid"], false);
+    assert_eq!(body["data"]["exportCompatible"], false);
+    assert_eq!(body["data"]["semanticPreflight"], false);
+    assert_eq!(body["data"]["runtimeRenderable"], false);
+    assert!(body["data"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["code"] == "glb_invalid" && item["severity"] == "error"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn glb_validate_rejects_required_extension_missing_from_extensions_used() {
+    let root = temp_root();
+    let source = root.join("required-extension-not-used.glb");
+    let bytes = rewrite_glb_document(&triangle_glb_with_png(), |document| {
+        document["extensionsRequired"] = json!(["EXT_ragelab_validation_fixture"]);
+    });
+    fs::write(&source, bytes).unwrap();
+
+    let output = binary()
+        .args(["glb", "validate", source.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab should run");
+
+    assert_eq!(output.status.code(), Some(4));
+    let body = stdout_json(&output);
+    assert_eq!(body["data"]["structuralValid"], false);
+    assert!(body["data"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| {
+            item["code"] == "required_extension_not_used"
+                && item["severity"] == "error"
+                && item["path"] == "extensionsRequired"
+        }));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn glb_export_writes_deterministic_versioned_report_sidecar() {
+    let root = temp_root();
+    let source = root.join("pumpkin.glb");
+    let output_path = root.join("pumpkin.ydr");
+    let report_a = root.join("pumpkin.export-report.json");
+    let report_b = root.join("pumpkin.export-report-repeat.json");
+    fs::write(&source, triangle_glb_with_png()).unwrap();
+
+    let first = binary()
+        .args([
+            "glb",
+            "export",
+            source.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+            "--report",
+            report_a.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("ragelab should export YDR and report");
+    assert!(
+        first.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_envelope = stdout_json(&first);
+    assert_eq!(first_envelope["command"], "glb.export");
+    assert_eq!(first_envelope["data"]["report"], report_a.to_str().unwrap());
+    let first_bytes = fs::read(&report_a).unwrap();
+    let first_report: Value = serde_json::from_slice(&first_bytes).unwrap();
+
+    assert_eq!(first_report["schema"], "ragelab.glb.export-report");
+    assert_eq!(first_report["schemaVersion"], 1);
+    assert_eq!(first_report["tool"]["name"], "ragelab");
+    assert!(!first_report["tool"]["coreRevision"]
+        .as_str()
+        .unwrap()
+        .is_empty());
+    assert!(first_report["tool"]["coreDirty"].is_boolean());
+    assert_eq!(
+        first_report["provenance"]["input"]["sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert_eq!(
+        first_report["provenance"]["authoringProfile"]["sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert_eq!(
+        first_report["provenance"]["output"]["sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert_eq!(first_report["summary"]["geometryCount"], 1);
+    assert_eq!(first_report["summary"]["embeddedTextureCount"], 1);
+    assert_eq!(
+        first_report["decisions"]["materials"][0]["sourceMaterialIndex"],
+        0
+    );
+    assert_eq!(
+        first_report["decisions"]["geometries"][0]["geometryIndex"],
+        0
+    );
+    assert_eq!(
+        first_report["decisions"]["textureSlotMappings"][0]["role"],
+        "albedo"
+    );
+    assert_eq!(
+        first_report["decisions"]["shaderParameters"]["outputShaderCount"],
+        0
+    );
+    assert!(first_report["decisions"]["shaderParameters"]["shaders"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(first_report["transformations"][1]["from"], "glTF_Y_up");
+    assert_eq!(first_report["transformations"][1]["to"], "GTA_Z_up");
+    assert_eq!(
+        first_report["textureConversions"][0]["decodedPixelFormat"],
+        "rgba8"
+    );
+    assert_eq!(first_report["textureConversions"][0]["outputFormat"], "bc1");
+    assert_eq!(
+        first_report["validationStages"][5]["stage"],
+        "ydr_semantic_reopen"
+    );
+    assert_eq!(first_report["validationStages"][5]["status"], "passed");
+    assert_eq!(first_report["runtimeRenderable"], false);
+    assert_eq!(
+        first_report["runtimeAcceptance"]["codewalkerGui"],
+        "not_run"
+    );
+    assert_eq!(first_report["runtimeAcceptance"]["gtaV"], "not_run");
+
+    let material = &first_report["decisions"]["materials"][0];
+    let geometry = &first_report["decisions"]["geometries"][0];
+    let texture_slot = &first_report["decisions"]["textureSlotMappings"][0];
+    let texture = &first_report["textureConversions"][0];
+    let golden_snapshot = json!({
+        "schema": first_report["schema"],
+        "schemaVersion": first_report["schemaVersion"],
+        "tool": {
+            "name": first_report["tool"]["name"],
+            "version": first_report["tool"]["version"]
+        },
+        "summary": first_report["summary"],
+        "material": {
+            "sourceMaterialIndex": material["sourceMaterialIndex"],
+            "sourceName": material["sourceName"],
+            "shaderIntent": material["shaderIntent"],
+            "surfaceMode": material["surfaceMode"],
+            "shaderDecision": material["shader"]["decision"],
+            "textureSlotMappings": [{
+                "materialIndex": texture_slot["materialIndex"],
+                "role": texture_slot["role"],
+                "textureIndex": texture_slot["textureIndex"],
+                "texCoord": texture_slot["texCoord"],
+                "imageIndex": texture_slot["imageIndex"],
+                "outputTextureName": texture_slot["outputTextureName"]
+            }]
+        },
+        "geometry": {
+            "geometryIndex": geometry["geometryIndex"],
+            "nodeIndex": geometry["source"]["nodeIndex"],
+            "nodeName": geometry["source"]["nodeName"],
+            "meshIndex": geometry["source"]["meshIndex"],
+            "meshName": geometry["source"]["meshName"],
+            "primitiveIndex": geometry["source"]["primitiveIndex"],
+            "primitiveModeName": geometry["source"]["primitiveModeName"],
+            "materialIndex": geometry["materialIndex"],
+            "materialProfileIndex": geometry["materialProfileIndex"],
+            "shaderIndex": geometry["shaderIndex"],
+            "vertexCount": geometry["vertexCount"],
+            "indexCount": geometry["indexCount"],
+            "triangleCount": geometry["triangleCount"],
+            "attributes": geometry["attributes"]
+        },
+        "shaderParameters": first_report["decisions"]["shaderParameters"],
+        "transformations": [
+            {
+                "id": first_report["transformations"][0]["id"],
+                "status": first_report["transformations"][0]["status"]
+            },
+            {
+                "id": first_report["transformations"][1]["id"],
+                "status": first_report["transformations"][1]["status"],
+                "from": first_report["transformations"][1]["from"],
+                "to": first_report["transformations"][1]["to"]
+            },
+            {
+                "id": first_report["transformations"][2]["id"],
+                "status": first_report["transformations"][2]["status"],
+                "outputMode": first_report["transformations"][2]["outputMode"]
+            },
+            {
+                "id": first_report["transformations"][3]["id"],
+                "status": first_report["transformations"][3]["status"]
+            }
+        ],
+        "textureConversion": {
+            "imageIndex": texture["imageIndex"],
+            "sourceName": texture["sourceName"],
+            "sourceMimeType": texture["sourceMimeType"],
+            "width": texture["width"],
+            "height": texture["height"],
+            "decodedPixelFormat": texture["decodedPixelFormat"],
+            "outputTextureName": texture["outputTextureName"],
+            "outputFormat": texture["outputFormat"],
+            "hasTransparency": texture["hasTransparency"],
+            "hasPartialAlpha": texture["hasPartialAlpha"],
+            "mipmapLevelsGenerated": texture["mipmapLevelsGenerated"],
+            "lossyBlockCompression": texture["lossyBlockCompression"],
+            "compressionSelection": texture["compressionSelection"]
+        },
+        "resources": first_report["resources"],
+        "losses": first_report["losses"],
+        "fallbacks": first_report["fallbacks"],
+        "runtimeRenderable": first_report["runtimeRenderable"],
+        "runtimeAcceptance": first_report["runtimeAcceptance"]
+    });
+    let golden: Value = serde_json::from_str(include_str!(
+        "../../../fixtures/synthetic/glb-export-report-v1.golden.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        golden_snapshot, golden,
+        "GLB export v1 golden snapshot changed"
+    );
+
+    fs::remove_file(&output_path).unwrap();
+    let second = binary()
+        .args([
+            "glb",
+            "export",
+            source.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+            "--report",
+            report_b.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("ragelab should reproduce the report");
+    assert!(
+        second.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(fs::read(&report_b).unwrap(), first_bytes);
+
+    fs::remove_file(&output_path).unwrap();
+    fs::remove_file(&report_b).unwrap();
+    let human = binary()
+        .args([
+            "glb",
+            "export",
+            source.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+            "--report",
+            report_b.to_str().unwrap(),
+        ])
+        .output()
+        .expect("ragelab should produce the same sidecar in human mode");
+    assert!(
+        human.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&human.stdout),
+        String::from_utf8_lossy(&human.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&human.stdout).contains(&format!("report: {}", report_b.display()))
+    );
+    assert_eq!(fs::read(&report_b).unwrap(), first_bytes);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn glb_export_report_never_overwrites_existing_sidecar_or_output() {
+    let root = temp_root();
+    let source = root.join("pumpkin.glb");
+    let output_path = root.join("pumpkin.ydr");
+    let report_path = root.join("sentinel.report.json");
+    fs::write(&source, triangle_glb_with_png()).unwrap();
+    fs::write(&report_path, b"preserve-this-report").unwrap();
+
+    let output = binary()
+        .args([
+            "glb",
+            "export",
+            source.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+            "--report",
+            report_path.to_str().unwrap(),
+            "--overwrite",
+            "--json",
+        ])
+        .output()
+        .expect("ragelab should reject an existing report path");
+
+    assert!(!output.status.success());
+    assert_eq!(fs::read(&report_path).unwrap(), b"preserve-this-report");
+    assert!(!output_path.exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn glb_export_report_must_not_alias_any_export_input_or_output() {
+    let root = temp_root();
+    let source = root.join("pumpkin.glb");
+    let output_path = root.join("pumpkin.ydr");
+    fs::write(&source, triangle_glb_with_png()).unwrap();
+
+    let output = binary()
+        .args([
+            "glb",
+            "export",
+            source.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+            "--report",
+            output_path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("ragelab should reject report/output path aliasing");
+
+    assert!(!output.status.success());
+    assert!(!output_path.exists());
+
+    #[cfg(windows)]
+    {
+        let case_alias = root.join("PUMPKIN.YDR");
+        let case_alias_output = binary()
+            .args([
+                "glb",
+                "export",
+                source.to_str().unwrap(),
+                "--output",
+                output_path.to_str().unwrap(),
+                "--report",
+                case_alias.to_str().unwrap(),
+                "--json",
+            ])
+            .output()
+            .expect("ragelab should reject case-insensitive path aliasing on Windows");
+        assert!(!case_alias_output.status.success());
+        assert!(!output_path.exists());
+    }
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn glb_validate_reports_unsupported_extensions_in_failure_envelope() {
+    let root = temp_root();
+    let source = root.join("unsupported-extension.glb");
+    let bytes = rewrite_glb_document(&triangle_glb_with_png(), |document| {
+        document["extensionsUsed"] = json!(["EXT_ragelab_validation_fixture"]);
+    });
+    fs::write(&source, bytes).unwrap();
+
+    let output = binary()
+        .args(["glb", "validate", source.to_str().unwrap(), "--json"])
+        .output()
+        .expect("ragelab should run");
+
+    assert_eq!(output.status.code(), Some(3));
+    let body = stdout_json(&output);
+    assert_eq!(body["command"], "glb.validate");
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error"]["code"], "unsupported");
+    assert_eq!(body["data"]["structuralValid"], true);
+    assert_eq!(body["data"]["exportCompatible"], false);
+    assert_eq!(body["data"]["semanticPreflight"], false);
+    assert!(body["data"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| {
+            item["code"] == "unsupported_extension"
+                && item["severity"] == "unsupported"
+                && item["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("EXT_ragelab_validation_fixture")
+        }));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn namespaced_glb_batch_writes_item_and_aggregate_reports() {
+    let root = temp_root();
+    for directory in ["input", "profiles", "output", "reports"] {
+        fs::create_dir_all(root.join(directory)).unwrap();
+    }
+
+    let source = triangle_glb_with_png();
+    fs::write(root.join("input/triangle.glb"), &source).unwrap();
+    let profile = ragelab_engine::default_glb_authoring_profile(&source, "triangle.glb").unwrap();
+    fs::write(
+        root.join("profiles/triangle.json"),
+        serde_json::to_vec_pretty(&profile).unwrap(),
+    )
+    .unwrap();
+
+    let manifest = json!({
+        "schema": "ragelab.glb.batch-manifest",
+        "schemaVersion": 1,
+        "failurePolicy": "continue",
+        "concurrency": 1,
+        "report": "reports/batch.json",
+        "items": [{
+            "id": "triangle",
+            "source": "input/triangle.glb",
+            "output": "output/triangle.ydr",
+            "profile": "profiles/triangle.json",
+            "shaderTemplate": null,
+            "shaderIndex": 0,
+            "nodes": [],
+            "report": "reports/triangle.export-report.json"
+        }]
+    });
+    fs::write(
+        root.join("batch.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let output = binary()
+        .args([
+            "glb",
+            "batch",
+            root.join("batch.json").to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("ragelab batch should run");
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("[glb.batch] 1/1"));
+    let body = stdout_json(&output);
+    assert_eq!(body["schema"], "ragelab.cli.response");
+    assert_eq!(body["command"], "glb.batch");
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["data"]["schema"], "ragelab.glb.batch-report");
+    assert_eq!(body["data"]["summary"]["succeeded"], 1);
+    assert_eq!(body["data"]["items"][0]["id"], "triangle");
+    assert_eq!(body["data"]["items"][0]["status"], "succeeded");
+    assert_eq!(
+        PathBuf::from(body["data"]["aggregateReport"].as_str().unwrap())
+            .file_name()
+            .unwrap(),
+        std::ffi::OsStr::new("batch.json")
+    );
+    assert!(root.join("output/triangle.ydr").is_file());
+    assert!(root.join("reports/triangle.export-report.json").is_file());
+    assert!(root.join("reports/batch.json").is_file());
+
+    let aggregate: Value =
+        serde_json::from_slice(&fs::read(root.join("reports/batch.json")).unwrap()).unwrap();
+    assert_eq!(aggregate["schema"], "ragelab.glb.batch-report");
+    assert_eq!(
+        aggregate["items"][0]["outputSha256"],
+        body["data"]["items"][0]["outputSha256"]
+    );
+
     fs::remove_dir_all(root).unwrap();
 }

@@ -1,0 +1,656 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ragelab.dev/schemas/ragelab.ydr.inspection.v1.schema.json",
+  "title": "RageLab YDR Inspection Report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schemaVersion",
+    "sourceName",
+    "sourceSha256",
+    "sourceByteLength",
+    "container",
+    "drawable",
+    "lods",
+    "shaders",
+    "embeddedTextures",
+    "structuralAudit",
+    "semanticReopen",
+    "runtimeRenderable"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ragelab.ydr.inspection"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "sourceName": {
+      "type": "string"
+    },
+    "sourceSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "sourceByteLength": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "container": {
+      "$ref": "#/$defs/container"
+    },
+    "drawable": {
+      "$ref": "#/$defs/drawable"
+    },
+    "lods": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/lod"
+      }
+    },
+    "shaders": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/shader"
+      }
+    },
+    "embeddedTextures": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/textureDictionary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "structuralAudit": {
+      "$ref": "#/$defs/structuralAudit"
+    },
+    "semanticReopen": {
+      "type": "boolean"
+    },
+    "runtimeRenderable": {
+      "const": false
+    }
+  },
+  "$defs": {
+    "vec3": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "container": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "magic",
+        "resourceVersion",
+        "systemFlags",
+        "graphicsFlags",
+        "systemSegmentBytes",
+        "graphicsSegmentBytes",
+        "compressedPayloadBytes"
+      ],
+      "properties": {
+        "magic": {
+          "const": "RSC7"
+        },
+        "resourceVersion": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "systemFlags": {
+          "type": "string",
+          "pattern": "^0x[0-9A-F]{8}$"
+        },
+        "graphicsFlags": {
+          "type": "string",
+          "pattern": "^0x[0-9A-F]{8}$"
+        },
+        "systemSegmentBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "graphicsSegmentBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "compressedPayloadBytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "bounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "center",
+        "radius",
+        "min",
+        "max"
+      ],
+      "properties": {
+        "center": {
+          "$ref": "#/$defs/vec3"
+        },
+        "radius": {
+          "type": "number",
+          "minimum": 0
+        },
+        "min": {
+          "$ref": "#/$defs/vec3"
+        },
+        "max": {
+          "$ref": "#/$defs/vec3"
+        }
+      }
+    },
+    "drawable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "selectedLod",
+        "coordinateConvention",
+        "bounds",
+        "lodCount",
+        "modelCount",
+        "geometryCount",
+        "vertexCount",
+        "indexCount",
+        "triangleCount"
+      ],
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selectedLod": {
+          "type": "string"
+        },
+        "coordinateConvention": {
+          "type": "string"
+        },
+        "bounds": {
+          "$ref": "#/$defs/bounds"
+        },
+        "lodCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "modelCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "geometryCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "vertexCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "indexCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "triangleCount": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "lod": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "level",
+        "modelCount",
+        "geometryCount",
+        "vertexCount",
+        "indexCount",
+        "triangleCount",
+        "geometries"
+      ],
+      "properties": {
+        "level": {
+          "type": "string"
+        },
+        "modelCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "geometryCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "vertexCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "indexCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "triangleCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "geometries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/geometry"
+          }
+        }
+      }
+    },
+    "geometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "modelIndex",
+        "geometryIndex",
+        "shaderIndex",
+        "topology",
+        "vertexCount",
+        "indexCount",
+        "triangleCount",
+        "declarationFlags",
+        "declarationStride",
+        "declarationComponentCount",
+        "declarationTypes",
+        "modelBoundsMin",
+        "modelBoundsMax",
+        "geometryBoundsMin",
+        "geometryBoundsMax",
+        "attributes",
+        "positionsFinite",
+        "normalsFinite",
+        "tangentsFinite",
+        "color0Finite",
+        "uv0Finite",
+        "uv1Finite",
+        "uv2Finite",
+        "windingAligned",
+        "windingOpposed",
+        "windingDegenerate"
+      ],
+      "properties": {
+        "modelIndex": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "geometryIndex": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "shaderIndex": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "topology": {
+          "type": "string"
+        },
+        "vertexCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "indexCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "triangleCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "declarationFlags": {
+          "type": "string",
+          "pattern": "^0x[0-9A-F]{8}$"
+        },
+        "declarationStride": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "declarationComponentCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "declarationTypes": {
+          "type": "string",
+          "pattern": "^0x[0-9A-F]{16}$"
+        },
+        "modelBoundsMin": {
+          "$ref": "#/$defs/vec3"
+        },
+        "modelBoundsMax": {
+          "$ref": "#/$defs/vec3"
+        },
+        "geometryBoundsMin": {
+          "$ref": "#/$defs/vec3"
+        },
+        "geometryBoundsMax": {
+          "$ref": "#/$defs/vec3"
+        },
+        "attributes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "positionsFinite": {
+          "type": "boolean"
+        },
+        "normalsFinite": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "tangentsFinite": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "color0Finite": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "uv0Finite": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "uv1Finite": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "uv2Finite": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "windingAligned": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "windingOpposed": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "windingDegenerate": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "shader": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "nameHash",
+        "fileHash",
+        "renderBucket",
+        "renderBucketMask",
+        "parameterSize",
+        "parameterDataSize",
+        "textureParametersCount",
+        "parameters",
+        "textureReferences"
+      ],
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nameHash": {
+          "type": "string",
+          "pattern": "^0x[0-9A-F]{8}$"
+        },
+        "fileHash": {
+          "type": "string",
+          "pattern": "^0x[0-9A-F]{8}$"
+        },
+        "renderBucket": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "renderBucketMask": {
+          "type": "string",
+          "pattern": "^0x[0-9A-F]{8}$"
+        },
+        "parameterSize": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "parameterDataSize": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "textureParametersCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "parameters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/shaderParameter"
+          }
+        },
+        "textureReferences": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/shaderTextureReference"
+          }
+        }
+      }
+    },
+    "shaderParameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parameterHash",
+        "dataType",
+        "textureName",
+        "vectorCount"
+      ],
+      "properties": {
+        "parameterHash": {
+          "type": "string",
+          "pattern": "^0x[0-9A-F]{8}$"
+        },
+        "dataType": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "textureName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vectorCount": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "shaderTextureReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parameterHash",
+        "textureName"
+      ],
+      "properties": {
+        "parameterHash": {
+          "type": "string",
+          "pattern": "^0x[0-9A-F]{8}$"
+        },
+        "textureName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "textureDictionary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "textureCount",
+        "textures"
+      ],
+      "properties": {
+        "textureCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "textures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/texture"
+          }
+        }
+      }
+    },
+    "texture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "name",
+        "nameHash",
+        "nameHashMatchesName",
+        "width",
+        "height",
+        "depth",
+        "stride",
+        "format",
+        "rawFormat",
+        "mipLevels",
+        "decodedMipLevels"
+      ],
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nameHash": {
+          "type": "string",
+          "pattern": "^0x[0-9A-F]{8}$"
+        },
+        "nameHashMatchesName": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "stride": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "format": {
+          "type": "string"
+        },
+        "rawFormat": {
+          "type": "string",
+          "pattern": "^0x[0-9A-F]{8}$"
+        },
+        "mipLevels": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "decodedMipLevels": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "structuralAudit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "valid",
+        "geometryProvenanceCount",
+        "error"
+      ],
+      "properties": {
+        "valid": {
+          "type": "boolean"
+        },
+        "geometryProvenanceCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

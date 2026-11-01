@@ -228,11 +228,21 @@ fn global_capabilities_preserve_legacy_ids_and_advertise_canonical_ids() {
     assert!(commands.iter().any(|value| value == "ydr.info"));
     assert!(canonical.iter().any(|value| value == "ydr.info"));
     assert!(canonical.iter().any(|value| value == "glb.inspect"));
+    assert!(canonical.iter().any(|value| value == "glb.batch"));
+    assert!(canonical.iter().any(|value| value == "ydr.inspect"));
+    assert!(canonical.iter().any(|value| value == "ydr.validate"));
     assert!(canonical.iter().any(|value| value == "glb.profile.init"));
     assert!(canonical
         .iter()
         .any(|value| value == "glb.profile.validate"));
-    for command in ["glb.inspect", "glb.profile.init", "glb.profile.validate"] {
+    for command in [
+        "glb.inspect",
+        "glb.batch",
+        "ydr.inspect",
+        "ydr.validate",
+        "glb.profile.init",
+        "glb.profile.validate",
+    ] {
         assert!(body["structuredOutput"]
             .as_array()
             .unwrap()

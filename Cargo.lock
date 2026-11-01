@@ -847,6 +847,7 @@ dependencies = [
  "ragelab-ytd",
  "ragelab-ytyp",
  "rand",
+ "serde",
  "serde_json",
 ]
 

@@ -12,8 +12,8 @@ use std::{
 
 use ragelab_gltf::{
     decode_glb_geometry as decode_geometry, decode_glb_images, default_authoring_profile,
-    inspect_glb as inspect_document, validate_authoring_profile, MaterialAuthoringSettings,
-    ShaderIntent, SurfaceMode, TextureBindingInfo, TextureEncoding,
+    inspect_glb as inspect_document, validate_authoring_profile, GlbError,
+    MaterialAuthoringSettings, ShaderIntent, SurfaceMode, TextureBindingInfo, TextureEncoding,
 };
 pub use ragelab_gltf::{
     DecodedGeometryReport, GlbInspectionReport, GtaAuthoringProfile, ProfileValidationReport,
@@ -147,6 +147,62 @@ pub struct GlbYdrExportResult {
     pub report: GlbYdrExportReport,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum GlbValidationSeverity {
+    Error,
+    Unsupported,
+    Warning,
+    Info,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub struct GlbValidationDiagnostic {
+    pub severity: GlbValidationSeverity,
+    pub code: String,
+    pub path: Option<String>,
+    pub message: String,
+    pub promoted_from: Option<GlbValidationSeverity>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub struct GlbValidationCounts {
+    pub scenes: usize,
+    pub nodes: usize,
+    pub meshes: usize,
+    pub primitives: usize,
+    pub decoded_primitives: usize,
+    pub accessors: usize,
+    pub materials: usize,
+    pub textures: usize,
+    pub samplers: usize,
+    pub images: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub struct GlbValidationReport {
+    pub schema: &'static str,
+    pub schema_version: u32,
+    pub source_name: String,
+    pub source_sha256: String,
+    pub source_byte_length: usize,
+    pub strict: bool,
+    pub valid: bool,
+    pub structural_valid: bool,
+    pub export_compatible: bool,
+    pub geometry_decoded: bool,
+    pub images_decoded: bool,
+    pub semantic_preflight: bool,
+    pub semantic_reopen: bool,
+    pub runtime_renderable: bool,
+    pub shader_preset: Option<String>,
+    pub counts: GlbValidationCounts,
+    pub diagnostics: Vec<GlbValidationDiagnostic>,
+}
+
 pub fn inspect_glb_bytes(
     source_bytes: &[u8],
     source_name: &str,
@@ -159,6 +215,474 @@ pub fn decode_glb_geometry_bytes(
     source_name: &str,
 ) -> Result<DecodedGeometryReport, io::Error> {
     decode_geometry(source_bytes, source_name).map_err(glb_validation_error)
+}
+
+/// Validates a GLB against the current static Legacy YDR export pipeline.
+/// The YDR preflight is built and semantically reopened in memory; no file is written.
+pub fn validate_glb_export_bytes(
+    source_bytes: &[u8],
+    source_name: &str,
+    profile_bytes: Option<Vec<u8>>,
+    shader_template: Option<GlbShaderTemplateInput>,
+    shader_index: usize,
+    strict: bool,
+) -> Result<GlbValidationReport, io::Error> {
+    let inspection = match inspect_document(source_bytes, source_name) {
+        Ok(report) => report,
+        Err(error) => {
+            let (severity, code) = match &error {
+                GlbError::Unsupported(_) => (GlbValidationSeverity::Unsupported, "glb_unsupported"),
+                _ => (GlbValidationSeverity::Error, "glb_invalid"),
+            };
+            let mut diagnostics = Vec::new();
+            push_glb_validation_diagnostic(
+                &mut diagnostics,
+                severity,
+                code,
+                Some("document".into()),
+                error.to_string(),
+            );
+            let digest = Sha256::digest(source_bytes);
+            return Ok(GlbValidationReport {
+                schema: "ragelab.glb.validation",
+                schema_version: 1,
+                source_name: source_name.to_owned(),
+                source_sha256: format!("{digest:x}"),
+                source_byte_length: source_bytes.len(),
+                strict,
+                valid: false,
+                structural_valid: severity == GlbValidationSeverity::Unsupported,
+                export_compatible: false,
+                geometry_decoded: false,
+                images_decoded: false,
+                semantic_preflight: false,
+                semantic_reopen: false,
+                runtime_renderable: false,
+                shader_preset: None,
+                counts: GlbValidationCounts {
+                    scenes: 0,
+                    nodes: 0,
+                    meshes: 0,
+                    primitives: 0,
+                    decoded_primitives: 0,
+                    accessors: 0,
+                    materials: 0,
+                    textures: 0,
+                    samplers: 0,
+                    images: 0,
+                },
+                diagnostics,
+            });
+        }
+    };
+    let mut diagnostics = Vec::new();
+
+    for chunk in &inspection.container.unknown_chunks {
+        push_glb_validation_diagnostic(
+            &mut diagnostics,
+            GlbValidationSeverity::Warning,
+            "unknown_container_chunk",
+            Some("container".into()),
+            format!(
+                "GLB contains unrecognized chunk {} ({} bytes); the YDR pipeline does not interpret it",
+                chunk.chunk_type, chunk.byte_length
+            ),
+        );
+    }
+
+    const UNDERSTOOD_EXTENSIONS: &[&str] = &[
+        "KHR_materials_emissive_strength",
+        "KHR_materials_specular",
+        "KHR_materials_transmission",
+        "KHR_materials_ior",
+        "KHR_materials_unlit",
+    ];
+    for extension in &inspection.extensions_used {
+        if !UNDERSTOOD_EXTENSIONS.contains(&extension.as_str()) {
+            push_glb_validation_diagnostic(
+                &mut diagnostics,
+                GlbValidationSeverity::Unsupported,
+                "unsupported_extension",
+                Some("extensionsUsed".into()),
+                format!(
+                    "extension {extension} is used by this document but is not interpreted by the current GLB-to-YDR pipeline"
+                ),
+            );
+        }
+    }
+
+    for extension in &inspection.extensions_required {
+        if !inspection.extensions_used.contains(extension) {
+            push_glb_validation_diagnostic(
+                &mut diagnostics,
+                GlbValidationSeverity::Error,
+                "required_extension_not_used",
+                Some("extensionsRequired".into()),
+                format!("required extension {extension} must also appear in extensionsUsed"),
+            );
+        }
+    }
+
+    for sampler in &inspection.samplers {
+        let invalid_mag_filter = sampler
+            .mag_filter
+            .is_some_and(|value| !matches!(value, 9728 | 9729));
+        let invalid_min_filter = sampler
+            .min_filter
+            .is_some_and(|value| !matches!(value, 9728 | 9729 | 9984 | 9985 | 9986 | 9987));
+        let invalid_wrap = !matches!(sampler.wrap_s, 33071 | 33648 | 10497)
+            || !matches!(sampler.wrap_t, 33071 | 33648 | 10497);
+        if invalid_mag_filter || invalid_min_filter || invalid_wrap {
+            push_glb_validation_diagnostic(
+                &mut diagnostics,
+                GlbValidationSeverity::Error,
+                "invalid_sampler",
+                Some(format!("samplers[{}]", sampler.index)),
+                format!(
+                    "sampler {} contains an invalid magFilter/minFilter/wrapS/wrapT enum",
+                    sampler.index
+                ),
+            );
+        }
+    }
+    for texture in &inspection.textures {
+        let has_extensions = texture
+            .extensions
+            .as_object()
+            .is_some_and(|value| !value.is_empty());
+        if texture.source_image_index.is_none() && !has_extensions {
+            push_glb_validation_diagnostic(
+                &mut diagnostics,
+                GlbValidationSeverity::Error,
+                "texture_missing_source",
+                Some(format!("textures[{}].source", texture.index)),
+                format!(
+                    "texture {} has neither a core image source nor a source-bearing extension",
+                    texture.index
+                ),
+            );
+        }
+    }
+    for material in &inspection.materials {
+        if !matches!(material.alpha_mode.as_str(), "OPAQUE" | "MASK" | "BLEND") {
+            push_glb_validation_diagnostic(
+                &mut diagnostics,
+                GlbValidationSeverity::Error,
+                "invalid_alpha_mode",
+                Some(format!("materials[{}].alphaMode", material.index)),
+                format!(
+                    "material {} has invalid alphaMode {}",
+                    material.index, material.alpha_mode
+                ),
+            );
+        }
+    }
+
+    for node in &inspection.nodes {
+        if node.skin_index.is_some() {
+            push_glb_validation_diagnostic(
+                &mut diagnostics,
+                GlbValidationSeverity::Unsupported,
+                "skinned_node",
+                Some(format!("nodes[{}].skin", node.index)),
+                format!(
+                    "node {} uses a skin; the current YDR importer supports static geometry only",
+                    node.index
+                ),
+            );
+        }
+    }
+    for mesh in &inspection.meshes {
+        for primitive in &mesh.primitives {
+            let path = format!("meshes[{}].primitives[{}]", mesh.index, primitive.index);
+            if primitive.morph_target_count > 0 {
+                push_glb_validation_diagnostic(
+                    &mut diagnostics,
+                    GlbValidationSeverity::Unsupported,
+                    "morph_targets",
+                    Some(format!("{path}.targets")),
+                    format!(
+                        "{path} contains {} morph targets; morph targets are not represented by the static YDR writer",
+                        primitive.morph_target_count
+                    ),
+                );
+            }
+            if primitive
+                .extensions
+                .as_object()
+                .is_some_and(|value| !value.is_empty())
+            {
+                push_glb_validation_diagnostic(
+                    &mut diagnostics,
+                    GlbValidationSeverity::Unsupported,
+                    "primitive_extension",
+                    Some(format!("{path}.extensions")),
+                    format!("{path} uses primitive extensions that are not converted by the current YDR pipeline"),
+                );
+            }
+        }
+    }
+    for image in &inspection.images {
+        if !image.embedded {
+            push_glb_validation_diagnostic(
+                &mut diagnostics,
+                GlbValidationSeverity::Unsupported,
+                "external_image",
+                Some(format!("images[{}]", image.index)),
+                format!(
+                    "image {} is not embedded in the GLB; the CLI does not resolve external image paths during export",
+                    image.index
+                ),
+            );
+        }
+    }
+
+    let geometry = match decode_geometry(source_bytes, source_name) {
+        Ok(report) => Some(report),
+        Err(error) => {
+            let (severity, code) = match &error {
+                GlbError::Unsupported(_) => {
+                    (GlbValidationSeverity::Unsupported, "geometry_unsupported")
+                }
+                GlbError::InvalidContainer(_)
+                | GlbError::InvalidDocument(_)
+                | GlbError::Json(_) => (GlbValidationSeverity::Error, "geometry_invalid"),
+                GlbError::InvalidProfile(_) => {
+                    (GlbValidationSeverity::Error, "geometry_invalid_profile")
+                }
+                GlbError::Io(_) => (GlbValidationSeverity::Error, "geometry_io_error"),
+            };
+            push_glb_validation_diagnostic(
+                &mut diagnostics,
+                severity,
+                code,
+                Some("geometry".into()),
+                error.to_string(),
+            );
+            None
+        }
+    };
+
+    if let Some(geometry) = &geometry {
+        for mesh_index in &geometry.uninstantiated_meshes {
+            push_glb_validation_diagnostic(
+                &mut diagnostics,
+                GlbValidationSeverity::Warning,
+                "mesh_not_in_active_scene",
+                Some(format!("meshes[{mesh_index}]")),
+                format!(
+                    "mesh {mesh_index} is not instantiated by the active scene and is not included in the default YDR export"
+                ),
+            );
+        }
+        if geometry.primitives.is_empty() {
+            push_glb_validation_diagnostic(
+                &mut diagnostics,
+                GlbValidationSeverity::Unsupported,
+                "no_exportable_geometry",
+                Some("scenes".into()),
+                "the active scene contains no static triangle geometry exportable to YDR",
+            );
+        }
+        for primitive in &geometry.primitives {
+            let path = format!(
+                "nodes[{}].mesh[{}].primitives[{}]",
+                primitive.node_index, primitive.mesh_index, primitive.primitive_index
+            );
+            if !primitive.unsupported_attributes.is_empty() {
+                push_glb_validation_diagnostic(
+                    &mut diagnostics,
+                    GlbValidationSeverity::Unsupported,
+                    "unsupported_vertex_attributes",
+                    Some(format!("{path}.attributes")),
+                    format!(
+                        "vertex attributes are not preserved by the YDR writer: {}",
+                        primitive.unsupported_attributes.join(", ")
+                    ),
+                );
+            }
+            if primitive.normals.is_none() {
+                push_glb_validation_diagnostic(
+                    &mut diagnostics,
+                    GlbValidationSeverity::Warning,
+                    "missing_normals",
+                    Some(format!("{path}.attributes.NORMAL")),
+                    "primitive has no NORMAL attribute; downstream shading may be incomplete",
+                );
+            }
+        }
+    }
+
+    let images_decoded = match decode_glb_images(source_bytes) {
+        Ok(_) => true,
+        Err(error) => {
+            let (severity, code) = match &error {
+                GlbError::Unsupported(_) => {
+                    (GlbValidationSeverity::Unsupported, "image_unsupported")
+                }
+                _ => (GlbValidationSeverity::Error, "image_invalid"),
+            };
+            push_glb_validation_diagnostic(
+                &mut diagnostics,
+                severity,
+                code,
+                Some("images".into()),
+                error.to_string(),
+            );
+            false
+        }
+    };
+
+    let blocked_before_preflight = diagnostics.iter().any(|diagnostic| {
+        matches!(
+            diagnostic.severity,
+            GlbValidationSeverity::Error | GlbValidationSeverity::Unsupported
+        )
+    });
+    let (semantic_preflight, semantic_reopen, shader_preset) = if blocked_before_preflight {
+        (false, false, None)
+    } else {
+        let request = GlbYdrExportRequest {
+            source_name: source_name.to_owned(),
+            source_bytes: source_bytes.to_vec(),
+            profile_bytes,
+            shader_template,
+            shader_index,
+        };
+        match export_glb_to_ydr(request) {
+            Ok(result) => {
+                push_glb_validation_diagnostic(
+                    &mut diagnostics,
+                    GlbValidationSeverity::Info,
+                    "ydr_semantic_preflight_passed",
+                    Some("export".into()),
+                    "in-memory YDR serialization and semantic reopen passed; no output file was written",
+                );
+                if result.report.shader_template.is_none() && !inspection.materials.is_empty() {
+                    push_glb_validation_diagnostic(
+                        &mut diagnostics,
+                        GlbValidationSeverity::Info,
+                        "shader_template_not_supplied",
+                        Some("materials".into()),
+                        "no ShaderFX template was supplied; this preflight certifies structural YDR export only, not material shader bindings",
+                    );
+                }
+                (
+                    true,
+                    result.report.semantic_reopen,
+                    result
+                        .report
+                        .shader_template
+                        .map(|template| template.preset.to_owned()),
+                )
+            }
+            Err(error) => {
+                let (severity, code) = match error.kind() {
+                    io::ErrorKind::Unsupported | io::ErrorKind::InvalidInput => {
+                        (GlbValidationSeverity::Unsupported, "export_unsupported")
+                    }
+                    io::ErrorKind::InvalidData => {
+                        (GlbValidationSeverity::Error, "export_preflight_invalid")
+                    }
+                    _ => (GlbValidationSeverity::Error, "export_preflight_failed"),
+                };
+                push_glb_validation_diagnostic(
+                    &mut diagnostics,
+                    severity,
+                    code,
+                    Some("export".into()),
+                    error.to_string(),
+                );
+                (false, false, None)
+            }
+        }
+    };
+
+    if strict {
+        for diagnostic in &mut diagnostics {
+            if diagnostic.severity == GlbValidationSeverity::Warning {
+                diagnostic.promoted_from = Some(GlbValidationSeverity::Warning);
+                diagnostic.severity = GlbValidationSeverity::Error;
+            }
+        }
+    }
+
+    let has_structural_errors = diagnostics.iter().any(|diagnostic| {
+        diagnostic.severity == GlbValidationSeverity::Error
+            && diagnostic.promoted_from.is_none()
+            && matches!(
+                diagnostic.code.as_str(),
+                "geometry_invalid"
+                    | "geometry_invalid_profile"
+                    | "geometry_io_error"
+                    | "image_invalid"
+                    | "invalid_sampler"
+                    | "texture_missing_source"
+                    | "invalid_alpha_mode"
+                    | "required_extension_not_used"
+            )
+    });
+    let has_export_errors = diagnostics.iter().any(|diagnostic| {
+        diagnostic.severity == GlbValidationSeverity::Error
+            && diagnostic.promoted_from.is_none()
+            && diagnostic.code.starts_with("export_")
+    });
+    let has_unsupported = diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == GlbValidationSeverity::Unsupported);
+    let has_strict_warnings = diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.promoted_from == Some(GlbValidationSeverity::Warning));
+    let structural_valid = !has_structural_errors;
+    let export_compatible =
+        semantic_preflight && structural_valid && !has_unsupported && !has_export_errors;
+    let valid = structural_valid && export_compatible && !has_strict_warnings;
+    Ok(GlbValidationReport {
+        schema: "ragelab.glb.validation",
+        schema_version: 1,
+        source_name: inspection.source.file_name.clone(),
+        source_sha256: inspection.source.sha256.clone(),
+        source_byte_length: inspection.source.byte_length,
+        strict,
+        valid,
+        structural_valid,
+        export_compatible,
+        geometry_decoded: geometry.is_some(),
+        images_decoded,
+        semantic_preflight,
+        semantic_reopen,
+        runtime_renderable: false,
+        shader_preset,
+        counts: GlbValidationCounts {
+            scenes: inspection.counts.scenes,
+            nodes: inspection.counts.nodes,
+            meshes: inspection.counts.meshes,
+            primitives: inspection.counts.primitives,
+            decoded_primitives: geometry.as_ref().map_or(0, |value| value.primitives.len()),
+            accessors: inspection.counts.accessors,
+            materials: inspection.counts.materials,
+            textures: inspection.counts.textures,
+            samplers: inspection.counts.samplers,
+            images: inspection.counts.images,
+        },
+        diagnostics,
+    })
+}
+
+fn push_glb_validation_diagnostic(
+    diagnostics: &mut Vec<GlbValidationDiagnostic>,
+    severity: GlbValidationSeverity,
+    code: &str,
+    path: Option<String>,
+    message: impl Into<String>,
+) {
+    diagnostics.push(GlbValidationDiagnostic {
+        severity,
+        code: code.to_owned(),
+        path,
+        message: message.into(),
+        promoted_from: None,
+    });
 }
 
 pub fn default_glb_authoring_profile(
@@ -1912,6 +2436,64 @@ mod tests {
         assert_eq!(inspection.source.byte_length, geometry.source_byte_length);
         assert_eq!(geometry.primitives.len(), 1);
         assert_eq!(geometry.primitives[0].vertex_count, 3);
+    }
+
+    #[test]
+    fn glb_inspection_and_geometry_handle_deterministic_mutation_corpus() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let seed = triangle_glb();
+        let mut state = 0xA076_1D64_78BD_642F_u64;
+        for case in 0..160_usize {
+            let mut bytes = seed.clone();
+            let mutation_count = 1 + case % 4;
+            for _ in 0..mutation_count {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let index = (state as usize) % bytes.len();
+                bytes[index] ^= ((state >> 40) as u8) | 1;
+            }
+            if case % 11 == 0 {
+                bytes.truncate(case % (bytes.len() + 1));
+            }
+            if case % 13 == 0 {
+                bytes.extend_from_slice(&state.to_le_bytes());
+            }
+
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                let inspection = inspect_glb_bytes(&bytes, "mutated.glb");
+                let geometry = decode_glb_geometry_bytes(&bytes, "mutated.glb");
+                if let (Ok(inspection), Ok(geometry)) = (inspection, geometry) {
+                    assert_eq!(inspection.source.sha256, geometry.source_sha256);
+                    assert_eq!(inspection.source.byte_length, geometry.source_byte_length);
+                    for primitive in &geometry.primitives {
+                        assert_eq!(primitive.vertex_count, primitive.positions.len());
+                        assert_eq!(primitive.index_count, primitive.indices.len());
+                    }
+                }
+            }));
+            assert!(outcome.is_ok(), "GLB mutation case {case} panicked");
+        }
+
+        for case in 0..160_usize {
+            let length = case % 257;
+            let mut bytes = vec![0_u8; length];
+            for byte in &mut bytes {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                *byte = (state >> 24) as u8;
+            }
+            if case % 2 == 0 && bytes.len() >= 4 {
+                bytes[..4].copy_from_slice(b"glTF");
+            }
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                let _ = inspect_glb_bytes(&bytes, "random.glb");
+                let _ = decode_glb_geometry_bytes(&bytes, "random.glb");
+            }));
+            assert!(outcome.is_ok(), "GLB random input case {case} panicked");
+        }
     }
 
     #[test]

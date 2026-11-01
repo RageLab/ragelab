@@ -1,0 +1,540 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ragelab.dev/schemas/ragelab.glb.export-report.v1.schema.json",
+  "title": "RageLab GLB Export Report v1",
+  "description": "Deterministic provenance and conversion report emitted by ragelab glb export --report. A schemaVersion change is required for incompatible contract changes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schemaVersion",
+    "tool",
+    "provenance",
+    "options",
+    "summary",
+    "decisions",
+    "transformations",
+    "textureConversions",
+    "resources",
+    "losses",
+    "fallbacks",
+    "warnings",
+    "errors",
+    "pipelineLimitations",
+    "validationStages",
+    "runtimeRenderable",
+    "runtimeAcceptance",
+    "engineReport"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ragelab.glb.export-report"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "coreRevision",
+        "coreDirty"
+      ],
+      "properties": {
+        "name": {
+          "const": "ragelab"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "coreRevision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "coreDirty": {
+          "type": "boolean"
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input",
+        "authoringProfile",
+        "shaderTemplate",
+        "output"
+      ],
+      "properties": {
+        "input": {
+          "$ref": "#/$defs/fileProvenance"
+        },
+        "authoringProfile": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "origin",
+            "fileName",
+            "path",
+            "schema",
+            "schemaVersion",
+            "sha256",
+            "sourceSha256",
+            "source",
+            "settings"
+          ],
+          "properties": {
+            "origin": {
+              "enum": [
+                "provided_file",
+                "generated_default"
+              ]
+            },
+            "fileName": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "schema": {
+              "type": "string"
+            },
+            "schemaVersion": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "sourceSha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "source": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "fileName",
+                "byteLength",
+                "sha256",
+                "materialCount",
+                "textureCount"
+              ],
+              "properties": {
+                "fileName": {
+                  "type": "string"
+                },
+                "byteLength": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "sha256": {
+                  "$ref": "#/$defs/sha256"
+                },
+                "materialCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "textureCount": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            "settings": {
+              "type": "object"
+            }
+          }
+        },
+        "shaderTemplate": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "fileName",
+                "path",
+                "format",
+                "shaderIndex",
+                "preset",
+                "nameHash",
+                "fileHash",
+                "sha256"
+              ],
+              "properties": {
+                "fileName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "path": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "format": {
+                  "enum": [
+                    "yft",
+                    "ydr"
+                  ]
+                },
+                "shaderIndex": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "preset": {
+                  "type": "string"
+                },
+                "nameHash": {
+                  "type": "string"
+                },
+                "fileHash": {
+                  "type": "string"
+                },
+                "sha256": {
+                  "$ref": "#/$defs/sha256"
+                }
+              }
+            }
+          ]
+        },
+        "output": {
+          "$ref": "#/$defs/fileProvenance"
+        }
+      }
+    },
+    "options": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selectedNodeIndices",
+        "shaderIndex",
+        "outputOverwrite",
+        "textureEncoding",
+        "generateMipmaps",
+        "normalMapConvention"
+      ],
+      "properties": {
+        "selectedNodeIndices": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "shaderIndex": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outputOverwrite": {
+          "type": "boolean"
+        },
+        "textureEncoding": {
+          "enum": [
+            "auto",
+            "bc1",
+            "bc3",
+            "rgba8"
+          ]
+        },
+        "generateMipmaps": {
+          "type": "boolean"
+        },
+        "normalMapConvention": {
+          "enum": [
+            "open_gl",
+            "direct_x"
+          ]
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ydrVersion",
+        "geometryCount",
+        "vertexCount",
+        "triangleCount",
+        "materialCount",
+        "embeddedTextureCount",
+        "textureFormats",
+        "shaderCount",
+        "materialShaderBindings",
+        "geometryShaderMappings",
+        "shaderTextureBindings"
+      ],
+      "properties": {
+        "ydrVersion": {
+          "type": "integer"
+        },
+        "geometryCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "vertexCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "triangleCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "materialCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "embeddedTextureCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "textureFormats": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "shaderCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "materialShaderBindings": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "geometryShaderMappings": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "shaderTextureBindings": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "decisions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "materials",
+        "geometries",
+        "textureSlotMappings",
+        "shaderParameters"
+      ],
+      "properties": {
+        "materials": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "geometries": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "textureSlotMappings": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "shaderParameters": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "outputShaderCount",
+            "shaders"
+          ],
+          "properties": {
+            "outputShaderCount": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "shaders": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
+    "transformations": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "textureConversions": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "included",
+        "omitted"
+      ],
+      "properties": {
+        "included": {
+          "type": "object"
+        },
+        "omitted": {
+          "type": "object"
+        }
+      }
+    },
+    "losses": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "fallbacks": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "pipelineLimitations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "validationStages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "stage",
+          "status"
+        ],
+        "properties": {
+          "stage": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "passed",
+              "failed",
+              "not_run"
+            ]
+          }
+        }
+      }
+    },
+    "runtimeRenderable": {
+      "const": false
+    },
+    "runtimeAcceptance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "codewalkerCore",
+        "codewalkerGui",
+        "gtaV",
+        "fivem"
+      ],
+      "properties": {
+        "codewalkerCore": {
+          "enum": [
+            "accepted",
+            "rejected",
+            "not_run"
+          ]
+        },
+        "codewalkerGui": {
+          "enum": [
+            "accepted",
+            "rejected",
+            "not_run"
+          ]
+        },
+        "gtaV": {
+          "enum": [
+            "accepted",
+            "rejected",
+            "not_run"
+          ]
+        },
+        "fivem": {
+          "enum": [
+            "accepted",
+            "rejected",
+            "not_run"
+          ]
+        }
+      }
+    },
+    "engineReport": {
+      "type": "object"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "fileProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fileName",
+        "path",
+        "byteLength",
+        "sha256"
+      ],
+      "properties": {
+        "fileName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "byteLength": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  }
+}

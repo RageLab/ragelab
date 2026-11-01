@@ -39,9 +39,13 @@ pub fn is_structured_command(command: &str) -> bool {
             | "capabilities"
             | "inspect"
             | "glb.inspect"
+            | "glb.validate"
+            | "ydr.inspect"
+            | "ydr.validate"
             | "glb.geometry"
             | "glb.tree"
             | "glb.export"
+            | "glb.batch"
             | "glb.profile"
             | "validate"
             | "plan"
@@ -1976,10 +1980,14 @@ pub fn normalize_command_args(args: Vec<String>) -> Vec<String> {
 
     let mapped = match (args[0].as_str(), args[1].as_str()) {
         ("glb", "inspect") => Some("glb.inspect"),
+        ("glb", "validate") => Some("glb.validate"),
         ("glb", "geometry") => Some("glb.geometry"),
         ("glb", "tree") => Some("glb.tree"),
         ("glb", "export") => Some("glb.export"),
+        ("glb", "batch") => Some("glb.batch"),
         ("glb", "profile") => Some("glb.profile"),
+        ("ydr", "inspect") => Some("ydr.inspect"),
+        ("ydr", "validate") => Some("ydr.validate"),
         ("ydr", "info") => Some("ydr-info"),
         ("ydr", "translate") => Some("ydr-translate"),
         ("ydr", "rebind-texture") => Some("ydr-rebind-texture"),
@@ -2036,6 +2044,29 @@ pub fn normalize_command_args(args: Vec<String>) -> Vec<String> {
     normalized.push(mapped.to_string());
     normalized.extend(args.into_iter().skip(2));
     normalized
+}
+
+pub(crate) fn print_failure_with_data(
+    command: &str,
+    code: &str,
+    message: &str,
+    data: Value,
+) -> Result<(), serde_json::Error> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "schema": RESPONSE_SCHEMA,
+            "schemaVersion": RESPONSE_SCHEMA_VERSION,
+            "ok": false,
+            "command": command,
+            "error": {
+                "code": code,
+                "message": message,
+            },
+            "data": data,
+        }))?
+    );
+    Ok(())
 }
 
 pub(crate) fn print_success(command: &str, data: Value) -> Result<(), serde_json::Error> {

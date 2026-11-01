@@ -33,7 +33,7 @@ Errors use the same schema:
 
 Consumers must key compatibility decisions on `schema` and `schemaVersion`, not on human-readable output. The exact common-envelope v1 shape is published as [JSON Schema](schemas/ragelab.cli.response.v1.schema.json). Domain payloads retain their own `schema`/`schemaVersion` where defined.
 
-The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `spatial <file> --json`, `preview <file> --json`, `plan <operation.json> --json`, `apply <operation.json> --json`, `workspace preflight ... --json`, `workspace export ... --json`, `workspace scene ... --json`, `workspace render-package ... --json`, `render asset ... --json`, `render scene ... --json`, `render compare ... --json`, `gta discover --json`, `gta catalog ... --json`, `gta rpf-index ... --json`, `gta world-query ... --json`, and `fivem discover --json` use the common response envelope.
+The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. The GLB-specific validation command `ragelab glb validate <source.glb> [--profile <profile.json>] [--shader-template <source.yft|source.ydr>] [--shader-index <n>] [--strict] [--json]` returns the common response envelope with domain payload `ragelab.glb.validation` v1, described by [ragelab.glb.validation.v1.schema.json](schemas/ragelab.glb.validation.v1.schema.json). Its failure envelope includes the full report in `data`, with exit code 3 for unsupported pipeline features and 4 for invalid data / strict warnings. The YDR-specific commands `ragelab ydr inspect <file.ydr> [--json]` and `ragelab ydr validate <file.ydr> [--strict] [--json]` return domain payloads `ragelab.ydr.inspection` v1 and `ragelab.ydr.validation` v1, defined by [ragelab.ydr.inspection.v1.schema.json](schemas/ragelab.ydr.inspection.v1.schema.json) and [ragelab.ydr.validation.v1.schema.json](schemas/ragelab.ydr.validation.v1.schema.json). Validation failure retains the complete report in `data`: exit code 3 means a recognized but unsupported YDR feature/texture format, and exit code 4 means invalid data or a warning promoted by `--strict`. The reports separately expose container validity, typed format validity, structural audit and in-memory semantic reopen; neither report asserts CodeWalker GUI acceptance or GTA/FiveM runtime renderability (`runtimeRenderable=false`). Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `spatial <file> --json`, `preview <file> --json`, `plan <operation.json> --json`, `apply <operation.json> --json`, `workspace preflight ... --json`, `workspace export ... --json`, `workspace scene ... --json`, `workspace render-package ... --json`, `render asset ... --json`, `render scene ... --json`, `render compare ... --json`, `gta discover --json`, `gta catalog ... --json`, `gta rpf-index ... --json`, `gta world-query ... --json`, and `fivem discover --json` use the common response envelope.
 
 ## Agent-first surface
 
@@ -75,6 +75,8 @@ ragelab fivem ...
 Examples:
 
 ```bash
+ragelab ydr inspect prop.ydr --json
+ragelab ydr validate prop.ydr --strict --json
 ragelab ydr info prop.ydr
 ragelab ydr translate source.ydr 1 0 0 output.ydr
 ragelab ytd extract-dds textures.ytd 0 texture.dds
@@ -275,6 +277,18 @@ RageLab reserves the following process exit codes for the CLI contract:
 
 Callers must treat the process exit status as authoritative even when JSON output is enabled.
 
+## GLB batch pipeline
+
+\`ragelab glb batch <manifest.json> [--json]\` accepts the strict, versioned \`ragelab.glb.batch-manifest\` v1 contract. The manifest schema is [ragelab.glb.batch-manifest.v1.schema.json](schemas/ragelab.glb.batch-manifest.v1.schema.json); the persisted aggregate is [ragelab.glb.batch-report.v1.schema.json](schemas/ragelab.glb.batch-report.v1.schema.json).
+
+Every item must name a source GLB, a strict authoring profile, an output YDR, a per-item export-report path, an explicit nullable \`shaderTemplate\`, a \`shaderIndex\`, and a node-index array. All paths are relative to the manifest directory, are canonicalized and must remain under that root; output parents must pre-exist. Existing outputs/reports and path aliases/collisions are rejected. Profiles/templates are never inferred, and a null template selects structural export without ShaderFX cloning.
+
+The global preflight resolves every path and performs the actual byte-first export, selected-node checks, optional exact template signature validation, YDR semantic reopen and item-report generation in memory for every item before any final path is published. It is followed by bounded execution (concurrency 1..8); results are always listed in manifest order. Input hashes are checked again immediately before publishing an item.
+
+\`failurePolicy\` is required and is either \`continue\` or \`fail_fast\`. Continue isolates execution/publication failures per item. Fail-fast stops scheduling new items after the first observed failure; already-running workers finish and unscheduled items are reported as cancelled. A global preflight failure always stops before writes. Atomic no-replace publication is applied to each YDR, item sidecar and final aggregate. This is per-file atomicity, not a transaction across the whole batch: successful earlier items are not rolled back on a later item failure. The aggregate is published last. Exit 1 with code \`batch_failed\` means at least one item failed/cancelled; structured failures include the full aggregate under the common envelope's \`data\`. Exit codes 2/3/4 retain invalid-input/unsupported/validation-failure semantics.
+
+Progress is written to stderr, so JSON stdout remains parseable. See [GLB_BATCH.md](GLB_BATCH.md) for path rules, size budgets, fail-fast semantics, rollback limitations and examples.
+
 ## Error codes
 
 The common envelope currently emits:
@@ -283,6 +297,7 @@ The common envelope currently emits:
 - `invalid_input`
 - `unsupported`
 - `validation_failed`
+- `batch_failed` (one or more batch items failed or were cancelled after a successful global preflight)
 
 Error codes are stable identifiers. Error messages are diagnostic text and may become more specific without a schema version change.
 
@@ -300,6 +315,12 @@ RageLab Studio is a Rust/Tauri adapter over the same `ragelab-engine` services. 
 - Existing accepted command IDs are not removed from a versioned discovery contract without a compatibility transition.
 - Writer safety is decided by Rust core logic, never by the CLI adapter or an external caller.
 - Source assets are not overwritten implicitly by agent-oriented mutation flows.
+
+## GLB export report sidecar
+
+`ragelab glb export` accepts optional `--report <report.json>`. It writes a separate `ragelab.glb.export-report` v1 document with hashes and provenance for the input, effective authoring profile, optional shader template and output; material/texture-slot/geometry/shader decisions; actual ShaderFX descriptors and texture references; geometry and image transformations; included/omitted resources; losses, warnings and executed validation stages. The published contract is [ragelab.glb.export-report.v1.schema.json](schemas/ragelab.glb.export-report.v1.schema.json).
+
+The sidecar is deterministic for identical bytes, options and paths. It contains no timestamps or temporary names. The report destination must be new and distinct from every input and output path. Publication is atomic and never overwrites an existing report. `--overwrite` continues to control only the YDR output. Semantic reopen is a structural gate; CodeWalker GUI, GTA V and FiveM acceptance remain `not_run`, and `runtimeRenderable` remains false. See [GLB_IMPORT.md](GLB_IMPORT.md) for the complete field and workflow description.
 
 ## Structured-output expansion
 

@@ -9,12 +9,198 @@ use std::{
 use ragelab_engine::{
     decode_glb_geometry_bytes, default_glb_authoring_profile, export_glb_to_ydr,
     export_glb_to_ydr_with_nodes, inspect_glb_bytes, validate_glb_authoring_profile_bytes,
-    GlbShaderTemplateFormat, GlbShaderTemplateInput, GlbYdrExportRequest,
+    validate_glb_export_bytes, GlbShaderTemplateFormat, GlbShaderTemplateInput,
+    GlbValidationReport, GlbYdrExportRequest,
 };
 use ragelab_gltf::{
     DecodedGeometryReport, GlbInspectionReport, ProfileValidationReport, TextureBindingInfo,
 };
 use serde_json::json;
+
+#[derive(Debug)]
+pub struct ValidationCommandError {
+    pub exit_code: i32,
+    pub error_code: &'static str,
+    pub message: String,
+    pub report: serde_json::Value,
+}
+
+impl std::fmt::Display for ValidationCommandError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl Error for ValidationCommandError {}
+
+pub fn validate(args: Vec<String>) -> Result<(), Box<dyn Error>> {
+    const USAGE: &str = "usage: ragelab glb validate <source.glb> [--profile <profile.json>] [--shader-template <source.yft|source.ydr>] [--shader-index <n>] [--strict] [--json]";
+    let mut source = None;
+    let mut profile_path = None;
+    let mut shader_template_path = None;
+    let mut shader_index = 0usize;
+    let mut strict = false;
+    let mut json_output = false;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--profile" => {
+                profile_path = Some(PathBuf::from(
+                    args.next().ok_or_else(|| invalid_input(USAGE))?,
+                ));
+            }
+            "--shader-template" => {
+                shader_template_path = Some(PathBuf::from(
+                    args.next().ok_or_else(|| invalid_input(USAGE))?,
+                ));
+            }
+            "--shader-index" => {
+                shader_index = args
+                    .next()
+                    .ok_or_else(|| invalid_input(USAGE))?
+                    .parse::<usize>()
+                    .map_err(|_| invalid_input("--shader-index must be a non-negative integer"))?;
+            }
+            "--strict" => strict = true,
+            "--json" => json_output = true,
+            value if value.starts_with('-') => {
+                return Err(invalid_input(format!("unknown option {value}\\n{USAGE}")).into());
+            }
+            value => {
+                if source.replace(PathBuf::from(value)).is_some() {
+                    return Err(invalid_input(USAGE).into());
+                }
+            }
+        }
+    }
+    let source = source.ok_or_else(|| invalid_input(USAGE))?;
+    if shader_index != 0 && shader_template_path.is_none() {
+        return Err(invalid_input("--shader-index requires --shader-template").into());
+    }
+
+    let source_bytes = fs::read(&source)?;
+    let source_name = source
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("model.glb")
+        .to_owned();
+    let profile_bytes = profile_path.as_ref().map(fs::read).transpose()?;
+    let shader_template = if let Some(path) = shader_template_path.as_ref() {
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let format = match extension.as_str() {
+            "yft" => GlbShaderTemplateFormat::LegacyYft,
+            "ydr" => GlbShaderTemplateFormat::LegacyYdr,
+            _ => {
+                return Err(invalid_input(
+                    "--shader-template must reference a Legacy .yft or .ydr resource",
+                )
+                .into());
+            }
+        };
+        Some(GlbShaderTemplateInput {
+            format,
+            source_name: path.display().to_string(),
+            bytes: fs::read(path)?,
+        })
+    } else {
+        None
+    };
+
+    let report = validate_glb_export_bytes(
+        &source_bytes,
+        &source_name,
+        profile_bytes,
+        shader_template,
+        shader_index,
+        strict,
+    )?;
+    if report.valid {
+        if json_output {
+            super::agent::print_success("glb.validate", serde_json::to_value(&report)?)?;
+        } else {
+            print_validation(&source, &report);
+        }
+        return Ok(());
+    }
+
+    let has_error = report
+        .diagnostics
+        .iter()
+        .any(|item| item.severity == ragelab_engine::GlbValidationSeverity::Error);
+    let (exit_code, error_code) = if has_error {
+        (4, "validation_failed")
+    } else {
+        (3, "unsupported")
+    };
+    let message = if has_error {
+        format!(
+            "GLB validation failed: {} error diagnostic(s)",
+            report
+                .diagnostics
+                .iter()
+                .filter(|item| item.severity == ragelab_engine::GlbValidationSeverity::Error)
+                .count()
+        )
+    } else {
+        format!(
+            "GLB is structurally valid but has {} unsupported pipeline feature(s)",
+            report
+                .diagnostics
+                .iter()
+                .filter(|item| item.severity == ragelab_engine::GlbValidationSeverity::Unsupported)
+                .count()
+        )
+    };
+    if !json_output {
+        print_validation(&source, &report);
+    }
+    Err(Box::new(ValidationCommandError {
+        exit_code,
+        error_code,
+        message,
+        report: serde_json::to_value(&report)?,
+    }))
+}
+
+fn print_validation(path: &Path, report: &GlbValidationReport) {
+    println!("file: {}", path.display());
+    println!("sha256: {}", report.source_sha256);
+    println!("valid: {}", report.valid);
+    println!("structural valid: {}", report.structural_valid);
+    println!("export compatible: {}", report.export_compatible);
+    println!("geometry decoded: {}", report.geometry_decoded);
+    println!("images decoded: {}", report.images_decoded);
+    println!("YDR semantic preflight: {}", report.semantic_preflight);
+    println!("YDR semantic reopen: {}", report.semantic_reopen);
+    println!("runtimeRenderable: {}", report.runtime_renderable);
+    println!(
+        "counts: {} scenes, {} nodes, {} meshes, {} primitives ({} decoded), {} accessors, {} materials, {} textures, {} samplers, {} images",
+        report.counts.scenes,
+        report.counts.nodes,
+        report.counts.meshes,
+        report.counts.primitives,
+        report.counts.decoded_primitives,
+        report.counts.accessors,
+        report.counts.materials,
+        report.counts.textures,
+        report.counts.samplers,
+        report.counts.images
+    );
+    if let Some(preset) = &report.shader_preset {
+        println!("ShaderFX preset: {preset}");
+    }
+    for diagnostic in &report.diagnostics {
+        let path = diagnostic.path.as_deref().unwrap_or("-");
+        println!(
+            "[{:?}] {} {}: {}",
+            diagnostic.severity, diagnostic.code, path, diagnostic.message
+        );
+    }
+}
 
 pub fn inspect(args: Vec<String>) -> Result<(), Box<dyn Error>> {
     let (source, json_output) = parse_inspect_args(args)?;
@@ -219,9 +405,10 @@ fn print_node_tree(node: &serde_json::Value) {
 }
 
 pub fn export(args: Vec<String>) -> Result<(), Box<dyn Error>> {
-    const USAGE: &str = "usage: ragelab glb export <source.glb> --output <output.ydr> [--node <index> ...] [--profile <profile.json>] [--shader-template <source.yft|source.ydr>] [--shader-index <n>] [--overwrite] [--json]";
+    const USAGE: &str = "usage: ragelab glb export <source.glb> --output <output.ydr> [--node <index> ...] [--profile <profile.json>] [--shader-template <source.yft|source.ydr>] [--shader-index <n>] [--report <report.json>] [--overwrite] [--json]";
     let mut source = None;
     let mut output = None;
+    let mut report_path = None;
     let mut profile_path = None;
     let mut shader_template_path = None;
     let mut shader_index = 0usize;
@@ -238,6 +425,11 @@ pub fn export(args: Vec<String>) -> Result<(), Box<dyn Error>> {
             }
             "--profile" => {
                 profile_path = Some(PathBuf::from(
+                    args.next().ok_or_else(|| invalid_input(USAGE))?,
+                ))
+            }
+            "--report" => {
+                report_path = Some(PathBuf::from(
                     args.next().ok_or_else(|| invalid_input(USAGE))?,
                 ))
             }
@@ -282,6 +474,23 @@ pub fn export(args: Vec<String>) -> Result<(), Box<dyn Error>> {
     if let Some(path) = &shader_template_path {
         ensure_distinct_paths(path, &output)?;
     }
+    if let Some(path) = &report_path {
+        ensure_distinct_paths(&source, path)?;
+        ensure_distinct_paths(&output, path)?;
+        if let Some(profile) = &profile_path {
+            ensure_distinct_paths(profile, path)?;
+        }
+        if let Some(template) = &shader_template_path {
+            ensure_distinct_paths(template, path)?;
+        }
+        if path.exists() {
+            return Err(invalid_input(format!(
+                "report destination already exists; reports are never overwritten: {}",
+                path.display()
+            ))
+            .into());
+        }
+    }
 
     let source_bytes = fs::read(&source)?;
     let source_name = source
@@ -315,6 +524,9 @@ pub fn export(args: Vec<String>) -> Result<(), Box<dyn Error>> {
         None
     };
 
+    let report_source_bytes = report_path.as_ref().map(|_| source_bytes.clone());
+    let report_profile_bytes = report_path.as_ref().and(profile_bytes.as_ref()).cloned();
+
     let request = GlbYdrExportRequest {
         source_name,
         source_bytes,
@@ -328,7 +540,33 @@ pub fn export(args: Vec<String>) -> Result<(), Box<dyn Error>> {
         export_glb_to_ydr_with_nodes(request, &selected_node_indices)?
     };
 
+    let report_body = if report_path.is_some() {
+        let report = super::glb_export_report::build_report(
+            super::glb_export_report::GlbExportReportRequest {
+                source_path: &source,
+                source_bytes: report_source_bytes
+                    .as_deref()
+                    .expect("report source bytes retained"),
+                output_path: &output,
+                profile_path: profile_path.as_deref(),
+                profile_bytes: report_profile_bytes.as_deref(),
+                shader_template_path: shader_template_path.as_deref(),
+                selected_node_indices: &selected_node_indices,
+                output_overwrite: overwrite,
+                result: &result,
+            },
+        )?;
+        let mut body = serde_json::to_vec_pretty(&report)?;
+        body.push(b'\n');
+        Some(body)
+    } else {
+        None
+    };
+
     write_output(&output, &result.output_bytes, overwrite)?;
+    if let (Some(path), Some(body)) = (report_path.as_ref(), report_body.as_deref()) {
+        super::glb_export_report::write_report_atomic(path, body)?;
+    }
     if json_output {
         let mut data = serde_json::to_value(&result.report)?;
         let object = data
@@ -336,9 +574,15 @@ pub fn export(args: Vec<String>) -> Result<(), Box<dyn Error>> {
             .ok_or_else(|| invalid_data("engine export report must serialize as an object"))?;
         object.insert("source".into(), json!(source));
         object.insert("output".into(), json!(output));
+        if let Some(path) = report_path.as_ref() {
+            object.insert("report".into(), json!(path));
+        }
         super::agent::print_success("glb.export", data)?;
     } else {
         print_export(&source, &output, &result.report);
+        if let Some(path) = report_path.as_ref() {
+            println!("report: {}", path.display());
+        }
     }
     Ok(())
 }
@@ -708,23 +952,32 @@ fn print_binding(label: &str, binding: Option<&TextureBindingInfo>) {
 }
 
 fn ensure_distinct_paths(source: &Path, output: &Path) -> Result<(), io::Error> {
-    let source = source.canonicalize()?;
-    let output_abs = if output.exists() {
-        output.canonicalize()?
-    } else {
-        let parent = output
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        let name = output
-            .file_name()
-            .ok_or_else(|| invalid_input("output must name a file"))?;
-        parent.canonicalize()?.join(name)
-    };
-    if source == output_abs {
+    let source_abs = canonical_path_for_comparison(source)?;
+    let output_abs = canonical_path_for_comparison(output)?;
+    #[cfg(windows)]
+    let paths_match = source_abs
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&output_abs.to_string_lossy());
+    #[cfg(not(windows))]
+    let paths_match = source_abs == output_abs;
+    if paths_match {
         return Err(invalid_input("output must not overwrite the input file"));
     }
     Ok(())
+}
+
+fn canonical_path_for_comparison(path: &Path) -> Result<PathBuf, io::Error> {
+    if path.exists() {
+        return path.canonicalize();
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| invalid_input("output must name a file"))?;
+    Ok(parent.canonicalize()?.join(name))
 }
 
 fn write_output(path: &Path, body: &[u8], overwrite: bool) -> Result<(), io::Error> {

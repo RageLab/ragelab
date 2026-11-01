@@ -277,6 +277,44 @@ pub struct YdrDocument {
     pub embedded_textures: Option<YtdDictionary>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct YdrGeometryInspection {
+    pub model_index: usize,
+    pub geometry_index: usize,
+    pub shader_index: Option<u16>,
+    pub topology: PrimitiveTopology,
+    pub vertex_count: usize,
+    pub index_count: usize,
+    pub triangle_count: usize,
+    pub declaration: VertexDeclarationSummary,
+    pub model_bounds_min: [f32; 3],
+    pub model_bounds_max: [f32; 3],
+    pub geometry_bounds_min: [f32; 3],
+    pub geometry_bounds_max: [f32; 3],
+    pub has_positions: bool,
+    pub has_normals: bool,
+    pub has_tangents: bool,
+    pub has_color0: bool,
+    pub has_uv0: bool,
+    pub has_uv1: bool,
+    pub has_uv2: bool,
+    pub positions_finite: bool,
+    pub normals_finite: Option<bool>,
+    pub tangents_finite: Option<bool>,
+    pub color0_finite: Option<bool>,
+    pub uv0_finite: Option<bool>,
+    pub uv1_finite: Option<bool>,
+    pub uv2_finite: Option<bool>,
+    pub winding: Option<WindingSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct YdrLodInspection {
+    pub level: LodLevel,
+    pub model_count: usize,
+    pub geometries: Vec<YdrGeometryInspection>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TextureBindingKey {
     pub shader_index: usize,
@@ -421,6 +459,188 @@ impl YdrDocument {
             embedded_textures,
         })
     }
+}
+
+fn validate_aabb(min: [f32; 3], max: [f32; 3], label: &str) -> Result<(), YdrError> {
+    for axis in 0..3 {
+        if !min[axis].is_finite() || !max[axis].is_finite() || min[axis] > max[axis] {
+            return Err(YdrError::Malformed(format!(
+                "{label} has non-finite or inverted AABB bounds on axis {axis}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Parses and summarizes every non-empty Drawable LOD. Unlike YdrDocument::model,
+/// which preserves the historical first-nonempty-LOD view, this function validates
+/// geometry payloads in every LOD before returning compact summaries.
+pub fn inspect_drawable_lods(
+    resource: &Rsc7Resource,
+    root: u64,
+    shader_count: usize,
+) -> Result<Vec<YdrLodInspection>, YdrError> {
+    resource.bytes_at(root, YDR_ROOT_SIZE)?;
+    let candidates = [
+        (LodLevel::High, 0x50_u64),
+        (LodLevel::Medium, 0x58),
+        (LodLevel::Low, 0x60),
+        (LodLevel::VeryLow, 0x68),
+    ];
+    let mut output = Vec::new();
+    let mut total_geometries = 0usize;
+
+    for (level, offset) in candidates {
+        let list_pointer =
+            resource.read_u64(root.checked_add(offset).ok_or_else(|| {
+                YdrError::Malformed("drawable LOD pointer offset overflow".into())
+            })?)?;
+        if list_pointer == 0 {
+            continue;
+        }
+        let model_pointers =
+            read_pointer_list(resource, list_pointer, "drawable model list", MAX_MODELS)?;
+        if model_pointers.is_empty() {
+            continue;
+        }
+
+        let mut geometries = Vec::new();
+        for (model_index, model_pointer) in model_pointers.iter().copied().enumerate() {
+            let mut parsed = Vec::new();
+            parse_model(
+                resource,
+                model_pointer,
+                model_index,
+                shader_count,
+                &mut parsed,
+            )?;
+            let geometry_count = usize::from(resource.read_u16(model_pointer + 0x10)?);
+            let model_bounds_pointer = resource.read_u64(model_pointer + 0x18)?;
+            let (model_bounds_min, model_bounds_max) = if geometry_count > 0 {
+                if model_bounds_pointer == 0 {
+                    return Err(YdrError::Malformed(format!(
+                        "LOD {:?} model {model_index} has geometry but no model/geometry bounds table",
+                        level
+                    )));
+                }
+                let bounds_count = geometry_count
+                    .checked_add(1)
+                    .ok_or_else(|| YdrError::Malformed("model bounds count overflow".into()))?;
+                let bounds_bytes = checked_mul(bounds_count, 0x20, "model/geometry bounds table")?;
+                resource.bytes_at(model_bounds_pointer, bounds_bytes)?;
+                let min = read_vec3(resource, model_bounds_pointer)?;
+                let max = read_vec3(resource, model_bounds_pointer + 0x10)?;
+                validate_aabb(min, max, &format!("LOD {:?} model {model_index}", level))?;
+                (min, max)
+            } else {
+                ([0.0; 3], [0.0; 3])
+            };
+            if parsed.len() != geometry_count {
+                return Err(YdrError::Malformed(format!(
+                    "LOD {:?} model {model_index} geometry count mismatch: header={geometry_count}, decoded={}",
+                    level,
+                    parsed.len()
+                )));
+            }
+            total_geometries = total_geometries
+                .checked_add(parsed.len())
+                .ok_or_else(|| YdrError::Malformed("LOD geometry count overflow".into()))?;
+            if total_geometries > 65_536 {
+                return Err(YdrError::Malformed(
+                    "total Drawable LOD geometry count exceeds inspection limit 65536".into(),
+                ));
+            }
+            for primitive in parsed {
+                let geometry_bounds_offset =
+                    checked_mul(primitive.geometry_index, 0x20, "geometry bounds index")? as u64;
+                let geometry_bounds_min_pointer = model_bounds_pointer
+                    .checked_add(0x20)
+                    .and_then(|pointer| pointer.checked_add(geometry_bounds_offset))
+                    .ok_or_else(|| {
+                        YdrError::Malformed("geometry bounds pointer overflow".into())
+                    })?;
+                let geometry_bounds_max_pointer = geometry_bounds_min_pointer
+                    .checked_add(0x10)
+                    .ok_or_else(|| {
+                        YdrError::Malformed("geometry max bounds pointer overflow".into())
+                    })?;
+                let geometry_bounds_min = read_vec3(resource, geometry_bounds_min_pointer)?;
+                let geometry_bounds_max = read_vec3(resource, geometry_bounds_max_pointer)?;
+                validate_aabb(
+                    geometry_bounds_min,
+                    geometry_bounds_max,
+                    &format!(
+                        "LOD {:?} model {} geometry {}",
+                        level, model_index, primitive.geometry_index
+                    ),
+                )?;
+                geometries.push(YdrGeometryInspection {
+                    model_index: primitive.model_index,
+                    geometry_index: primitive.geometry_index,
+                    shader_index: primitive.shader_index,
+                    topology: primitive.topology,
+                    vertex_count: primitive.positions.len(),
+                    index_count: primitive.indices.len(),
+                    triangle_count: primitive.indices.len() / 3,
+                    declaration: primitive.declaration,
+                    model_bounds_min,
+                    model_bounds_max,
+                    geometry_bounds_min,
+                    geometry_bounds_max,
+                    has_positions: !primitive.positions.is_empty(),
+                    has_normals: primitive.normals.is_some(),
+                    has_tangents: primitive.tangents.is_some(),
+                    has_color0: primitive.colors0.is_some(),
+                    has_uv0: primitive.uv0.is_some(),
+                    has_uv1: primitive.uv1.is_some(),
+                    has_uv2: primitive.uv2.is_some(),
+                    positions_finite: primitive
+                        .positions
+                        .iter()
+                        .flatten()
+                        .all(|value| value.is_finite()),
+                    normals_finite: primitive
+                        .normals
+                        .as_ref()
+                        .map(|values| values.iter().flatten().all(|value| value.is_finite())),
+                    tangents_finite: primitive
+                        .tangents
+                        .as_ref()
+                        .map(|values| values.iter().flatten().all(|value| value.is_finite())),
+                    color0_finite: primitive
+                        .colors0
+                        .as_ref()
+                        .map(|values| values.iter().flatten().all(|value| value.is_finite())),
+                    uv0_finite: primitive
+                        .uv0
+                        .as_ref()
+                        .map(|values| values.iter().flatten().all(|value| value.is_finite())),
+                    uv1_finite: primitive
+                        .uv1
+                        .as_ref()
+                        .map(|values| values.iter().flatten().all(|value| value.is_finite())),
+                    uv2_finite: primitive
+                        .uv2
+                        .as_ref()
+                        .map(|values| values.iter().flatten().all(|value| value.is_finite())),
+                    winding: primitive.winding_summary(),
+                });
+            }
+        }
+
+        output.push(YdrLodInspection {
+            level,
+            model_count: model_pointers.len(),
+            geometries,
+        });
+    }
+
+    if output.is_empty() {
+        return Err(YdrError::Unsupported(
+            "drawable contains no non-empty render model LOD".into(),
+        ));
+    }
+    Ok(output)
 }
 
 impl YdrEditSession {
@@ -2399,9 +2619,10 @@ mod tests {
     use ragelab_resource::{Rsc7Resource, RSC7_MAGIC, SYSTEM_BASE};
 
     use super::{
-        CoordinateConvention, GeometryKey, LodLevel, PrimitiveTopology, ShaderBindingKey,
-        ShaderInfo, ShaderTextureReference, TextureBindingKey, YdrDocument, YdrEditSession,
-        YdrError, YdrModel, DIFFUSE_SAMPLER_PARAMETER_HASH, TEXTURE_SAMPLER_PARAMETER_HASH,
+        inspect_drawable_lods, CoordinateConvention, GeometryKey, LodLevel, PrimitiveTopology,
+        ShaderBindingKey, ShaderInfo, ShaderTextureReference, TextureBindingKey, YdrDocument,
+        YdrEditSession, YdrError, YdrModel, DIFFUSE_SAMPLER_PARAMETER_HASH,
+        TEXTURE_SAMPLER_PARAMETER_HASH,
     };
 
     const SYSTEM_SIZE: usize = 2048;
@@ -2616,6 +2837,47 @@ mod tests {
         assert_eq!(primitive.indices, vec![0, 1, 2]);
         assert_eq!(primitive.declaration.flags, 0x59);
         assert_eq!(primitive.declaration.stride, 36);
+    }
+
+    #[test]
+    fn inspects_all_non_empty_drawable_lod_slots() {
+        let bytes = build_fixture(|system| {
+            write_u64(system, 0x58, ptr(0x0d0));
+            write_u64(system, 0x60, ptr(0x0d0));
+            write_u64(system, 0x68, ptr(0x0d0));
+        });
+        let resource = Rsc7Resource::parse(&bytes).expect("fixture envelope should parse");
+        let lods = inspect_drawable_lods(&resource, SYSTEM_BASE, 0)
+            .expect("all four non-empty LODs should parse");
+
+        assert_eq!(
+            lods.iter().map(|lod| lod.level).collect::<Vec<_>>(),
+            vec![
+                LodLevel::High,
+                LodLevel::Medium,
+                LodLevel::Low,
+                LodLevel::VeryLow
+            ]
+        );
+        assert!(lods.iter().all(|lod| lod.model_count == 1));
+        assert!(lods.iter().all(|lod| lod.geometries.len() == 1));
+        assert!(lods.iter().all(|lod| {
+            lod.geometries[0].vertex_count == 3 && lod.geometries[0].triangle_count == 1
+        }));
+    }
+
+    #[test]
+    fn rejects_inverted_model_bounds_in_any_lod() {
+        let bytes = build_fixture(|system| {
+            write_u64(system, 0x58, ptr(0x0d0));
+            write_f32(system, 0x680, 2.0);
+        });
+        let resource = Rsc7Resource::parse(&bytes).expect("fixture envelope should parse");
+
+        let error = inspect_drawable_lods(&resource, SYSTEM_BASE, 0)
+            .expect_err("inverted model bounds must be rejected");
+
+        assert!(error.to_string().contains("bounds"));
     }
 
     #[test]

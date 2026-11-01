@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ragelab.dev/schemas/ragelab.glb.batch-manifest.v1.schema.json",
+  "title": "RageLab GLB Batch Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schemaVersion",
+    "failurePolicy",
+    "concurrency",
+    "report",
+    "items"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ragelab.glb.batch-manifest"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "failurePolicy": {
+      "enum": [
+        "fail_fast",
+        "continue"
+      ]
+    },
+    "concurrency": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8
+    },
+    "report": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/relativePath"
+        },
+        {
+          "pattern": "\\.[jJ][sS][oO][nN]$"
+        }
+      ]
+    },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "source",
+          "output",
+          "profile",
+          "shaderTemplate",
+          "shaderIndex",
+          "nodes",
+          "report"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9_.-]+$"
+          },
+          "source": {
+            "$ref": "#/$defs/relativePath"
+          },
+          "output": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/relativePath"
+              },
+              {
+                "pattern": "\\.[yY][dD][rR]$"
+              }
+            ]
+          },
+          "profile": {
+            "$ref": "#/$defs/relativePath"
+          },
+          "shaderTemplate": {
+            "anyOf": [
+              {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/relativePath"
+                  },
+                  {
+                    "anyOf": [
+                      {
+                        "pattern": "\\.[yY][fF][tT]$"
+                      },
+                      {
+                        "pattern": "\\.[yY][dD][rR]$"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "shaderIndex": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "nodes": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "report": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/relativePath"
+              },
+              {
+                "pattern": "\\.[jJ][sS][oO][nN]$"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?![A-Za-z]:)(?![\\\\/])(?!.*(?:^|[\\\\/])(?:\\.|\\.\\.)(?:[\\\\/]|$))[^\\\\/:*?\"<>|]+(?:[\\\\/][^\\\\/:*?\"<>|]+)*$"
+    }
+  }
+}

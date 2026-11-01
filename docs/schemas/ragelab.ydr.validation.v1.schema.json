@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ragelab.dev/schemas/ragelab.ydr.validation.v1.schema.json",
+  "title": "RageLab YDR Validation Report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schemaVersion",
+    "sourceName",
+    "sourceSha256",
+    "sourceByteLength",
+    "strict",
+    "valid",
+    "containerValid",
+    "formatValid",
+    "semanticReopen",
+    "runtimeRenderable",
+    "codewalkerGuiAccepted",
+    "inspection",
+    "diagnostics"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ragelab.ydr.validation"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "sourceName": {
+      "type": "string"
+    },
+    "sourceSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "sourceByteLength": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "strict": {
+      "type": "boolean"
+    },
+    "valid": {
+      "type": "boolean"
+    },
+    "containerValid": {
+      "type": "boolean"
+    },
+    "formatValid": {
+      "type": "boolean"
+    },
+    "semanticReopen": {
+      "type": "boolean"
+    },
+    "runtimeRenderable": {
+      "const": false
+    },
+    "codewalkerGuiAccepted": {
+      "const": false
+    },
+    "inspection": {
+      "oneOf": [
+        {
+          "$ref": "ragelab.ydr.inspection.v1.schema.json"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/diagnostic"
+      }
+    }
+  },
+  "$defs": {
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "severity",
+        "code",
+        "path",
+        "message",
+        "promotedFrom"
+      ],
+      "properties": {
+        "severity": {
+          "enum": [
+            "error",
+            "unsupported",
+            "warning",
+            "info"
+          ]
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "promotedFrom": {
+          "enum": [
+            "error",
+            "unsupported",
+            "warning",
+            "info",
+            null
+          ]
+        }
+      }
+    }
+  }
+}

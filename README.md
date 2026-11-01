@@ -26,7 +26,7 @@ RageLab currently contains Rust support for:
 - YBN
 - YDR
 - YDD
-- GLB 2.0 input (inspection, static geometry decoding, embedded PNG extraction and YDR v165 export with optional exact Legacy `normal.sps`, `spec.sps`, `normal_spec_tnt.sps`, `emissivenight.sps` or `emissive.sps` cloning from an external YFT/YDR; narrow sampler/material bindings including optional `tintPalette` and emissiveFactor/Strength, full PBR and GTA runtime renderability not established)
+- GLB 2.0 input (inspection, pre-export validation with in-memory YDR semantic preflight, static geometry decoding, embedded PNG extraction and YDR v165 export with optional exact Legacy `normal.sps`, `spec.sps`, `normal_spec_tnt.sps`, `emissivenight.sps` or `emissive.sps` cloning from an external YFT/YDR; narrow sampler/material bindings including optional `tintPalette` and emissiveFactor/Strength, full PBR and GTA runtime renderability not established)
 
 Current writer coverage is intentionally narrower than reader coverage. Each writer operation is gated by format-specific validation and provenance requirements.
 
@@ -42,12 +42,16 @@ The primary automation flow is:
 
 ```bash
 ragelab inspect asset.ydr --json
+ragelab ydr inspect asset.ydr --json
+ragelab ydr validate asset.ydr --strict --json
 ragelab glb inspect model.glb --json
+ragelab glb validate model.glb --json
 ragelab glb geometry model.glb --json
 ragelab glb profile init model.glb --output model.gta-materials.json
 ragelab glb profile validate model.glb model.gta-materials.json --json
 ragelab glb export model.glb --profile model.gta-materials.json --output model.ydr --json
 ragelab glb export model.glb --profile model.gta-materials.json --shader-template template.yft --shader-index 0 --output model.ydr --json
+ragelab glb batch batch.json --json
 ragelab capabilities asset.ydr --json
 ragelab spatial asset.ydr --json
 ragelab preview asset.ydr --json
@@ -61,6 +65,8 @@ Declarative mutations are versioned, fail closed, and non-destructive by default
 Canonical format and workspace commands use namespaces:
 
 ```bash
+ragelab ydr inspect asset.ydr --json
+ragelab ydr validate asset.ydr [--strict] [--json]
 ragelab ydr info asset.ydr
 ragelab ymap info map.ymap
 ragelab ytd info textures.ytd
@@ -83,7 +89,7 @@ ragelab capabilities --json
 
 Legacy flat command names remain available as compatibility aliases during the 0.x series. New integrations should use the canonical namespace form.
 
-Structured commands return versioned JSON and deterministic process exit codes. The contract is documented in [docs/CLI_CONTRACT.md](docs/CLI_CONTRACT.md), native game discovery in [docs/DISCOVERY.md](docs/DISCOVERY.md), GTA catalog coverage in [docs/CATALOG.md](docs/CATALOG.md), headless preview behavior in [docs/PREVIEW.md](docs/PREVIEW.md), workspace export behavior in [docs/EXPORT.md](docs/EXPORT.md), current format/adapter coverage in [docs/CAPABILITIES.md](docs/CAPABILITIES.md), and the initial GLB import/material-authoring workflow in [docs/GLB_IMPORT.md](docs/GLB_IMPORT.md).
+Structured commands return versioned JSON and deterministic process exit codes. The contract is documented in [docs/CLI_CONTRACT.md](docs/CLI_CONTRACT.md), native game discovery in [docs/DISCOVERY.md](docs/DISCOVERY.md), GTA catalog coverage in [docs/CATALOG.md](docs/CATALOG.md), headless preview behavior in [docs/PREVIEW.md](docs/PREVIEW.md), workspace export behavior in [docs/EXPORT.md](docs/EXPORT.md), current format/adapter coverage in [docs/CAPABILITIES.md](docs/CAPABILITIES.md), the GLB import/material-authoring and reproducible export-report workflow in [docs/GLB_IMPORT.md](docs/GLB_IMPORT.md), and the strict multi-asset batch pipeline in [docs/GLB_BATCH.md](docs/GLB_BATCH.md).
 
 ## Repository layout
 
@@ -117,16 +123,19 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for package boundaries.
 
 The workspace targets Rust 1.80 and forbids unsafe Rust at workspace level.
 
-Standard gates:
+Standard locked gates:
 
 ```bash
+python scripts/validate_synthetic.py
+python scripts/validate_synthetic_ymf.py
+python scripts/check_hardening.py
 cargo fmt --all -- --check
-cargo check --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo check --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
 ```
 
-Synthetic fixtures are used for reproducible parser and writer regression coverage. Proprietary game data must not be committed.
+Synthetic fixtures are used for reproducible parser and writer regression coverage. Proprietary game data must not be committed. Fixture policy, deterministic mutation coverage, parser/resource budgets, and the separation between structural, semantic, CodeWalker, GUI, and runtime acceptance are documented in [docs/QUALITY.md](docs/QUALITY.md).
 
 ## RageLab Studio
 

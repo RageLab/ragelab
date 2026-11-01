@@ -1,0 +1,141 @@
+{
+  "schema": "ragelab.glb.export-report",
+  "schemaVersion": 1,
+  "tool": {
+    "name": "ragelab",
+    "version": "0.1.0"
+  },
+  "summary": {
+    "ydrVersion": 165,
+    "geometryCount": 1,
+    "vertexCount": 3,
+    "triangleCount": 1,
+    "materialCount": 1,
+    "embeddedTextureCount": 1,
+    "textureFormats": {
+      "bc1": 1
+    },
+    "shaderCount": 0,
+    "materialShaderBindings": 0,
+    "geometryShaderMappings": 0,
+    "shaderTextureBindings": 0
+  },
+  "material": {
+    "sourceMaterialIndex": 0,
+    "sourceName": "PumpkinOrange",
+    "shaderIntent": "lit",
+    "surfaceMode": "opaque",
+    "shaderDecision": "no_template_structural_geometry_only",
+    "textureSlotMappings": [
+      {
+        "materialIndex": 0,
+        "role": "albedo",
+        "textureIndex": 0,
+        "texCoord": 1,
+        "imageIndex": 0,
+        "outputTextureName": "img_0_pumpkin_albedo"
+      }
+    ]
+  },
+  "geometry": {
+    "geometryIndex": 0,
+    "nodeIndex": 0,
+    "nodeName": "Pumpkin",
+    "meshIndex": 0,
+    "meshName": "PumpkinMesh",
+    "primitiveIndex": 0,
+    "primitiveModeName": "triangles",
+    "materialIndex": 0,
+    "materialProfileIndex": 0,
+    "shaderIndex": null,
+    "vertexCount": 3,
+    "indexCount": 3,
+    "triangleCount": 1,
+    "attributes": {
+      "position": true,
+      "normal": false,
+      "tangent": false,
+      "color0": false,
+      "texcoord0": false,
+      "texcoord1": true,
+      "texcoord2": false
+    }
+  },
+  "shaderParameters": {
+    "outputShaderCount": 0,
+    "shaders": []
+  },
+  "transformations": [
+    {
+      "id": "node_hierarchy_transform",
+      "status": "applied"
+    },
+    {
+      "id": "coordinate_system_conversion",
+      "status": "applied",
+      "from": "glTF_Y_up",
+      "to": "GTA_Z_up"
+    },
+    {
+      "id": "primitive_topology",
+      "status": "applied",
+      "outputMode": "triangle_list"
+    },
+    {
+      "id": "primitive_bounds",
+      "status": "applied"
+    }
+  ],
+  "textureConversion": {
+    "imageIndex": 0,
+    "sourceName": "pumpkin_albedo",
+    "sourceMimeType": "image/png",
+    "width": 1,
+    "height": 1,
+    "decodedPixelFormat": "rgba8",
+    "outputTextureName": "img_0_pumpkin_albedo",
+    "outputFormat": "bc1",
+    "hasTransparency": false,
+    "hasPartialAlpha": false,
+    "mipmapLevelsGenerated": 1,
+    "lossyBlockCompression": true,
+    "compressionSelection": "profile_auto_alpha_aware"
+  },
+  "resources": {
+    "included": {
+      "activeSceneIndex": 0,
+      "nodeIndices": [
+        0
+      ],
+      "meshIndices": [
+        0
+      ],
+      "geometryCount": 1,
+      "imageIndices": [
+        0
+      ],
+      "imagesNotReferencedByConfiguredTextureRoles": []
+    },
+    "omitted": {
+      "primitivesExcludedByNodeSelection": [],
+      "uninstantiatedMeshIndices": []
+    }
+  },
+  "losses": [
+    {
+      "kind": "block_texture_compression",
+      "imageIndex": 0,
+      "outputFormat": "bc1",
+      "authorizedBy": "profile.settings.textureEncoding",
+      "selection": "profile_auto_alpha_aware"
+    }
+  ],
+  "fallbacks": [],
+  "runtimeRenderable": false,
+  "runtimeAcceptance": {
+    "codewalkerCore": "not_run",
+    "codewalkerGui": "not_run",
+    "gtaV": "not_run",
+    "fivem": "not_run"
+  }
+}

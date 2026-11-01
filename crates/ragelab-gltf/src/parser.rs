@@ -641,36 +641,193 @@ fn validate_views(views: &[Value], buffers: &[Value], bin: Option<&[u8]>) -> Res
 
 fn validate_accessors(accessors: &[Value], views: &[Value]) -> Result<(), GlbError> {
     for (i, value) in accessors.iter().enumerate() {
-        if req_usize(value, "count", &format!("accessors[{i}]"))? == 0 {
+        let label = format!("accessors[{i}]");
+        let count = req_usize(value, "count", &label)?;
+        if count == 0 {
             return Err(GlbError::InvalidDocument(format!(
-                "accessors[{i}].count must be positive"
+                "{label}.count must be positive"
             )));
         }
-        let component = req_u32(value, "componentType", &format!("accessors[{i}]"))?;
-        if !matches!(component, 5120 | 5121 | 5122 | 5123 | 5125 | 5126) {
-            return Err(GlbError::InvalidDocument(format!(
-                "accessors[{i}] has invalid componentType {component}"
-            )));
-        }
+
+        let component = req_u32(value, "componentType", &label)?;
+        let component_size = match component {
+            5120 | 5121 => 1usize,
+            5122 | 5123 => 2usize,
+            5125 | 5126 => 4usize,
+            _ => {
+                return Err(GlbError::InvalidDocument(format!(
+                    "{label} has invalid componentType {component}"
+                )))
+            }
+        };
         let kind = value
             .get("type")
             .and_then(Value::as_str)
-            .ok_or_else(|| GlbError::InvalidDocument(format!("accessors[{i}].type is required")))?;
-        if !matches!(
-            kind,
-            "SCALAR" | "VEC2" | "VEC3" | "VEC4" | "MAT2" | "MAT3" | "MAT4"
-        ) {
-            return Err(GlbError::InvalidDocument(format!(
-                "accessors[{i}] has invalid type {kind}"
-            )));
-        }
-        if let Some(view) = opt_usize(value.get("bufferView"), "bufferView")? {
-            idx(view, views.len(), &format!("accessors[{i}].bufferView"))?;
+            .ok_or_else(|| GlbError::InvalidDocument(format!("{label}.type is required")))?;
+        let element_size = accessor_element_size(kind, component_size)
+            .ok_or_else(|| GlbError::InvalidDocument(format!("{label} has invalid type {kind}")))?;
+        let accessor_offset = opt_usize(value.get("byteOffset"), "byteOffset")?.unwrap_or(0);
+
+        if let Some(view_index) = opt_usize(value.get("bufferView"), "bufferView")? {
+            idx(view_index, views.len(), &format!("{label}.bufferView"))?;
+            let view = &views[view_index];
+            let view_offset = opt_usize(view.get("byteOffset"), "byteOffset")?.unwrap_or(0);
+            let view_length = req_usize(view, "byteLength", &format!("bufferViews[{view_index}]"))?;
+            let absolute_offset = view_offset.checked_add(accessor_offset).ok_or_else(|| {
+                GlbError::InvalidDocument(format!("{label} absolute byteOffset overflow"))
+            })?;
+            if absolute_offset % component_size != 0 {
+                return Err(GlbError::InvalidDocument(format!(
+                    "{label} absolute byteOffset is not aligned to its componentType"
+                )));
+            }
+            let stride = opt_usize(view.get("byteStride"), "byteStride")?.unwrap_or(element_size);
+            if stride < element_size || stride % component_size != 0 {
+                return Err(GlbError::InvalidDocument(format!(
+                    "{label} has invalid byteStride {stride} for element size {element_size}"
+                )));
+            }
+            let span = (count - 1)
+                .checked_mul(stride)
+                .and_then(|value| value.checked_add(element_size))
+                .ok_or_else(|| {
+                    GlbError::InvalidDocument(format!("{label} byte range overflows"))
+                })?;
+            let end = accessor_offset.checked_add(span).ok_or_else(|| {
+                GlbError::InvalidDocument(format!("{label} byte range overflows"))
+            })?;
+            if end > view_length {
+                return Err(GlbError::InvalidDocument(format!(
+                    "{label} byte range exceeds bufferViews[{view_index}]"
+                )));
+            }
         } else if value.get("sparse").is_none() {
             return Err(GlbError::InvalidDocument(format!(
-                "accessors[{i}] needs bufferView or sparse data"
+                "{label} needs bufferView or sparse data"
+            )));
+        } else if accessor_offset != 0 {
+            return Err(GlbError::InvalidDocument(format!(
+                "{label}.byteOffset must be zero when bufferView is omitted"
             )));
         }
+
+        if let Some(sparse) = value.get("sparse") {
+            let sparse_count = req_usize(sparse, "count", &format!("{label}.sparse"))?;
+            if sparse_count == 0 || sparse_count > count {
+                return Err(GlbError::InvalidDocument(format!(
+                    "{label}.sparse.count must be between 1 and accessor count {count}"
+                )));
+            }
+
+            let indices = sparse.get("indices").ok_or_else(|| {
+                GlbError::InvalidDocument(format!("{label}.sparse.indices is required"))
+            })?;
+            let indices_view_index =
+                req_usize(indices, "bufferView", &format!("{label}.sparse.indices"))?;
+            idx(
+                indices_view_index,
+                views.len(),
+                &format!("{label}.sparse.indices.bufferView"),
+            )?;
+            let indices_component =
+                req_u32(indices, "componentType", &format!("{label}.sparse.indices"))?;
+            let indices_component_size = match indices_component {
+                5121 => 1usize,
+                5123 => 2usize,
+                5125 => 4usize,
+                _ => {
+                    return Err(GlbError::InvalidDocument(format!(
+                        "{label}.sparse.indices has invalid componentType {indices_component}"
+                    )))
+                }
+            };
+            let indices_offset = opt_usize(indices.get("byteOffset"), "byteOffset")?.unwrap_or(0);
+            validate_sparse_range(
+                indices_offset,
+                sparse_count,
+                indices_component_size,
+                &views[indices_view_index],
+                indices_component_size,
+                &format!("{label}.sparse.indices"),
+            )?;
+
+            let sparse_values = sparse.get("values").ok_or_else(|| {
+                GlbError::InvalidDocument(format!("{label}.sparse.values is required"))
+            })?;
+            let values_view_index = req_usize(
+                sparse_values,
+                "bufferView",
+                &format!("{label}.sparse.values"),
+            )?;
+            idx(
+                values_view_index,
+                views.len(),
+                &format!("{label}.sparse.values.bufferView"),
+            )?;
+            let values_offset =
+                opt_usize(sparse_values.get("byteOffset"), "byteOffset")?.unwrap_or(0);
+            validate_sparse_range(
+                values_offset,
+                sparse_count,
+                element_size,
+                &views[values_view_index],
+                component_size,
+                &format!("{label}.sparse.values"),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn accessor_element_size(kind: &str, component_size: usize) -> Option<usize> {
+    match kind {
+        "SCALAR" => Some(component_size),
+        "VEC2" => component_size.checked_mul(2),
+        "VEC3" => component_size.checked_mul(3),
+        "VEC4" => component_size.checked_mul(4),
+        "MAT2" | "MAT3" | "MAT4" => {
+            let dimension = match kind {
+                "MAT2" => 2usize,
+                "MAT3" => 3usize,
+                "MAT4" => 4usize,
+                _ => unreachable!(),
+            };
+            let column_bytes = dimension.checked_mul(component_size)?;
+            let column_stride = column_bytes.checked_add(3)? & !3;
+            dimension.checked_mul(column_stride)
+        }
+        _ => None,
+    }
+}
+
+fn validate_sparse_range(
+    offset: usize,
+    count: usize,
+    element_size: usize,
+    view: &Value,
+    component_size: usize,
+    label: &str,
+) -> Result<(), GlbError> {
+    let view_offset = opt_usize(view.get("byteOffset"), "byteOffset")?.unwrap_or(0);
+    let view_length = req_usize(view, "byteLength", "sparse bufferView")?;
+    let absolute_offset = view_offset.checked_add(offset).ok_or_else(|| {
+        GlbError::InvalidDocument(format!("{label} absolute byteOffset overflow"))
+    })?;
+    if absolute_offset % component_size != 0 {
+        return Err(GlbError::InvalidDocument(format!(
+            "{label} absolute byteOffset is not aligned to its componentType"
+        )));
+    }
+    let length = count
+        .checked_mul(element_size)
+        .ok_or_else(|| GlbError::InvalidDocument(format!("{label} byte range overflows")))?;
+    let end = offset
+        .checked_add(length)
+        .ok_or_else(|| GlbError::InvalidDocument(format!("{label} byte range overflows")))?;
+    if end > view_length {
+        return Err(GlbError::InvalidDocument(format!(
+            "{label} byte range exceeds its bufferView"
+        )));
     }
     Ok(())
 }

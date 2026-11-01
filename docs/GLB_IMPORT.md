@@ -11,6 +11,8 @@ Inspect the source inventory:
 ~~~powershell
 ragelab glb inspect .\pumpkin.glb
 ragelab glb inspect .\pumpkin.glb --json
+ragelab glb validate .\pumpkin.glb --json
+ragelab glb validate .\pumpkin.glb --profile .\pumpkin.gta-materials.json --shader-template .\template.yft --shader-index 0 --strict --json
 ~~~
 
 Decode the selected static scene and report per-primitive geometry:
@@ -18,6 +20,32 @@ Decode the selected static scene and report per-primitive geometry:
 ~~~powershell
 ragelab glb geometry .\pumpkin.glb --json
 ~~~
+
+## GLB validation before export
+
+Run `glb validate` before authoring or exporting to distinguish a parseable GLB from one that the current static Legacy YDR pipeline can actually consume:
+
+~~~powershell
+ragelab glb validate .\pumpkin.glb
+ragelab glb validate .\pumpkin.glb --json
+ragelab glb validate .\pumpkin.glb --profile .\pumpkin.gta-materials.json --shader-template .\template.yft --shader-index 0 --strict --json
+~~~
+
+The command performs the same format inspection used by `glb inspect`. It validates buffer and bufferView ranges globally, plus accessor count/type/component, absolute byte alignment, stride, byte range and sparse indices/values ranges for every accessor in the document, including accessors outside the active scene and unreferenced accessors. Matrix element sizes account for glTF column padding. It also enforces the glTF contract that `extensionsRequired` must be a subset of `extensionsUsed`. It then decodes supported geometry instantiated in the selected/default scene, decodes source images through the current embedded-PNG path, and checks the features consumed by the YDR exporter. When those gates pass, it invokes the actual byte-first export use case in memory and semantically reopens the resulting YDR through `YdrDocument::from_bytes`. No YDR, temporary file or other asset output is written.
+
+The report uses `ragelab.glb.validation` schema version 1 ([JSON Schema](schemas/ragelab.glb.validation.v1.schema.json)). It reports `structuralValid`, `exportCompatible`, `geometryDecoded`, `imagesDecoded`, `semanticPreflight` and `semanticReopen` independently. The failure envelope retains the complete report under `data`; exit code 3 means a valid document uses a feature unsupported by this pipeline, while exit code 4 means invalid data or a warning promoted by strict mode.
+
+Diagnostics are classified as:
+- `error`: malformed structure/data or a failed semantic preflight;
+- `unsupported`: structurally parseable feature not represented by the current importer/writer (for example skinning, morph targets, non-triangle geometry, unsupported extensions/attributes, external or unsupported image codecs);
+- `warning`: non-blocking conditions such as missing normals, unknown GLB chunks or meshes not referenced by the active scene;
+- `info`: successful gates or explicit limitations, including when no ShaderFX template was supplied.
+
+`--strict` promotes warnings to errors for the final `valid` decision. The report preserves the underlying `structuralValid` and `exportCompatible` decisions separately, so strict policy does not falsify those individual gate results.
+
+An optional profile is validated against the exact source bytes. An optional YFT/YDR shader template is read-only and must match one of the five exact supported Legacy ShaderFX signatures; this lets validation test a specific material-template path. Without a template, semantic preflight covers structural YDR geometry/texture serialization only, not populated ShaderFX bindings.
+
+The validator decodes the active/default scene. Meshes not instantiated by that scene are reported as warnings and are not treated as active-scene export geometry; their accessor metadata and byte ranges are still checked globally, but their vertex/index values are not decoded as export geometry. Sparse accessor range metadata is checked, while sparse overrides are not converted by the current static YDR exporter. The validator does not claim that an asset has been accepted by CodeWalker GUI or GTA V/FiveM runtime: `runtimeRenderable` is always `false` in this report. Those are independent downstream gates.
 
 Create and edit the material-authoring sidecar:
 
@@ -53,6 +81,21 @@ The CLI does not overwrite an existing output unless `--overwrite` is supplied. 
 The authoring use case lives in `ragelab-engine/src/glb.rs`. It accepts source bytes/name, optional profile bytes and an explicit YFT/YDR template selection with template bytes. The engine has no filesystem or environment-path discovery; CLI and Tauri each resolve paths and pass byte-first requests to that service. The Studio commands are `core_glb_inspect`, `core_glb_geometry`, `core_glb_profile_init`, `core_glb_profile_validate` and `core_glb_export`. Rust DTOs and nested GLB profile/report types generate the TypeScript bindings with `ts-rs`; run `bun run generate:glb-types` from `ragelab-studio` to regenerate `src/lib/generated/glb`. `src/lib/native.ts` imports those generated types and retains compatibility aliases for frontend callers.
 
 The JSON response uses schema `ragelab.glb.ydr-export`. Full-scene exports retain schema version 1; exports with `--node` use version 2 and include the selection report described above. Both versions report geometry/texture counts, profile validation, ShaderFX/template provenance, material/shader bindings, semantic reopen, source/profile/output hashes and the explicit `runtimeRenderable=false` state. Version 1 is published at [ragelab.glb.ydr-export.v1.schema.json](schemas/ragelab.glb.ydr-export.v1.schema.json); version 2 is published at [ragelab.glb.ydr-export.v2.schema.json](schemas/ragelab.glb.ydr-export.v2.schema.json). Parsing the emitted YDR does not establish acceptance by GTA V runtime or CodeWalker.
+
+### Reproducible export sidecar
+
+Use `--report` to write a separate, versioned provenance report without changing the existing `glb.export` JSON envelope:
+
+```powershell
+ragelab glb export .\pumpkin.glb --profile .\pumpkin.gta-materials.json --shader-template .\template.yft --shader-index 0 --output .\pumpkin.ydr --report .\pumpkin.export-report.json --json
+```
+
+The sidecar schema is `ragelab.glb.export-report` v1, published at [ragelab.glb.export-report.v1.schema.json](schemas/ragelab.glb.export-report.v1.schema.json). It records SHA-256 and byte lengths for input, effective profile, optional template and generated YDR; tool version and profile origin; per-material profile decisions and texture-slot bindings; per-geometry source/material/shader indices and decoded attributes; the ShaderFX descriptors and texture references actually present in the reopened YDR; coordinate/topology transformations; per-image PNG-to-RGBA8 and output texture encoding/mipmap decisions; included/omitted resources; compression losses authorized by the profile; warnings, limitations and each validation stage.
+
+The report intentionally has no generation timestamp or temporary-file name. Repeating an export with identical bytes, options and paths produces identical report bytes. The report records paths as provenance, so changing input or output paths changes the report even when the file contents are identical.
+
+The report path must be distinct from the source, profile, shader template and YDR output and must not already exist. Sidecar publication uses a same-directory temporary file and atomic no-replace publication; an existing report is never overwritten. `--overwrite` applies only to the YDR destination, not to `--report`. A report that records semantic reopen is not a CodeWalker GUI or GTA V/FiveM acceptance claim: all external runtime gates remain `not_run` and `runtimeRenderable=false`.
+
 
 ## Geometry conversion
 
