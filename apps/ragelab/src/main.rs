@@ -1,5 +1,6 @@
 mod agent;
 mod bridge_cmd;
+mod diagnostics;
 mod glb_batch;
 mod glb_cmd;
 mod glb_export_report;
@@ -97,6 +98,11 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn Error>> {
         "version" => {
             let json = parse_json_flag(args, "usage: ragelab version [--json]")?;
             print_version(json)?;
+        }
+        "doctor" => {
+            let json = parse_json_flag(args, "usage: ragelab doctor [--json]")?;
+            let report = diagnostics::collect_doctor_report();
+            diagnostics::print_doctor_report(&report, json)?;
         }
         "capabilities" => {
             const USAGE: &str = "usage: ragelab capabilities [file] [--json]";
@@ -678,6 +684,7 @@ fn print_version(json_output: bool) -> Result<(), Box<dyn Error>> {
 fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
     const CANONICAL_COMMANDS: &[&str] = &[
         "version",
+        "doctor",
         "capabilities",
         "inspect",
         "glb.inspect",
@@ -776,6 +783,7 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
     ];
     const DISCOVERY_COMMANDS: &[&str] = &[
         "version",
+        "doctor",
         "capabilities",
         "inspect",
         "glb.inspect",
@@ -879,9 +887,13 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
                 "schemaVersion": 1,
                 "product": "RageLab",
                 "version": env!("CARGO_PKG_VERSION"),
+                "build": ragelab_engine::core_build_metadata(),
+                "compiledModules": ragelab_engine::compiled_core_modules(),
+                "assetFormats": ragelab_engine::compiled_asset_formats(),
+                "externalDependencies": diagnostics::external_dependency_capabilities(),
                 "commands": DISCOVERY_COMMANDS,
                 "canonicalCommands": CANONICAL_COMMANDS,
-                "structuredOutput": ["version", "capabilities", "inspect", "glb.inspect", "glb.validate", "ydr.inspect", "ydr.validate", "glb.geometry", "glb.tree", "glb.export", "glb.batch", "glb.profile.init", "glb.profile.validate", "validate", "spatial", "preview", "plan", "apply", "workspace.preflight", "workspace.export", "workspace.scene", "workspace.render-package", "render.asset", "render.scene", "render.compare", "gta.discover", "gta.catalog", "gta.rpf-order", "gta.rpf-index", "gta.world-query", "gta.mlo-validate", "rpf.keys", "rpf.info", "rpf.list", "rpf.extract", "fivem.discover"],
+                "structuredOutput": ["version", "doctor", "capabilities", "inspect", "glb.inspect", "glb.validate", "ydr.inspect", "ydr.validate", "glb.geometry", "glb.tree", "glb.export", "glb.batch", "glb.profile.init", "glb.profile.validate", "validate", "spatial", "preview", "plan", "apply", "workspace.preflight", "workspace.export", "workspace.scene", "workspace.render-package", "render.asset", "render.scene", "render.compare", "gta.discover", "gta.catalog", "gta.rpf-order", "gta.rpf-index", "gta.world-query", "gta.mlo-validate", "rpf.keys", "rpf.info", "rpf.list", "rpf.extract", "fivem.discover"],
                 "legacyAliases": LEGACY_ALIASES,
                 "responseEnvelope": {
                     "schema": agent::RESPONSE_SCHEMA,
@@ -890,7 +902,42 @@ fn print_capabilities(json_output: bool) -> Result<(), Box<dyn Error>> {
             }))?
         );
     } else {
+        let build = ragelab_engine::core_build_metadata();
         println!("RageLab {} capabilities:", env!("CARGO_PKG_VERSION"));
+        println!(
+            "Core revision: {}{} | API compatibility: {}",
+            build.revision,
+            if build.dirty { " (dirty)" } else { "" },
+            build.api_compatibility_version
+        );
+        println!(
+            "Target: {} | profile: {} | features: {}",
+            build.target.triple,
+            build.profile,
+            if build.features.is_empty() {
+                "none".to_owned()
+            } else {
+                build.features.join(",")
+            }
+        );
+        println!(
+            "Compiled modules: {}",
+            ragelab_engine::compiled_core_modules().join(", ")
+        );
+        println!("Asset formats:");
+        for format in ragelab_engine::compiled_asset_formats() {
+            println!(
+                "  {} (.{}): {}{}",
+                format.id,
+                format.extension,
+                format.support,
+                format
+                    .limitation
+                    .map(|value| format!(" — {value}"))
+                    .unwrap_or_default()
+            );
+        }
+        println!("Commands:");
         for command in CANONICAL_COMMANDS {
             println!("{command}");
         }
@@ -911,7 +958,7 @@ ragelab glb tree <file.glb> [--json]\n  \
 ragelab glb export <source.glb> --output <output.ydr> [--node <index> ...] [--profile <profile.json>] [--shader-template <template.yft|template.ydr>] [--shader-index <n>] [--overwrite] [--json]\n  ragelab glb batch <manifest.json> [--json]\n  \
 ragelab glb profile init <source.glb> --output <profile.json> [--overwrite] [--json]\n  \
 ragelab glb profile validate <source.glb> <profile.json> [--json]\n  \
-ragelab capabilities [file] [--json]\n  \
+ragelab capabilities [file] [--json]\n  ragelab doctor [--json]\n  \
 ragelab validate <file> [--json]\n  \
 ragelab spatial <file> [--json]\n  \
 ragelab preview <file> [--drawable-index <n>] [--max-primitives <n>] [--max-vertices <n>] [--max-indices <n>] [--max-shaders <n>] [--max-texture-references <n>] [--max-children <n>] [--max-materials <n>] [--json]\n  \

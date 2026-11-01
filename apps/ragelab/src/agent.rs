@@ -36,6 +36,7 @@ pub fn is_structured_command(command: &str) -> bool {
     matches!(
         command,
         "version"
+            | "doctor"
             | "capabilities"
             | "inspect"
             | "glb.inspect"

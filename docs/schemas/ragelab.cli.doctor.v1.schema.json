@@ -1,0 +1,454 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ragelab.dev/schemas/ragelab.cli.doctor.v1.schema.json",
+  "title": "RageLab CLI Doctor Report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schemaVersion",
+    "status",
+    "readOnly",
+    "build",
+    "compiledModules",
+    "assetFormats",
+    "externalDependencies",
+    "environment",
+    "checks",
+    "summary",
+    "actionsTaken"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ragelab.cli.doctor"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "status": {
+      "enum": [
+        "healthy",
+        "warning",
+        "blocked"
+      ]
+    },
+    "readOnly": {
+      "const": true
+    },
+    "build": {
+      "$ref": "#/$defs/build"
+    },
+    "compiledModules": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "assetFormats": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/assetFormat"
+      }
+    },
+    "externalDependencies": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/externalDependency"
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "renderer",
+        "gtaVLegacy",
+        "fivem",
+        "filesystem"
+      ],
+      "properties": {
+        "renderer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "gtaVLegacy": {
+          "$ref": "#/$defs/installationProbe"
+        },
+        "fivem": {
+          "$ref": "#/$defs/installationProbe"
+        },
+        "filesystem": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "currentDirectory",
+            "currentDirectoryIsDirectory",
+            "metadataReadable",
+            "writeProbePerformed",
+            "implicitOutputDirectoryRequired"
+          ],
+          "properties": {
+            "currentDirectory": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "currentDirectoryIsDirectory": {
+              "type": "boolean"
+            },
+            "metadataReadable": {
+              "type": "boolean"
+            },
+            "writeProbePerformed": {
+              "const": false
+            },
+            "implicitOutputDirectoryRequired": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "category",
+          "severity",
+          "status",
+          "summary",
+          "details",
+          "recommendation",
+          "affectsCommands"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "category": {
+            "type": "string",
+            "minLength": 1
+          },
+          "severity": {
+            "enum": [
+              "info",
+              "warning",
+              "blocker"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "minLength": 1
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "details": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recommendation": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "affectsCommands": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "checks",
+        "info",
+        "warnings",
+        "blockers"
+      ],
+      "properties": {
+        "checks": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "info": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "warnings": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "blockers": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "actionsTaken": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "revision",
+        "dirty",
+        "apiCompatibilityVersion",
+        "profile",
+        "target",
+        "features"
+      ],
+      "properties": {
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dirty": {
+          "type": "boolean"
+        },
+        "apiCompatibilityVersion": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "triple",
+            "operatingSystem",
+            "architecture",
+            "environment",
+            "families"
+          ],
+          "properties": {
+            "triple": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operatingSystem": {
+              "type": "string",
+              "minLength": 1
+            },
+            "architecture": {
+              "type": "string",
+              "minLength": 1
+            },
+            "environment": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "families": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "features": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "assetFormat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "extension",
+        "semanticParser",
+        "support",
+        "limitation"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "extension": {
+          "type": "string",
+          "minLength": 1
+        },
+        "semanticParser": {
+          "type": "boolean"
+        },
+        "support": {
+          "enum": [
+            "semantic",
+            "containerOnly"
+          ]
+        },
+        "limitation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "externalDependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "requiredGlobally",
+        "appliesTo",
+        "configuration",
+        "description"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requiredGlobally": {
+          "type": "boolean"
+        },
+        "appliesTo": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "configuration": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "installationProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "configuredEnvironmentVariable",
+        "environmentVariableSet",
+        "status",
+        "candidates",
+        "validInstallations",
+        "linkedLegacyInstallations",
+        "detectedPaths",
+        "globallyRequired"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "configuredEnvironmentVariable": {
+          "type": "string",
+          "minLength": 1
+        },
+        "environmentVariableSet": {
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "available",
+            "notDetected",
+            "incomplete"
+          ]
+        },
+        "candidates": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "validInstallations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "linkedLegacyInstallations": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "detectedPaths": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "root",
+              "valid",
+              "editionOrRelationship",
+              "discoveredBy"
+            ],
+            "properties": {
+              "root": {
+                "type": "string",
+                "minLength": 1
+              },
+              "valid": {
+                "type": "boolean"
+              },
+              "editionOrRelationship": {
+                "type": "string",
+                "minLength": 1
+              },
+              "discoveredBy": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        "globallyRequired": {
+          "const": false
+        }
+      }
+    }
+  }
+}

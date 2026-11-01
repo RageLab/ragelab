@@ -53,6 +53,8 @@ ragelab glb export model.glb --profile model.gta-materials.json --output model.y
 ragelab glb export model.glb --profile model.gta-materials.json --shader-template template.yft --shader-index 0 --output model.ydr --json
 ragelab glb batch batch.json --json
 ragelab capabilities asset.ydr --json
+ragelab capabilities --json
+ragelab doctor --json
 ragelab spatial asset.ydr --json
 ragelab preview asset.ydr --json
 ragelab plan operation.json --json
@@ -89,7 +91,7 @@ ragelab capabilities --json
 
 Legacy flat command names remain available as compatibility aliases during the 0.x series. New integrations should use the canonical namespace form.
 
-Structured commands return versioned JSON and deterministic process exit codes. The contract is documented in [docs/CLI_CONTRACT.md](docs/CLI_CONTRACT.md), native game discovery in [docs/DISCOVERY.md](docs/DISCOVERY.md), GTA catalog coverage in [docs/CATALOG.md](docs/CATALOG.md), headless preview behavior in [docs/PREVIEW.md](docs/PREVIEW.md), workspace export behavior in [docs/EXPORT.md](docs/EXPORT.md), current format/adapter coverage in [docs/CAPABILITIES.md](docs/CAPABILITIES.md), the GLB import/material-authoring and reproducible export-report workflow in [docs/GLB_IMPORT.md](docs/GLB_IMPORT.md), and the strict multi-asset batch pipeline in [docs/GLB_BATCH.md](docs/GLB_BATCH.md).
+Structured commands return versioned JSON and deterministic process exit codes. The contract is documented in [docs/CLI_CONTRACT.md](docs/CLI_CONTRACT.md), native game discovery in [docs/DISCOVERY.md](docs/DISCOVERY.md), GTA catalog coverage in [docs/CATALOG.md](docs/CATALOG.md), headless preview behavior in [docs/PREVIEW.md](docs/PREVIEW.md), workspace export behavior in [docs/EXPORT.md](docs/EXPORT.md), current format/adapter coverage in [docs/CAPABILITIES.md](docs/CAPABILITIES.md), the GLB import/material-authoring and reproducible export-report workflow in [docs/GLB_IMPORT.md](docs/GLB_IMPORT.md), and the strict multi-asset batch pipeline in [docs/GLB_BATCH.md](docs/GLB_BATCH.md), and read-only environment diagnostics in [docs/DOCTOR.md](docs/DOCTOR.md).
 
 ## Repository layout
 

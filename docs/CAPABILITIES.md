@@ -35,6 +35,14 @@ Writer eligibility remains fail-closed. A listed operation is not permission to 
 | FiveM environment | default/explicit installation discovery, storage evidence, `CitizenFX.ini` metadata, validated GTA Legacy relationship | none | `fivem discover --json` | Available for current Legacy environment scope |
 | GTA catalog | engine-owned loose-filesystem enumeration with Legacy-install provenance and explicit RPF boundary reporting | deterministic path catalog output | `gta catalog --json`; `gta vanilla-index` compatibility | Available for loose filesystem trees; partial on raw RPF installations |
 
+## Global build and environment diagnostics
+
+`ragelab doctor [--json]` is the read-only environment/build diagnostic. Its versioned report is defined by [ragelab.cli.doctor.v1.schema.json](schemas/ragelab.cli.doctor.v1.schema.json). It exposes build target/profile/features, Core revision and dirty-at-build state, the compiled module registry, semantic versus container-only asset format support, and environment checks with `info`, `warning` or `blocker` severity.
+
+`ragelab capabilities --json` retains the existing `ragelab.cli.capabilities` v1 schema and adds build metadata, compiled modules, the actual Engine asset-format registry and optional external dependencies. See [ragelab.cli.capabilities.v1.schema.json](schemas/ragelab.cli.capabilities.v1.schema.json).
+
+GPU availability affects only `render.asset` and `render.scene`. GTA V Legacy and FiveM installations are optional target data; their absence does not block Core parsers, validators or GLB/YDR authoring. Incomplete installations warn only on the related command IDs. Doctor does not create files/directories, test write access, modify PATH/environment/Registry, or change game installations. Its wgpu check creates and drops a transient device; native discovery uses the existing read-only GTA/FiveM discovery APIs. Full read-only semantics and build metadata timing are documented in [DOCTOR.md](DOCTOR.md).
+
 ## Canonical agent workflow
 
 The intended automation sequence is:

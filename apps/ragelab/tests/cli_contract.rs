@@ -227,6 +227,7 @@ fn global_capabilities_preserve_legacy_ids_and_advertise_canonical_ids() {
     assert!(commands.iter().any(|value| value == "ydr-info"));
     assert!(commands.iter().any(|value| value == "ydr.info"));
     assert!(canonical.iter().any(|value| value == "ydr.info"));
+    assert!(canonical.iter().any(|value| value == "doctor"));
     assert!(canonical.iter().any(|value| value == "glb.inspect"));
     assert!(canonical.iter().any(|value| value == "glb.batch"));
     assert!(canonical.iter().any(|value| value == "ydr.inspect"));
@@ -242,6 +243,7 @@ fn global_capabilities_preserve_legacy_ids_and_advertise_canonical_ids() {
         "ydr.validate",
         "glb.profile.init",
         "glb.profile.validate",
+        "doctor",
     ] {
         assert!(body["structuredOutput"]
             .as_array()
@@ -262,6 +264,36 @@ fn global_capabilities_preserve_legacy_ids_and_advertise_canonical_ids() {
     assert!(canonical.iter().any(|value| value == "gta.world-query"));
     assert!(canonical.iter().any(|value| value == "fivem.discover"));
     assert_eq!(body["responseEnvelope"]["schema"], "ragelab.cli.response");
+    assert_eq!(body["schema"], "ragelab.cli.capabilities");
+    assert!(!body["build"]["target"]["triple"]
+        .as_str()
+        .unwrap()
+        .is_empty());
+    assert!(body["compiledModules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|module| module == "diagnostics"));
+    assert!(body["assetFormats"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|format| format["id"] == "YDR" && format["semanticParser"] == true));
+    assert!(body["assetFormats"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|format| format["id"] == "GLB 2.0" && format["extension"] == "glb"));
+    assert!(body["assetFormats"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|format| format["id"] == "YCD" && format["support"] == "containerOnly"));
+    assert!(body["externalDependencies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|dependency| dependency["requiredGlobally"] == false));
     assert!(body["structuredOutput"]
         .as_array()
         .unwrap()
@@ -324,6 +356,73 @@ fn global_capabilities_preserve_legacy_ids_and_advertise_canonical_ids() {
         .unwrap()
         .iter()
         .any(|value| value == "fivem.discover"));
+}
+
+#[test]
+fn doctor_json_is_read_only_and_reports_compiled_capabilities() {
+    let output = binary()
+        .args(["doctor", "--json"])
+        .output()
+        .expect("ragelab doctor should run");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body = stdout_json(&output);
+    assert_eq!(body["schema"], "ragelab.cli.doctor");
+    assert_eq!(body["schemaVersion"], 1);
+    assert_eq!(body["readOnly"], true);
+    assert_eq!(body["actionsTaken"], json!([]));
+    assert_eq!(body["summary"]["blockers"], 0);
+    assert_eq!(
+        body["summary"]["checks"].as_u64().unwrap() as usize,
+        body["checks"].as_array().unwrap().len()
+    );
+    assert!(!body["build"]["target"]["triple"]
+        .as_str()
+        .unwrap()
+        .is_empty());
+    assert!(body["compiledModules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|module| module == "diagnostics"));
+    assert_eq!(
+        body["environment"]["filesystem"]["writeProbePerformed"],
+        false
+    );
+    assert_eq!(
+        body["environment"]["filesystem"]["implicitOutputDirectoryRequired"],
+        false
+    );
+    assert!(body["externalDependencies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|dependency| dependency["requiredGlobally"] == false));
+    assert!(body["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["id"] == "core.moduleRegistry" && item["severity"] == "info"));
+}
+
+#[test]
+fn doctor_human_output_includes_summary_and_read_only_policy() {
+    let output = binary()
+        .args(["doctor"])
+        .output()
+        .expect("ragelab doctor should run");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("RageLab doctor"));
+    assert!(stdout.contains("target "));
+    assert!(stdout.contains("compiled modules:"));
+    assert!(stdout.contains("summary:"));
+    assert!(stdout.contains("read-only: true; actions taken: 0"));
 }
 
 #[test]

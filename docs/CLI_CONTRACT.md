@@ -33,7 +33,7 @@ Errors use the same schema:
 
 Consumers must key compatibility decisions on `schema` and `schemaVersion`, not on human-readable output. The exact common-envelope v1 shape is published as [JSON Schema](schemas/ragelab.cli.response.v1.schema.json). Domain payloads retain their own `schema`/`schemaVersion` where defined.
 
-The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. The GLB-specific validation command `ragelab glb validate <source.glb> [--profile <profile.json>] [--shader-template <source.yft|source.ydr>] [--shader-index <n>] [--strict] [--json]` returns the common response envelope with domain payload `ragelab.glb.validation` v1, described by [ragelab.glb.validation.v1.schema.json](schemas/ragelab.glb.validation.v1.schema.json). Its failure envelope includes the full report in `data`, with exit code 3 for unsupported pipeline features and 4 for invalid data / strict warnings. The YDR-specific commands `ragelab ydr inspect <file.ydr> [--json]` and `ragelab ydr validate <file.ydr> [--strict] [--json]` return domain payloads `ragelab.ydr.inspection` v1 and `ragelab.ydr.validation` v1, defined by [ragelab.ydr.inspection.v1.schema.json](schemas/ragelab.ydr.inspection.v1.schema.json) and [ragelab.ydr.validation.v1.schema.json](schemas/ragelab.ydr.validation.v1.schema.json). Validation failure retains the complete report in `data`: exit code 3 means a recognized but unsupported YDR feature/texture format, and exit code 4 means invalid data or a warning promoted by `--strict`. The reports separately expose container validity, typed format validity, structural audit and in-memory semantic reopen; neither report asserts CodeWalker GUI acceptance or GTA/FiveM runtime renderability (`runtimeRenderable=false`). Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `spatial <file> --json`, `preview <file> --json`, `plan <operation.json> --json`, `apply <operation.json> --json`, `workspace preflight ... --json`, `workspace export ... --json`, `workspace scene ... --json`, `workspace render-package ... --json`, `render asset ... --json`, `render scene ... --json`, `render compare ... --json`, `gta discover --json`, `gta catalog ... --json`, `gta rpf-index ... --json`, `gta world-query ... --json`, and `fivem discover --json` use the common response envelope.
+The discovery commands `version --json` and global `capabilities --json` retain their dedicated version-1 schemas for compatibility. `doctor --json` returns the dedicated `ragelab.cli.doctor` v1 report, defined by [ragelab.cli.doctor.v1.schema.json](schemas/ragelab.cli.doctor.v1.schema.json), rather than the generic response envelope. The GLB-specific validation command `ragelab glb validate <source.glb> [--profile <profile.json>] [--shader-template <source.yft|source.ydr>] [--shader-index <n>] [--strict] [--json]` returns the common response envelope with domain payload `ragelab.glb.validation` v1, described by [ragelab.glb.validation.v1.schema.json](schemas/ragelab.glb.validation.v1.schema.json). Its failure envelope includes the full report in `data`, with exit code 3 for unsupported pipeline features and 4 for invalid data / strict warnings. The YDR-specific commands `ragelab ydr inspect <file.ydr> [--json]` and `ragelab ydr validate <file.ydr> [--strict] [--json]` return domain payloads `ragelab.ydr.inspection` v1 and `ragelab.ydr.validation` v1, defined by [ragelab.ydr.inspection.v1.schema.json](schemas/ragelab.ydr.inspection.v1.schema.json) and [ragelab.ydr.validation.v1.schema.json](schemas/ragelab.ydr.validation.v1.schema.json). Validation failure retains the complete report in `data`: exit code 3 means a recognized but unsupported YDR feature/texture format, and exit code 4 means invalid data or a warning promoted by `--strict`. The reports separately expose container validity, typed format validity, structural audit and in-memory semantic reopen; neither report asserts CodeWalker GUI acceptance or GTA/FiveM runtime renderability (`runtimeRenderable=false`). Per-file `capabilities <file> --json`, `inspect <file> --json`, `validate <file> --json`, `spatial <file> --json`, `preview <file> --json`, `plan <operation.json> --json`, `apply <operation.json> --json`, `workspace preflight ... --json`, `workspace export ... --json`, `workspace scene ... --json`, `workspace render-package ... --json`, `render asset ... --json`, `render scene ... --json`, `render compare ... --json`, `gta discover --json`, `gta catalog ... --json`, `gta rpf-index ... --json`, `gta world-query ... --json`, and `fivem discover --json` use the common response envelope.
 
 ## Agent-first surface
 
@@ -93,6 +93,7 @@ Global command discovery:
 ```bash
 ragelab version --json
 ragelab capabilities --json
+ragelab doctor --json
 ```
 
 Native GTA V Legacy installation discovery:
@@ -121,11 +122,17 @@ The `ragelab.gta.catalog` report distinguishes complete loose-filesystem enumera
 
 Global `capabilities --json` exposes:
 
+- `build`: build version, Core revision/dirty-at-build metadata, API compatibility version, Cargo target/profile and Engine feature flags;
+- `compiledModules`: module IDs generated by the same Engine declaration that compiles/re-exports them;
+- `assetFormats`: semantic parser versus container-only support and known limitations from the Engine asset format registry;
+- `externalDependencies`: optional dependencies and the command IDs that require them;
 - `commands`: every currently accepted command ID, including compatibility aliases;
 - `canonicalCommands`: preferred command IDs for new integrations;
 - `structuredOutput`: commands with versioned machine-readable output;
 - `legacyAliases`: flat command IDs retained for compatibility;
 - `responseEnvelope`: the current common response schema.
+
+The global capabilities schema remains `ragelab.cli.capabilities` v1 and is published as [ragelab.cli.capabilities.v1.schema.json](schemas/ragelab.cli.capabilities.v1.schema.json). The `doctor` report separates `info`, `warning`, and `blocker` checks; consumers should inspect `status` and `summary.blockers`. Missing GPU, GTA V Legacy or FiveM installations are scoped to their affected commands and do not globally block parsing/validation. Doctor is read-only: it does not create files/directories, test write access, change PATH/environment/Registry, or modify game installations. It does initialize and then drop a transient wgpu device for the same offscreen-renderer readiness check used by rendering commands. See [DOCTOR.md](DOCTOR.md) for the detailed boundary and build metadata semantics.
 
 Per-asset discovery:
 
