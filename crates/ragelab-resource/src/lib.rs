@@ -851,6 +851,50 @@ mod tests {
     }
 
     #[test]
+    fn rsc7_header_probe_and_resource_parser_handle_bounded_mutation_corpus() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let mut state = 0x8EBC_6AF0_9C88_C6E3_u64;
+        for case in 0..256_usize {
+            let mut header = [0_u8; 16];
+            for byte in &mut header {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                *byte = (state >> 24) as u8;
+            }
+            if case % 2 == 0 {
+                header[..4].copy_from_slice(&RSC7_MAGIC);
+            }
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                let _ = Rsc7Header::parse(&header);
+                let _ = Rsc7Probe::parse(&header);
+            }));
+            assert!(outcome.is_ok(), "RSC7 header case {case} panicked");
+        }
+
+        let flags = flags_for_single_512_page();
+        let seed = build_resource(&vec![0_u8; 512], &[], flags, 0);
+        for case in 0..128_usize {
+            let mut bytes = seed.clone();
+            if bytes.len() > 16 {
+                let index = 16 + case % (bytes.len() - 16);
+                bytes[index] ^= ((case as u8).wrapping_mul(37)).max(1);
+            }
+            if case % 5 == 0 && bytes.len() > 16 {
+                bytes.truncate(16 + case % (bytes.len() - 16 + 1));
+            }
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                let _ = Rsc7Resource::parse(&bytes);
+            }));
+            assert!(
+                outcome.is_ok(),
+                "RSC7 resource mutation case {case} panicked"
+            );
+        }
+    }
+
+    #[test]
     fn page_flags_decode_single_512_page() {
         assert_eq!(decode_page_size(flags_for_single_512_page()), 512);
     }

@@ -106,5 +106,92 @@
       "expectedKind": "ymap",
       "notes": "Run only against a user-owned installed Legacy build; no bytes are committed."
     }
+  ],
+  "validationGates": [
+    {
+      "id": "repository-tests",
+      "layer": "repository",
+      "status": "required_ci",
+      "command": "cargo test --locked --workspace",
+      "evidence": "Synthetic fixtures and deterministic mutation corpora only."
+    },
+    {
+      "id": "static-analysis",
+      "layer": "repository",
+      "status": "required_ci",
+      "command": "cargo clippy --locked --workspace --all-targets -- -D warnings"
+    },
+    {
+      "id": "format-and-compile",
+      "layer": "repository",
+      "status": "required_ci",
+      "commands": [
+        "cargo fmt --all -- --check",
+        "cargo check --locked --workspace"
+      ]
+    },
+    {
+      "id": "semantic-round-trip",
+      "layer": "semantic",
+      "status": "required_ci",
+      "evidence": "Writers reopen their own output and compare structural metadata, segments or resource payloads."
+    },
+    {
+      "id": "codewalker-core-parser",
+      "layer": "independent-parser",
+      "status": "external_optional",
+      "lastRecordedEvidence": {
+        "at": "2026-10-30",
+        "tool": "CodeWalker Core parser",
+        "revision": "485d56b",
+        "accepted": 5,
+        "rejected": 0,
+        "scope": "Five generated YDR presets; Drawable, geometry, ShaderGroup, samplers and TextureDictionary inspected.",
+        "automation": "manual_external_not_ci"
+      },
+      "notes": "Historical independent Core parser evidence is recorded above. No redistributable CodeWalker Core CLI adapter is currently wired into CI. GUI acceptance remains a separate manual gate."
+    },
+    {
+      "id": "codewalker-gui",
+      "layer": "gui-acceptance",
+      "status": "manual_external",
+      "lastRecordedEvidence": {
+        "at": "2026-10-31",
+        "application": "CodeWalker Model Viewer",
+        "asset": "stylized_halloween_asset_preview_v3.ydr",
+        "result": "user_confirmed_visible",
+        "drawnGeometryCount": 140,
+        "scope": "One generated YDR; 28 geometries across supported Default and PNCTT layouts.",
+        "automation": "manual_gui_user_confirmed"
+      },
+      "notes": "Historical GUI evidence is recorded above. GUI loading/render acceptance is distinct from parser success and game runtime."
+    },
+    {
+      "id": "gta-v-legacy-runtime",
+      "layer": "game-runtime",
+      "status": "waived",
+      "requiresExplicitApprovalToReopen": true,
+      "notes": "Previously waived standalone Legacy runtime gate. Do not run or reopen without explicit user authorization."
+    },
+    {
+      "id": "fivem-runtime",
+      "layer": "runtime",
+      "status": "manual_external",
+      "lastRecordedEvidence": {
+        "at": "2026-10-31",
+        "result": "PASS_USER_CONFIRMED",
+        "presets": [
+          "normal.sps",
+          "spec.sps",
+          "normal_spec_tnt.sps",
+          "emissivenight.sps",
+          "emissive.sps"
+        ],
+        "evidenceSource": "user_confirmation_in_conversation",
+        "logsOrScreenshotsArchived": false,
+        "runtimeRenderableScope": "FiveM_only"
+      },
+      "notes": "Historical user-confirmed FiveM runtime acceptance is recorded above for the five listed presets. No logs/screenshots were archived. New runtime checks require a user-owned installation and separate approval; no proprietary bytes are committed."
+    }
   ]
 }

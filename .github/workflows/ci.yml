@@ -25,11 +25,11 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Check
-        run: cargo check --workspace
+        run: cargo check --locked --workspace
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
   visual-regression:
     runs-on: windows-latest
@@ -39,7 +39,7 @@ jobs:
         with:
           toolchain: 1.80.0
       - name: Build CLI renderer
-        run: cargo build -p ragelab
+        run: cargo build --locked -p ragelab
       - name: Repeat-render synthetic fixtures and compare exactly
         run: python scripts/run_visual_regression.py --tolerance 0
 

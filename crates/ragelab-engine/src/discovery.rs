@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     env, fs,
+    io::{self, Read},
     path::{Path, PathBuf},
 };
 
@@ -14,6 +15,9 @@ pub const GTA_V_LEGACY_ENV: &str = "RAGELAB_GTA5_LEGACY";
 pub const FIVEM_DISCOVERY_SCHEMA: &str = "ragelab.fivem.discovery";
 pub const FIVEM_DISCOVERY_SCHEMA_VERSION: u64 = 1;
 pub const FIVEM_ENV: &str = "RAGELAB_FIVEM";
+
+const MAX_STEAM_METADATA_BYTES: usize = 1024 * 1024;
+const MAX_CITIZENFX_INI_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -494,6 +498,39 @@ fn parse_vdf_field(input: &str, key: &str) -> Option<String> {
 }
 
 #[cfg(any(windows, test))]
+fn read_bounded_text(path: &Path, max_bytes: usize) -> io::Result<String> {
+    let file = fs::File::open(path)?;
+    let limit = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+    let metadata_length = file.metadata()?.len();
+    if metadata_length > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "metadata file {} is {} bytes; limit is {} bytes",
+                path.display(),
+                metadata_length,
+                max_bytes
+            ),
+        ));
+    }
+
+    let mut body = String::new();
+    file.take(limit.saturating_add(1))
+        .read_to_string(&mut body)?;
+    if body.len() > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "metadata file {} exceeds the {} byte read limit",
+                path.display(),
+                max_bytes
+            ),
+        ));
+    }
+    Ok(body)
+}
+
+#[cfg(any(windows, test))]
 fn parse_steam_manifest(input: &str) -> Option<SteamManifest> {
     let app_id = parse_vdf_field(input, "appid")?.parse::<u32>().ok()?;
     let install_dir = parse_vdf_field(input, "installdir")?;
@@ -577,7 +614,7 @@ fn discover_windows_steam_candidates() -> Vec<CandidateSeed> {
     for steam_root in steam_roots {
         let mut libraries = vec![steam_root.clone()];
         let library_file = steam_root.join("steamapps").join("libraryfolders.vdf");
-        if let Ok(body) = fs::read_to_string(&library_file) {
+        if let Ok(body) = read_bounded_text(&library_file, MAX_STEAM_METADATA_BYTES) {
             libraries.extend(steam_library_paths(&body));
         }
         dedupe_paths(&mut libraries);
@@ -586,7 +623,7 @@ fn discover_windows_steam_candidates() -> Vec<CandidateSeed> {
             let manifest_path = library
                 .join("steamapps")
                 .join(format!("appmanifest_{GTA_V_LEGACY_STEAM_APP_ID}.acf"));
-            let Ok(body) = fs::read_to_string(&manifest_path) else {
+            let Ok(body) = read_bounded_text(&manifest_path, MAX_STEAM_METADATA_BYTES) else {
                 continue;
             };
             let Some(manifest) = parse_steam_manifest(&body) else {
@@ -794,7 +831,7 @@ fn validate_fivem_candidate(seed: FiveMCandidateSeed) -> FiveMInstallation {
     let cache_root = data_root.join("cache");
     let citizen_root = app_root.join("citizen");
 
-    let ini_body = fs::read_to_string(&citizen_fx_ini).ok();
+    let ini_body = read_bounded_text(&citizen_fx_ini, MAX_CITIZENFX_INI_BYTES).ok();
     let iv_path = ini_body
         .as_deref()
         .and_then(|body| parse_citizen_fx_game_value(body, "IVPath"))
@@ -1110,6 +1147,43 @@ mod tests {
         assert_eq!(manifest.install_dir, "Grand Theft Auto V");
         assert_eq!(manifest.build_id.as_deref(), Some("24129523"));
         assert_eq!(manifest.name.as_deref(), Some("Grand Theft Auto V Legacy"));
+    }
+
+    #[test]
+    fn bounded_metadata_reader_rejects_oversized_manifest_files() {
+        let path = temp_root("oversized-metadata");
+        fs::write(&path, vec![b'x'; 17]).expect("write oversized metadata fixture");
+        let error = read_bounded_text(&path, 16).expect_err("oversized input must fail closed");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("16 bytes"));
+        fs::remove_file(path).expect("remove metadata fixture");
+    }
+
+    #[test]
+    fn steam_manifest_parsers_handle_deterministic_mutation_corpus() {
+        let seed = br#"\n"AppState"\n{\n  "appid" "271590"\n  "name" "Grand Theft Auto V Legacy"\n  "installdir" "Grand Theft Auto V"\n  "buildid" "24129523"\n}\n"#;
+        let mut state = 0xD1B5_4A32_D192_ED03_u64;
+        for case in 0..256_usize {
+            let mut bytes = seed.to_vec();
+            let mutation_count = 1 + case % 5;
+            for _ in 0..mutation_count {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let index = (state as usize) % bytes.len();
+                bytes[index] ^= ((state >> 32) as u8) | 1;
+            }
+            if case % 7 == 0 {
+                bytes.truncate(case % (bytes.len() + 1));
+            }
+            let input = String::from_utf8_lossy(&bytes);
+            let result = std::panic::catch_unwind(|| {
+                let _ = parse_steam_manifest(&input);
+                let _ = steam_library_paths(&input);
+                let _ = parse_vdf_field(&input, "appid");
+            });
+            assert!(result.is_ok(), "manifest mutation case {case} panicked");
+        }
     }
 
     #[test]

@@ -632,6 +632,50 @@ mod tests {
     }
 
     #[test]
+    fn parser_handles_deterministic_mutation_and_random_corpus_without_panicking() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let seed = parent_txd_fixture();
+        let mut state = 0xE703_7ED1_A0B4_28DB_u64;
+        for case in 0..256_usize {
+            let mut bytes = if case % 2 == 0 {
+                seed.clone()
+            } else {
+                let length = case % 513;
+                let mut random = vec![0_u8; length];
+                for byte in &mut random {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    *byte = (state >> 24) as u8;
+                }
+                if random.len() >= RBF_MAGIC.len() {
+                    random[..RBF_MAGIC.len()].copy_from_slice(&RBF_MAGIC);
+                }
+                random
+            };
+            if !bytes.is_empty() && case % 2 == 0 {
+                let mutation_count = 1 + case % 5;
+                for _ in 0..mutation_count {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    let index = (state as usize) % bytes.len();
+                    bytes[index] ^= ((state >> 32) as u8) | 1;
+                }
+            }
+            if case % 9 == 0 {
+                bytes.truncate(case % (bytes.len() + 1));
+            }
+
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                let _ = RbfFile::from_bytes(&bytes);
+            }));
+            assert!(outcome.is_ok(), "RBF mutation case {case} panicked");
+        }
+    }
+
+    #[test]
     fn rejects_trailing_bytes_after_root_close() {
         let mut bytes = parent_txd_fixture();
         bytes.push(0);
